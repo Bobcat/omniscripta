@@ -21,3 +21,7 @@ data/
 
 # Caches
 .cache/
+
+# VS Code local workspace
+.vscode/
+*.code-workspace
