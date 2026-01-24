@@ -1,0 +1,423 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <script>
+    (function () {
+      const isSmall = window.matchMedia && window.matchMedia("(max-width: 900px)").matches;
+      const isCoarse = window.matchMedia && window.matchMedia("(pointer: coarse)").matches; // touch
+      const isTouch = ("ontouchstart" in window) || (navigator.maxTouchPoints > 0);
+
+      const isMobileLike = isSmall && (isCoarse || isTouch);
+
+      // allow override: ?force_desktop=1
+      const params = new URLSearchParams(location.search);
+      const forceDesktop = params.get("force_desktop") === "1";
+
+      if (isMobileLike && !forceDesktop) {
+        // keep the original url so user can open on desktop later
+        const target = "/mobile.html?from=" + encodeURIComponent(location.pathname + location.search);
+        location.replace(target);
+      }
+    })();
+  </script>
+
+  <title>123transcribe — Upload • Transcribe • Edit & Export</title>
+  <meta name="description" content="Upload an audio file, get a transcript, edit speakers and text, then export a clean document." />
+
+  <style>
+    :root{
+      --bg: #f6f7fb;
+      --card: #ffffff;
+      --ink: #121721;
+      --muted: #535d6e;
+      --muted2:#768091;
+      --border:#dce2ec;
+      --accent:#2463eb;
+      --accentSoft:#e6f0ff;
+      --shadow: 0 10px 26px rgba(18,23,33,.07);
+      --r: 14px;
+    }
+    *{ box-sizing:border-box; }
+    body{
+      margin:0;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, sans-serif;
+      background: var(--bg);
+      color: var(--ink);
+    }
+    .wrap{ max-width: 1120px; margin: 0 auto; padding: 14px 14px 22px; }
+    .top{ display:flex; align-items:center; gap:10px; padding: 4px 0 10px; }
+    .dot{ width: 14px; height: 14px; border-radius: 999px; background: var(--accent); }
+    .brand{ font-weight: 800; letter-spacing: .2px; font-size: 14px; }
+
+    h1{
+      margin: 8px 0 6px;
+      font-size: clamp(20px, 2.7vw, 34px);
+      letter-spacing: -0.35px;
+      text-align:center;
+    }
+    .sub{
+      margin: 0 auto 12px;
+      max-width: 920px;
+      color: var(--muted);
+      font-size: 13.5px;
+      line-height: 1.45;
+      text-align:center;
+    }
+
+    .steps{
+      display:grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+      margin: 10px 0 12px;
+    }
+    @media (max-width: 900px){
+      .steps{ grid-template-columns: 1fr; }
+    }
+    .card{
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--r);
+      box-shadow: var(--shadow);
+      padding: 10px 10px 9px;
+    }
+    .badgeNum{
+      display:inline-flex;
+      width: 26px; height: 26px;
+      align-items:center; justify-content:center;
+      border-radius: 9px;
+      background: var(--accentSoft);
+      border: 1px solid #c8dafc;
+      color: var(--accent);
+      font-weight: 800;
+      margin-right: 8px;
+      vertical-align: middle;
+      font-size: 12px;
+    }
+    .cardTitle{
+      display:inline-block;
+      font-weight: 800;
+      font-size: 14px;
+      vertical-align: middle;
+    }
+    .cardText{
+      margin: 7px 0 0;
+      color: var(--muted);
+      line-height: 1.35;
+      font-size: 12.5px;
+    }
+
+    .panel{
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: calc(var(--r) + 2px);
+      box-shadow: var(--shadow);
+      padding: 12px;
+    }
+    .panel h2{ margin:0 0 2px; font-size: 14px; }
+    .panel .hint{ margin:0 0 8px; color: var(--muted); font-size: 12px; }
+
+    .btn{
+      width: 100%;
+      border: 1px solid #1a4fd1;
+      background: var(--accent);
+      color: #fff;
+      border-radius: 12px;
+      padding: 12px 12px;
+      font-size: 14px;
+      font-weight: 800;
+      cursor: pointer;
+    }
+    .btn:hover{ filter: brightness(1.03); }
+    .btn:disabled{ opacity: .72; cursor: not-allowed; }
+
+    .row{
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-top: 8px;
+    }
+    @media (max-width: 900px){
+      .row{ grid-template-columns: 1fr; }
+    }
+    label{ display:block; font-size: 11.5px; color: var(--muted2); margin: 6px 0 5px; }
+    select{
+      width: 100%;
+      border: 1px solid var(--border);
+      background: #fafbfd;
+      border-radius: 10px;
+      padding: 10px 9px;
+      font-size: 12.8px;
+      color: var(--ink);
+    }
+
+    .progressWrap{ margin-top: 10px; display:none; }
+    .bar{
+      height: 10px;
+      border-radius: 999px;
+      background: #eef2f7;
+      border: 1px solid var(--border);
+      overflow:hidden;
+    }
+    .fill{ width: 0%; height:100%; background: #93c5fd; transition: width 160ms linear; }
+    .pct{
+      margin-top: 5px;
+      text-align:center;
+      font-weight: 800;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .line{
+      margin-top: 8px;
+      font-size: 12.5px;
+      color: var(--muted);
+      line-height: 1.35;
+      display:none;
+    }
+    .line strong{ color: var(--ink); font-weight: 800; }
+
+    .fileline{
+      margin-top: 6px;
+      font-size: 12.5px;
+      color: var(--muted);
+      line-height: 1.35;
+      display:none;
+      word-break: break-word;
+    }
+
+    input[type="file"]{ display:none; }
+  </style>
+</head>
+
+<body>
+  <div class="wrap">
+    <div class="top">
+      <div class="dot" aria-hidden="true"></div>
+      <div class="brand">123transcribe</div>
+    </div>
+
+    <h1>1-2-3: Upload → Transcribe → Edit &amp; Export</h1>
+    <p class="sub">
+      Upload an audio file. When transcription is ready, the editor opens automatically so you can fix text and speakers.
+      Then export a clean document.
+    </p>
+
+    <div class="steps">
+      <div class="card">
+        <span class="badgeNum">1</span><span class="cardTitle">Upload</span>
+        <p class="cardText">Choose an audio file (MP3, WAV, M4A).</p>
+      </div>
+      <div class="card">
+        <span class="badgeNum">2</span><span class="cardTitle">Transcribe</span>
+        <p class="cardText">Automatic transcription with timestamps. Optional speaker diarization.</p>
+      </div>
+      <div class="card">
+        <span class="badgeNum">3</span><span class="cardTitle">Edit &amp; Export</span>
+        <p class="cardText">Fix text & speaker labels in the editor, then export a readable document.</p>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Get started</h2>
+
+      <input id="file" type="file" accept="audio/*,.mp3,.wav,.m4a,.flac,.ogg,.opus" />
+      <button class="btn" id="chooseBtn">Choose audio file</button>
+
+      <div class="row">
+        <div>
+          <label for="lang">Language</label>
+          <select id="lang">
+            <option value="en" selected>English</option>
+            <option value="nl">Dutch</option>
+            <option value="de">German</option>
+            <option value="fr">French</option>
+          </select>
+        </div>
+        <div>
+          <label for="spk">Speakers</label>
+          <select id="spk">
+            <option value="auto" selected>Auto</option>
+            <option value="2">2</option><option value="3">3</option><option value="4">4</option>
+            <option value="5">5</option><option value="6">6</option><option value="7">7</option>
+            <option value="8">8</option><option value="9">9</option><option value="10">10</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="progressWrap" id="progressWrap">
+        <div class="bar"><div class="fill" id="fill"></div></div>
+        <div class="pct" id="pct">0%</div>
+
+        <div class="fileline" id="fileline"></div>
+        <div class="line" id="stateline"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    (() => {
+      const fileEl = document.getElementById('file');
+      const chooseBtn = document.getElementById('chooseBtn');
+      const langEl = document.getElementById('lang');
+      const spkEl  = document.getElementById('spk');
+
+      const progressWrapEl = document.getElementById('progressWrap');
+      const fillEl = document.getElementById('fill');
+      const pctEl  = document.getElementById('pct');
+      const statelineEl = document.getElementById('stateline');
+      const filelineEl = document.getElementById('fileline');
+
+      let pollTimer = null;
+      let lastProgress = 0;
+
+      function clamp01(x){
+        if (typeof x !== 'number' || !isFinite(x)) return 0;
+        return Math.max(0, Math.min(1, x));
+      }
+
+      function showProgress(){
+        progressWrapEl.style.display = "block";
+        statelineEl.style.display = "block";
+        filelineEl.style.display = "block";
+      }
+
+      function setProgress(p01){
+        const p = clamp01(p01);
+        fillEl.style.width = (p * 100).toFixed(1) + "%";
+        pctEl.textContent = Math.round(p * 100) + "%";
+      }
+
+      function setLine(state, phase, message){
+        // state/phase + message on one line; no "Status" label.
+        const left = [state, phase].filter(Boolean).join(" / ");
+        const right = message ? (" — " + message) : "";
+        statelineEl.textContent = (left || "") + right;
+      }
+
+      function setFilename(name){
+        filelineEl.textContent = name ? name : "";
+      }
+
+      function stopPolling(){
+        if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+      }
+
+      function editorUrlFor(jobId){
+        const snippetUrl = `/api/demo/jobs/${jobId}/snippet`;
+        const srtUrl = `/api/demo/jobs/${jobId}/transcript.srt`;
+        return `/editor.html?jobId=${encodeURIComponent(jobId)}&audioUrl=${encodeURIComponent(snippetUrl)}&srtUrl=${encodeURIComponent(srtUrl)}`;
+      }
+
+      async function poll(jobId){
+        try{
+          const r = await fetch(`/api/demo/jobs/${jobId}`, { cache: "no-store" });
+          if (!r.ok) throw new Error(`status ${r.status}`);
+          const st = await r.json();
+
+          let p = st.progress;
+          if (typeof p === "number" && p > 1.0001) p = p / 100.0;
+          if (typeof p !== "number") p = 0;
+
+          p = Math.max(lastProgress, clamp01(p));
+          lastProgress = p;
+          setProgress(p);
+
+          setLine(st.state, st.phase, st.message);
+
+          if (st.state === "done") {
+            stopPolling();
+            chooseBtn.disabled = true;
+            chooseBtn.textContent = "Opening editor…";
+            setTimeout(() => { window.location.href = editorUrlFor(jobId); }, 250);
+            return;
+          }
+
+          if (st.state === "error") {
+            stopPolling();
+            chooseBtn.disabled = false;
+            chooseBtn.textContent = "Choose audio file";
+            return;
+          }
+        } catch (e){
+          setLine("error", "poll", e && e.message ? e.message : String(e));
+        }
+
+        pollTimer = setTimeout(() => poll(jobId), 900);
+      }
+
+      function uploadWithProgress(file, fields){
+        return new Promise((resolve, reject) => {
+          const xhr = new XMLHttpRequest();
+          xhr.open("POST", "/api/demo/jobs", true);
+          xhr.responseType = "json";
+
+          xhr.upload.onprogress = (evt) => {
+            if (!evt.lengthComputable) return;
+            const p = clamp01(evt.loaded / evt.total);
+            setProgress(p);
+            setLine("queued", "upload", "Uploading…");
+          };
+
+          xhr.onload = () => {
+            if (xhr.status >= 200 && xhr.status < 300){
+              resolve(xhr.response || JSON.parse(xhr.responseText));
+            } else {
+              reject(new Error(`upload failed: ${xhr.status} ${(xhr.responseText||"").slice(0,200)}`));
+            }
+          };
+          xhr.onerror = () => reject(new Error("upload network error"));
+
+          const fd = new FormData();
+          fd.append("file", file);
+          Object.entries(fields || {}).forEach(([k,v]) => {
+            if (v === undefined || v === null) return;
+            fd.append(k, String(v));
+          });
+
+          xhr.send(fd);
+        });
+      }
+
+      chooseBtn.addEventListener('click', () => fileEl.click());
+
+      fileEl.addEventListener('change', async () => {
+        const f = fileEl.files && fileEl.files[0];
+        if (!f) return;
+
+        stopPolling();
+        showProgress();
+        setFilename(f.name);
+
+        chooseBtn.disabled = true;
+        chooseBtn.textContent = "Uploading…";
+
+        lastProgress = 0;
+        setProgress(0);
+        setLine("queued", "upload", "Uploading…");
+
+        const fields = {};
+        fields.language = (langEl && langEl.value) ? langEl.value : "en"; // no auto
+        fields.speakers = (spkEl && spkEl.value) ? spkEl.value : "auto";
+
+        try{
+          const res = await uploadWithProgress(f, fields);
+          const jobId = res.job_id;
+          chooseBtn.textContent = "Transcribing…";
+          setLine("queued", "start", "Starting transcription…");
+          poll(jobId);
+        } catch (e){
+          setProgress(0);
+          setLine("error", "upload", e && e.message ? e.message : String(e));
+          chooseBtn.disabled = false;
+          chooseBtn.textContent = "Choose audio file";
+        } finally {
+          fileEl.value = "";
+        }
+      });
+    })();
+  </script>
+</body>
+</html>

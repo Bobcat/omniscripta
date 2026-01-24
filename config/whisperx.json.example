@@ -1,0 +1,9 @@
+{
+  "model": "large-v3",
+  "device": "cuda",
+  "compute_type": "float16",
+  "batch_size": 16,
+  "chunk_size": 20,
+  "beam_size": 5,
+  "align_model": "jonatasgrosman/wav2vec2-large-xlsr-53-dutch"
+}

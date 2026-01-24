@@ -1,0 +1,20 @@
+# /etc/systemd/system/transcribe-worker.service
+[Unit]
+Description=Transcribe Worker (v0 daemon)
+After=network.target
+
+[Service]
+User=gunnar
+Group=gunnar
+WorkingDirectory=/srv/transcribe/worker
+ExecStart=/srv/transcribe/worker/.venv/bin/python /srv/transcribe/worker/worker_daemon.py
+Restart=always
+RestartSec=2
+Environment="WHISPERX_BIN=/home/gunnar/whisperx/.venv/bin/whisperx"
+
+[Install]
+WantedBy=multi-user.target
+
+# /etc/systemd/system/transcribe-worker.service.d/override.conf
+[Service]
+EnvironmentFile=/etc/transcribe/transcribe.env

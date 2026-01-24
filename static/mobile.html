@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Computer required — 123transcribe</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;margin:0;background:#f6f7fb;color:#121721}
+    .wrap{max-width:720px;margin:0 auto;padding:28px 16px}
+    .card{background:#fff;border:1px solid #dce2ec;border-radius:16px;padding:18px}
+    h1{margin:0 0 10px;font-size:18px}
+    p{margin:8px 0;line-height:1.5;color:#535d6e}
+    .btn{display:inline-block;margin-top:12px;padding:12px 14px;border-radius:12px;background:#2463eb;color:#fff;text-decoration:none;font-weight:800}
+    .link{display:block;margin-top:10px;color:#2463eb;word-break:break-all}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>Desktop/laptop required (for now)</h1>
+      <p>
+        The transcript editor is designed for a computer with a keyboard and mouse.
+        On phones and tablets it’s not usable yet.
+      </p>
+      <p>
+        Please open this page on a desktop/laptop. You can copy the link below.
+      </p>
+
+      <p>
+        If you need high-quality transcripts and a good mobile experience right now, you can try
+        <a href="https://turboscribe.ai" target="_blank" rel="noopener noreferrer">turboscribe.ai</a>.
+      </p>
+
+      <a class="btn" id="openAnyway" href="#">Open anyway</a>
+      <div class="link" id="fromLink"></div>
+    </div>
+  </div>
+
+  <script>
+    const params = new URLSearchParams(location.search);
+    const from = params.get("from") || "/";
+    const full = location.origin + from;
+
+    document.getElementById("fromLink").textContent = full;
+
+    // If user insists, allow opening editor on mobile:
+    const sep = from.includes("?") ? "&" : "?";
+    document.getElementById("openAnyway").href = from + sep + "force_desktop=1";
+  </script>
+</body>
+</html>

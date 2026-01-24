@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>WhisperX demo</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body{
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, sans-serif;
+      margin: 18px;
+      line-height: 1.35;
+    }
+    h1{ margin: 0 0 10px 0; font-size: 20px; font-weight: 700; }
+    .card{
+      max-width: 820px;
+      border: 1px solid rgba(0,0,0,.15);
+      border-radius: 12px;
+      padding: 14px 14px 12px;
+      background: rgba(255,255,255,.6);
+      backdrop-filter: blur(4px);
+    }
+    @media (prefers-color-scheme: dark){
+      .card{ background: rgba(0,0,0,.25); border-color: rgba(255,255,255,.18); }
+    }
+
+    .row{ display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+    label{ font-size: 13px; opacity: .9; }
+    select, input[type="file"], button{
+      font-size: 14px;
+    }
+    input[type="file"]{ max-width: 100%; }
+    button{
+      padding: 8px 12px;
+      border-radius: 10px;
+      border: 1px solid rgba(0,0,0,.2);
+      background: rgba(0,0,0,.06);
+      cursor:pointer;
+    }
+    button:disabled{ opacity:.6; cursor: not-allowed; }
+    @media (prefers-color-scheme: dark){
+      button{ border-color: rgba(255,255,255,.22); background: rgba(255,255,255,.08); }
+    }
+
+    .meta{ font-size: 13px; opacity:.85; }
+    .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+    .pill{
+      display:inline-block; padding: 2px 8px; border-radius: 999px;
+      border: 1px solid rgba(0,0,0,.15);
+      font-size: 12px; opacity:.9;
+    }
+    @media (prefers-color-scheme: dark){
+      .pill{ border-color: rgba(255,255,255,.22); }
+    }
+
+    /* Progress */
+    .progress-wrap{ margin-top: 12px; }
+    .bar{
+      position: relative;
+      height: 14px;
+      border-radius: 999px;
+      border: 1px solid rgba(0,0,0,.18);
+      background: rgba(0,0,0,.06);
+      overflow: hidden;
+    }
+    @media (prefers-color-scheme: dark){
+      .bar{ border-color: rgba(255,255,255,.22); background: rgba(255,255,255,.10); }
+    }
+    .fill{
+      height: 100%;
+      width: 0%;
+      background: #2563eb; /* blue */
+      transition: width 180ms linear;
+    }
+    .fill.upload{ background: #f59e0b; } /* orange */
+    .pct{
+      margin-top: 6px;
+      text-align: center;
+      font-weight: 800;
+      font-size: 16px;
+      color: #2563eb;
+    }
+    .pct.upload{ color: #f59e0b; }
+
+    .status{
+      margin-top: 8px;
+      font-size: 13px;
+      opacity: .95;
+      overflow-wrap: anywhere;
+    }
+
+    .links{
+      margin-top: 10px;
+      display:flex;
+      gap: 14px;
+      flex-wrap: wrap;
+      font-size: 13px;
+    }
+    .links a{ text-decoration: underline; }
+    .tip{
+      margin-top: 10px;
+      font-size: 13px;
+      opacity: .75;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>WhisperX demo</h1>
+
+    <div class="row" style="margin-bottom:10px;">
+      <div style="min-width: 240px; flex: 1;">
+        <label for="file">Bestand</label><br/>
+        <input id="file" type="file"
+               accept="audio/*,video/*,.mp3,.wav,.m4a,.flac,.ogg,.opus,.mp4,.mkv,.mov,.webm" />
+      </div>
+
+      <div>
+        <label for="lang">Language</label><br/>
+        <select id="lang">
+          <option value="auto">auto</option>
+          <option value="nl">nl</option>
+          <option value="en">en</option>
+          <option value="de">de</option>
+          <option value="fr">fr</option>
+        </select>
+      </div>
+
+      <div>
+        <label for="speakers">Speakers</label><br/>
+        <select id="speakers">
+          <option value="auto">auto</option>
+          <option value="2">2</option>
+          <option value="3">3</option>
+          <option value="4">4</option>
+          <option value="5">5</option>
+          <option value="6">6</option>
+          <option value="7">7</option>
+          <option value="8">8</option>
+          <option value="9">9</option>
+          <option value="10">10</option>
+        </select>
+      </div>
+
+      <div style="align-self:end;">
+        <button id="uploadBtn">Upload</button>
+      </div>
+    </div>
+
+    <div class="row meta" style="justify-content: space-between;">
+      <span>Job: <span id="jobId" class="mono">—</span></span>
+      <span id="statePill" class="pill" style="display:none;">idle</span>
+    </div>
+
+    <div class="progress-wrap">
+      <div class="bar" aria-label="progress">
+        <div id="fill" class="fill"></div>
+      </div>
+      <div id="pct" class="pct">0%</div>
+    </div>
+
+    <div id="statusLine" class="status mono">idle</div>
+
+    <div class="links" id="linksRow" style="display:none;">
+      <a id="aStatus" href="#">job_status</a>
+      <a id="aSnippet" href="#">snippet</a>
+      <a id="aTranscript" href="#">transcript.srt</a>
+      <a id="aEditor" href="#">open editor</a>
+    </div>
+
+    <div class="tip">
+      Tip: de editor opent automatisch als de job klaar is. Wil je later verder werken? Sla in de editor lokaal op (“Save As”).
+    </div>
+  </div>
+
+<script>
+(() => {
+  const fileEl = document.getElementById('file');
+  const langEl = document.getElementById('lang');
+  const speakersEl = document.getElementById('speakers');
+  const uploadBtn = document.getElementById('uploadBtn');
+
+  const jobIdEl = document.getElementById('jobId');
+  const statePill = document.getElementById('statePill');
+  const fillEl = document.getElementById('fill');
+  const pctEl = document.getElementById('pct');
+  const statusLine = document.getElementById('statusLine');
+  const linksRow = document.getElementById('linksRow');
+
+  const aStatus = document.getElementById('aStatus');
+  const aSnippet = document.getElementById('aSnippet');
+  const aTranscript = document.getElementById('aTranscript');
+  const aEditor = document.getElementById('aEditor');
+
+  let currentJobId = null;
+  let pollTimer = null;
+
+  // Separate monotonic guards for upload vs job
+  let lastUploadP = 0;
+  let lastJobP = 0;
+  let mode = "job"; // "upload" or "job"
+
+  function clamp01(x){
+    if (typeof x !== 'number' || !isFinite(x)) return 0;
+    return Math.max(0, Math.min(1, x));
+  }
+
+  function setMode(newMode){
+    mode = newMode;
+    if (mode === "upload"){
+      fillEl.classList.add('upload');
+      pctEl.classList.add('upload');
+    } else {
+      fillEl.classList.remove('upload');
+      pctEl.classList.remove('upload');
+    }
+  }
+
+  function setProgress(p){
+    const p01 = clamp01(p);
+    fillEl.style.width = (p01 * 100).toFixed(1) + "%";
+    pctEl.textContent = Math.round(p01 * 100) + "%";
+  }
+
+  function setStatus(state, phase, msg){
+    const s = [state, phase].filter(Boolean).join(" / ");
+    // strip accidental "(..%)" suffixes in message if any remain
+    const cleanMsg = (msg || "").replace(/\s*\(\d+%\)\s*$/, "");
+    statusLine.textContent = (cleanMsg ? `${s} — ${cleanMsg}` : s) || "idle";
+  }
+
+  function setStatePill(txt){
+    if (!txt){
+      statePill.style.display = "none";
+      return;
+    }
+    statePill.style.display = "inline-block";
+    statePill.textContent = txt;
+  }
+
+  function resetJobUi(){
+    setMode("job");
+    lastJobP = 0;
+    setProgress(0);
+    setStatus("idle", "", "");
+    setStatePill("");
+    linksRow.style.display = "none";
+    currentJobId = null;
+    jobIdEl.textContent = "—";
+  }
+
+  function setLinks(jobId, snippetName, srtName){
+    const statusUrl = `/api/demo/jobs/${jobId}`;
+    const snippetUrl = `/api/demo/jobs/${jobId}/snippet`;
+    const srtUrl = `/api/demo/jobs/${jobId}/transcript.srt`;
+    const editorUrl = `/editor.html?jobId=${encodeURIComponent(jobId)}&audioUrl=${encodeURIComponent(snippetUrl)}&srtUrl=${encodeURIComponent(srtUrl)}`;
+
+    aStatus.href = statusUrl;
+    aSnippet.href = snippetUrl;
+    aTranscript.href = srtUrl;
+    aEditor.href = editorUrl;
+
+    aSnippet.textContent = snippetName || "snippet";
+    aTranscript.textContent = srtName || "transcript.srt";
+
+    linksRow.style.display = "flex";
+  }
+
+  function stopPolling(){
+    if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+  }
+
+  async function poll(jobId){
+    try{
+      const r = await fetch(`/api/demo/jobs/${jobId}`, { cache: "no-store" });
+      if (!r.ok) throw new Error(`status ${r.status}`);
+      const st = await r.json();
+
+      // Use server progress as the single source of truth for %.
+      const p0 = clamp01(st.progress ?? 0);
+      const p = Math.max(lastJobP, p0); // monotonic
+      lastJobP = p;
+
+      setMode("job");
+      setProgress(p);
+      setStatus(st.state, st.phase, st.message);
+      setStatePill(st.state || "");
+
+      setLinks(jobId, st.snippet_filename, st.srt_filename);
+
+      if (st.state === "done"){
+        // open editor once
+        const editorHref = aEditor.href;
+        stopPolling();
+        setTimeout(() => { window.location.href = editorHref; }, 350);
+        return;
+      }
+      if (st.state === "error"){
+        stopPolling();
+        uploadBtn.disabled = false;
+        return;
+      }
+    } catch (e){
+      // keep polling; transient errors happen
+      setStatus("error", "poll", e && e.message ? e.message : String(e));
+    }
+
+    pollTimer = setTimeout(() => poll(jobId), 900);
+  }
+
+  function startPolling(jobId){
+    currentJobId = jobId;
+    jobIdEl.textContent = jobId;
+    // reset job progress view
+    setMode("job");
+    lastJobP = 0;
+    setProgress(0);
+    setStatus("queued", "upload", "Queued");
+    setStatePill("queued");
+    linksRow.style.display = "none";
+    stopPolling();
+    poll(jobId);
+  }
+
+  function uploadWithProgress(file, fields){
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", "/api/demo/jobs", true);
+      xhr.responseType = "json";
+
+      xhr.upload.onprogress = (evt) => {
+        if (!evt.lengthComputable) return;
+        const p0 = clamp01(evt.loaded / evt.total);
+        const p = Math.max(lastUploadP, p0);
+        lastUploadP = p;
+        setMode("upload");
+        setProgress(p);
+        setStatus("queued", "upload", "Uploading…");
+        setStatePill("upload");
+      };
+
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300){
+          resolve(xhr.response || JSON.parse(xhr.responseText));
+        } else {
+          reject(new Error(`upload failed: ${xhr.status} ${(xhr.responseText||"").slice(0,200)}`));
+        }
+      };
+      xhr.onerror = () => reject(new Error("upload network error"));
+
+      const fd = new FormData();
+      fd.append("file", file);
+
+      // extra fields
+      Object.entries(fields || {}).forEach(([k,v]) => {
+        if (v === undefined || v === null) return;
+        fd.append(k, String(v));
+      });
+
+      xhr.send(fd);
+    });
+  }
+
+  uploadBtn.addEventListener("click", async () => {
+    const f = fileEl.files && fileEl.files[0];
+    if (!f){ alert("Kies eerst een audio/video bestand."); return; }
+
+    stopPolling();
+    uploadBtn.disabled = true;
+    linksRow.style.display = "none";
+    lastUploadP = 0;
+    setMode("upload");
+    setProgress(0);
+    setStatus("queued", "upload", "Uploading…");
+    setStatePill("upload");
+
+    const lang = langEl.value || "auto";
+    const speakers = speakersEl.value || "auto";
+
+    const fields = {};
+    if (lang !== "auto") fields.language = lang;
+    fields.speakers = speakers;
+
+    try{
+      const res = await uploadWithProgress(f, fields);
+
+      // Upload complete: reset bar and switch to job progress
+      setMode("job");
+      setProgress(0);
+      lastJobP = 0;
+
+      startPolling(res.job_id);
+    } catch (e){
+      setMode("job");
+      setProgress(0);
+      setStatus("error", "upload", e && e.message ? e.message : String(e));
+      setStatePill("error");
+      uploadBtn.disabled = false;
+    }
+  });
+
+  // Support ?job=<id> deep link
+  const params = new URLSearchParams(location.search);
+  const job = params.get("job");
+  if (job){
+    uploadBtn.disabled = true;
+    startPolling(job);
+  }
+})();
+</script>
+</body>
+</html>

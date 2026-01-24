@@ -1,0 +1,19 @@
+TASK
+Extract the main topics.
+
+RULES
+- Chronological order.
+- Represent topics as contiguous time ranges that cover the entire transcript.
+- start_time and end_time MUST be exact timestamps that appear in the transcript.
+- The end_time of topic n MUST equal the start_time of topic n+1.
+
+DEBUG (required, first)
+- Print the content of the FIRST non-empty source line as:
+  first_line: <entire source line>
+- Print the content of the LAST non-empty source line as:
+  last_line: <entire source line>
+
+OUTPUT FORMAT (exact)
+n | topic title | topic short description | start_time | end_time
+
+END_OF_PROMPT

@@ -1,0 +1,23 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../worker"
+		},
+		{
+			"path": "../config"
+		},
+		{
+			"path": "../prompts"
+		},
+		{
+			"path": "../data/demo_jobs"
+		},
+		{
+			"path": "../static"
+		}
+	],
+	"settings": {}
+}

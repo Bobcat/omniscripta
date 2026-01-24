@@ -1,0 +1,21 @@
+# /etc/systemd/system/transcribe-tabby-tunnel.service
+[Unit]
+Description=SSH tunnel to Tabby on PC1 (localhost:5001 -> PC1:127.0.0.1:5001)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=gunnar
+Group=gunnar
+ExecStart=/usr/bin/ssh -N \
+  -L 127.0.0.1:5001:127.0.0.1:5001 gunnar@192.168.178.203 \
+  -o ExitOnForwardFailure=yes \
+  -o ServerAliveInterval=30 \
+  -o ServerAliveCountMax=3 \
+  -o BatchMode=yes \
+  -o StrictHostKeyChecking=accept-new
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

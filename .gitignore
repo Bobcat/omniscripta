@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Local config (real config + secrets)
+config/service.json
+config/whisperx.json
+*.env
+
+# Data / job outputs / logs
+data/
+*.log
+
+# Audio / subtitle artifacts (never commit)
+*.mp3
+*.wav
+*.m4a
+*.srt
+*.vtt
+
+# Caches
+.cache/

@@ -1,0 +1,16 @@
+# /etc/systemd/system/transcribe-api.service
+[Unit]
+Description=Transcribe Portal API (FastAPI/Uvicorn)
+After=network.target
+
+[Service]
+User=gunnar
+Group=gunnar
+WorkingDirectory=/srv/transcribe/portal-api
+Environment="PATH=/srv/transcribe/portal-api/.venv/bin"
+ExecStart=/srv/transcribe/portal-api/.venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
