@@ -1,0 +1,229 @@
+/* Variables scoped to the upload view to avoid global conflicts */
+.upload-wrap {
+    --bg: #f6f7fb;
+    --card: #ffffff;
+    --ink: #121721;
+    --muted: #535d6e;
+    --muted2: #768091;
+    --border: #dce2ec;
+    --accent: #2463eb;
+    --accentSoft: #e6f0ff;
+    --shadow: 0 10px 26px rgba(18, 23, 33, .07);
+    --r: 14px;
+
+    font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, sans-serif;
+    color: var(--ink);
+    background: var(--bg);
+    min-height: 100%;
+}
+
+.upload-wrap .top {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 4px 0 10px;
+}
+
+.upload-wrap .dot {
+    width: 14px;
+    height: 14px;
+    border-radius: 999px;
+    background: var(--accent);
+}
+
+.upload-wrap .brand {
+    font-weight: 800;
+    letter-spacing: .2px;
+    font-size: 14px;
+}
+
+.upload-wrap h1 {
+    margin: 8px 0 6px;
+    font-size: clamp(20px, 2.7vw, 34px);
+    letter-spacing: -0.35px;
+    text-align: center;
+}
+
+.upload-wrap .sub {
+    margin: 0 auto 12px;
+    max-width: 920px;
+    color: var(--muted);
+    font-size: 13.5px;
+    line-height: 1.45;
+    text-align: center;
+}
+
+.upload-wrap .steps {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+    margin: 10px 0 12px;
+}
+
+@media (max-width: 900px) {
+    .upload-wrap .steps {
+        grid-template-columns: 1fr;
+    }
+}
+
+.upload-wrap .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--r);
+    box-shadow: var(--shadow);
+    padding: 10px 10px 9px;
+}
+
+.upload-wrap .badgeNum {
+    display: inline-flex;
+    width: 26px;
+    height: 26px;
+    align-items: center;
+    justify-content: center;
+    border-radius: 9px;
+    background: var(--accentSoft);
+    border: 1px solid #c8dafc;
+    color: var(--accent);
+    font-weight: 800;
+    margin-right: 8px;
+    vertical-align: middle;
+    font-size: 12px;
+}
+
+.upload-wrap .cardTitle {
+    display: inline-block;
+    font-weight: 800;
+    font-size: 14px;
+    vertical-align: middle;
+}
+
+.upload-wrap .cardText {
+    margin: 7px 0 0;
+    color: var(--muted);
+    line-height: 1.35;
+    font-size: 12.5px;
+}
+
+.upload-wrap .panel {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: calc(var(--r) + 2px);
+    box-shadow: var(--shadow);
+    padding: 12px;
+}
+
+.upload-wrap .panel h2 {
+    margin: 0 0 2px;
+    font-size: 14px;
+}
+
+.upload-wrap .panel .hint {
+    margin: 0 0 8px;
+    color: var(--muted);
+    font-size: 12px;
+}
+
+.upload-wrap .btn {
+    width: 100%;
+    border: 1px solid #1a4fd1;
+    background: var(--accent);
+    color: #fff;
+    border-radius: 12px;
+    padding: 12px 12px;
+    font-size: 14px;
+    font-weight: 800;
+    cursor: pointer;
+}
+
+.upload-wrap .btn:hover {
+    filter: brightness(1.03);
+}
+
+.upload-wrap .btn:disabled {
+    opacity: .72;
+    cursor: not-allowed;
+}
+
+.upload-wrap .row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin-top: 8px;
+}
+
+@media (max-width: 900px) {
+    .upload-wrap .row {
+        grid-template-columns: 1fr;
+    }
+}
+
+.upload-wrap label {
+    display: block;
+    font-size: 11.5px;
+    color: var(--muted2);
+    margin: 6px 0 5px;
+}
+
+.upload-wrap select {
+    width: 100%;
+    border: 1px solid var(--border);
+    background: #fafbfd;
+    border-radius: 10px;
+    padding: 10px 9px;
+    font-size: 12.8px;
+    color: var(--ink);
+}
+
+.upload-wrap .progressWrap {
+    margin-top: 10px;
+    display: none;
+}
+
+.upload-wrap .bar {
+    height: 10px;
+    border-radius: 999px;
+    background: #eef2f7;
+    border: 1px solid var(--border);
+    overflow: hidden;
+}
+
+.upload-wrap .fill {
+    width: 0%;
+    height: 100%;
+    background: #93c5fd;
+    transition: width 160ms linear;
+}
+
+.upload-wrap .pct {
+    margin-top: 5px;
+    text-align: center;
+    font-weight: 800;
+    color: var(--muted);
+    font-size: 12px;
+}
+
+.upload-wrap .line {
+    margin-top: 8px;
+    font-size: 12.5px;
+    color: var(--muted);
+    line-height: 1.35;
+    display: none;
+}
+
+.upload-wrap .line strong {
+    color: var(--ink);
+    font-weight: 800;
+}
+
+.upload-wrap .fileline {
+    margin-top: 6px;
+    font-size: 12.5px;
+    color: var(--muted);
+    line-height: 1.35;
+    display: none;
+    word-break: break-word;
+}
+
+.upload-wrap input[type="file"] {
+    display: none;
+}

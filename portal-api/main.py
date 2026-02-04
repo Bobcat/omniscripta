@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import json
 import shutil
+import mimetypes
 from pathlib import Path
 from typing import Any, Dict
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form
+from fastapi.responses import FileResponse, Response
 from queue_fs import init_job_in_inbox, JobPaths
-import mimetypes
-from fastapi.responses import FileResponse
 
 app = FastAPI(root_path="/api")
 
@@ -165,10 +165,36 @@ def get_demo_job_srt(job_id: str):
 
     if not srt_path.exists():
         raise HTTPException(status_code=404, detail="Transcript file missing")
+    
+    # Read SRT content
+    srt_content = srt_path.read_text(encoding="utf-8")
+
+    # Try to find and inject topics
+    try:
+        orig_filename = status.get("orig_filename")
+        if orig_filename:
+            # Construct topics filename: base_topics_v1_merged.json
+            # e.g. "file.mp3" -> "file"
+            base = Path(orig_filename).stem if "." in orig_filename else orig_filename
+            topics_name = f"{base}_topics_v1_merged.json"
+            topics_path = (job_dir / "result" / topics_name).resolve()
+            
+            if topics_path.exists():
+                topics_data = json.loads(topics_path.read_text(encoding="utf-8"))
+                # Only inject if we have rows
+                if topics_data and "rows" in topics_data:
+                    # Construct metadata block
+                    meta = {"topics": topics_data["rows"]}
+                    block = f"\n\n<!-- OMNISCRIPTA_META: {json.dumps(meta)} -->"
+                    srt_content += block
+    except Exception as e:
+        # Don't fail the SRT download if topics fail, just log/ignore
+        print(f"Failed to inject topics: {e}")
 
     headers = {"Content-Disposition": f'inline; filename="{srt_path.name}"'}
-    return FileResponse(
-        path=str(srt_path),
+    # Return content directly instead of FileResponse since we modified it
+    return Response(
+        content=srt_content,
         media_type="application/x-subrip",
         headers=headers,
     )

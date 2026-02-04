@@ -1,0 +1,209 @@
+:root {
+    --sidebar-width-expanded: 256px;
+    --sidebar-width-collapsed: 72px;
+    --header-height: 64px;
+    --transition-speed: 0.3s;
+    --sidebar-bg: #f8f9fa; /* Gemini-like light gray */
+    --hover-bg: #e1e5ea;
+    --text-color: #444746;
+    --active-bg: #d3e3fd; /* Light blue accent */
+    --active-text: #001d35;
+}
+
+body {
+    margin: 0;
+    padding: 0;
+    overflow-x: hidden;
+}
+
+.app-container {
+    display: flex;
+    height: 100vh;
+    width: 100vw;
+}
+
+/* --- Sidebar --- */
+.sidebar {
+    background-color: var(--sidebar-bg);
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+    transition: width var(--transition-speed) ease;
+    border-right: 1px solid var(--border); /* reusing --border from style.css if available or fallback */
+    z-index: 100;
+}
+
+.sidebar.expanded {
+    width: var(--sidebar-width-expanded);
+}
+
+.sidebar:not(.expanded) {
+    width: var(--sidebar-width-collapsed);
+}
+
+.sidebar-header {
+    height: 48px;
+    display: flex;
+    align-items: center;
+    padding: 12px;
+}
+
+.icon-btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 8px;
+    border-radius: 50%;
+    color: var(--text-color);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.icon-btn:hover {
+    background-color: var(--hover-bg);
+}
+
+.sidebar-content {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px;
+}
+
+.nav-links {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+
+.nav-links li {
+    display: flex;
+    align-items: center;
+    padding: 0 16px; /* Padding for the inner content */
+    height: 48px;     /* Fixed height for touch targets */
+    border-radius: 24px;
+    cursor: pointer;
+    color: var(--text-color);
+    margin-bottom: 4px;
+    transition: background-color 0.2s;
+    white-space: nowrap;
+    overflow: hidden;
+}
+
+.nav-links li:hover {
+    background-color: var(--hover-bg);
+}
+
+.nav-links li.active {
+    background-color: var(--active-bg);
+    color: var(--active-text);
+    font-weight: 500;
+}
+
+.nav-links li.disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+.nav-links li.disabled:hover {
+    background: none;
+}
+
+.nav-links li .material-symbols-outlined {
+    font-size: 24px;
+    margin-right: 16px; /* Space between icon and text */
+    flex-shrink: 0;
+}
+
+.nav-links li .link-text {
+    opacity: 1;
+    transition: opacity 0.2s;
+}
+
+/* Collapsed State Overrides */
+.sidebar:not(.expanded) .nav-links li {
+    padding: 0;
+    justify-content: center;
+}
+
+.sidebar:not(.expanded) .nav-links li .material-symbols-outlined {
+    margin-right: 0;
+}
+
+.sidebar:not(.expanded) .link-text {
+    opacity: 0;
+    width: 0;
+    display: none;
+}
+
+.sidebar:not(.expanded) .sidebar-header {
+    justify-content: center;
+    padding: 12px 0;
+}
+
+/* --- Main Content --- */
+.main-content {
+    flex: 1;
+    overflow-y: auto;
+    height: 100vh;
+    background-color: #fff;
+    /* Optional: add some padding if needed, but views might handle their own */
+}
+
+
+/* --- Mobile Responsiveness --- */
+@media (max-width: 768px) {
+    .sidebar {
+        position: fixed;
+        width: var(--sidebar-width-expanded) !important; /* Always wide when open */
+        transform: translateX(-100%); /* Hidden by default */
+        box-shadow: 2px 0 8px rgba(0,0,0,0.1);
+    }
+    
+    .sidebar.expanded {
+        transform: translateX(0); /* Slide in */
+    }
+
+    /* When sidebar is collapsed on mobile, it is hidden (off-screen) */
+    .sidebar:not(.expanded) {
+        width: var(--sidebar-width-expanded); /* Keep width, just hide via transform */
+    }
+
+    /* We need a simplified toggle logic for mobile 
+       Actually, the logic: "expanded" class means visible on mobile.
+       "not expanded" means hidden. 
+    */
+    
+    /* Overlay for mobile when sidebar is open */
+    .app-overlay {
+        position: fixed;
+        top: 0; 
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: rgba(0,0,0,0.3);
+        z-index: 99;
+        display: none;
+    }
+    
+    body.sidebar-open .app-overlay {
+        display: block;
+    }
+
+    /* Since the sidebar toggle is INSIDE the sidebar, 
+       we need a way to open it from the main content if it's closed.
+       The existing designs usually have a header bar on mobile.
+       Our design puts the toggle inside the sidebar.
+       
+       We should add a mobile-only toggle button in the main view or 
+       rely on the view's internal header having a menu button (like Gemini).
+       
+       Proposed: The Views (Upload/Editor) should have a hamburger button 
+       that triggers the configured "open sidebar" event.
+    */
+}
+
+/* Adjustments for existing CSS inputs/cards to fit new layout */
+.wrap {
+    max-width: 1000px; /* Limit width inside the main panel */
+}
