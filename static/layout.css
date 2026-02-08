@@ -3,23 +3,53 @@
     --sidebar-width-collapsed: 72px;
     --header-height: 64px;
     --transition-speed: 0.3s;
-    --sidebar-bg: #f8f9fa; /* Gemini-like light gray */
+    --sidebar-bg: #f0f4f9;
+    /* Gemini-like cool gray */
+    /* Gemini-like light gray */
     --hover-bg: #e1e5ea;
     --text-color: #444746;
-    --active-bg: #d3e3fd; /* Light blue accent */
+    --active-bg: #d3e3fd;
+    /* Light blue accent */
     --active-text: #001d35;
+}
+
+/* Material Symbols Font Definition */
+.material-symbols-outlined {
+    font-family: 'Material Symbols Outlined';
+    font-weight: normal;
+    font-style: normal;
+    font-size: 24px;
+    /* Preferred icon size */
+    display: inline-block;
+    line-height: 1;
+    text-transform: none;
+    letter-spacing: normal;
+    word-wrap: normal;
+    white-space: nowrap;
+    direction: ltr;
+}
+
+/* Global Reset */
+*,
+*::before,
+*::after {
+    box-sizing: border-box;
 }
 
 body {
     margin: 0;
     padding: 0;
     overflow-x: hidden;
+    width: 100%;
+    height: 100vh;
 }
 
 .app-container {
     display: flex;
     height: 100vh;
-    width: 100vw;
+    width: 100%;
+    overflow: hidden;
+    /* Prevent ANY child from causing scrollbars/overflow */
 }
 
 /* --- Sidebar --- */
@@ -30,7 +60,8 @@ body {
     flex-direction: column;
     flex-shrink: 0;
     transition: width var(--transition-speed) ease;
-    border-right: 1px solid var(--border); /* reusing --border from style.css if available or fallback */
+    border-right: 1px solid var(--border);
+    /* reusing --border from style.css if available or fallback */
     z-index: 100;
 }
 
@@ -46,7 +77,44 @@ body {
     height: 48px;
     display: flex;
     align-items: center;
-    padding: 12px;
+    /* Match the padding of .nav-links li (0 16px) to align icon perfectly */
+    padding: 0 16px;
+    /* Remove justify-content: center to allow left alignment in expanded mode */
+}
+
+/* Collapsed state needs centering */
+/* Collapsed state needs centering */
+.sidebar:not(.expanded) .sidebar-header {
+    justify-content: center;
+    padding: 0;
+    /* Remove padding strictly */
+    height: 48px;
+    /* Maintain height */
+    width: 100%;
+}
+
+/* Ensure hamburger centers exactly like list items */
+.sidebar:not(.expanded) .sidebar-header .icon-btn {
+    margin-left: auto;
+    margin-right: auto;
+}
+
+.sidebar-header .icon-btn {
+    width: 40px;
+    /* Match list item height for visual rhythm, or slightly smaller */
+    height: 40px;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    /* Ensure circular */
+}
+
+/* Ensure the icon inside is sized correctly */
+.sidebar-header .icon-btn .material-symbols-outlined {
+    font-size: 20px;
+    /* Reduced from 24px to match other icons */
 }
 
 .icon-btn {
@@ -67,28 +135,47 @@ body {
 
 .sidebar-content {
     flex: 1;
-    overflow-y: auto;
+    overflow: hidden;
+    /* Prevent double scrollbars, let children scroll */
     padding: 12px;
+    display: flex;
+    flex-direction: column;
+}
+
+/* Ensure projects list takes available space and scrolls */
+.projects-list {
+    flex: 1;
+    overflow-y: auto;
+    min-height: 0;
+    /* Important for flex child scrolling */
+    margin-bottom: 12px;
+    /* Space before settings */
 }
 
 .nav-links {
     list-style: none;
     padding: 0;
     margin: 0;
+    /* Removed flex-direction column here because now sidebar-content handles the main layout */
 }
 
 .nav-links li {
     display: flex;
     align-items: center;
-    padding: 0 16px; /* Padding for the inner content */
-    height: 48px;     /* Fixed height for touch targets */
-    border-radius: 24px;
+    padding: 0 16px;
+    /* Padding for the inner content */
+    height: 40px;
+    /* Reducded height from 48px */
+    border-radius: 20px;
+    /* Adjusted radius */
     cursor: pointer;
     color: var(--text-color);
     margin-bottom: 4px;
     transition: background-color 0.2s;
     white-space: nowrap;
     overflow: hidden;
+    font-size: 0.8rem;
+    /* Reduced to 0.8rem */
 }
 
 .nav-links li:hover {
@@ -105,13 +192,15 @@ body {
     opacity: 0.5;
     cursor: default;
 }
+
 .nav-links li.disabled:hover {
     background: none;
 }
 
 .nav-links li .material-symbols-outlined {
-    font-size: 24px;
-    margin-right: 16px; /* Space between icon and text */
+    font-size: 20px;
+    /* Reverted to 20px */
+    margin-right: 12px;
     flex-shrink: 0;
 }
 
@@ -124,6 +213,10 @@ body {
 .sidebar:not(.expanded) .nav-links li {
     padding: 0;
     justify-content: center;
+    width: 40px;
+    /* Ensure square-ish clickable area */
+    margin-left: auto;
+    margin-right: auto;
 }
 
 .sidebar:not(.expanded) .nav-links li .material-symbols-outlined {
@@ -136,6 +229,11 @@ body {
     display: none;
 }
 
+/* Hide Separator in Collapsed State */
+.sidebar:not(.expanded) .separator {
+    display: none !important;
+}
+
 .sidebar:not(.expanded) .sidebar-header {
     justify-content: center;
     padding: 12px 0;
@@ -144,10 +242,17 @@ body {
 /* --- Main Content --- */
 .main-content {
     flex: 1;
-    overflow-y: auto;
+    overflow: auto;
+    /* Handle both vertical and horizontal overflow */
     height: 100vh;
     background-color: #fff;
     /* Optional: add some padding if needed, but views might handle their own */
+}
+
+@media (max-width: 768px) {
+    .main-content {
+        margin-left: var(--sidebar-width-collapsed);
+    }
 }
 
 
@@ -155,37 +260,46 @@ body {
 @media (max-width: 768px) {
     .sidebar {
         position: fixed;
-        width: var(--sidebar-width-expanded) !important; /* Always wide when open */
-        transform: translateX(-100%); /* Hidden by default */
-        box-shadow: 2px 0 8px rgba(0,0,0,0.1);
-    }
-    
-    .sidebar.expanded {
-        transform: translateX(0); /* Slide in */
+        /* When expanded, it covers content. When collapsed, it sits on left? 
+           Actually, usually mobile sidebars are drawers. 
+           User wants: "Always piece of sidebar visible".
+           So we keep it logical: 
+           Collapsed = 72px visible. 
+           Expanded = 256px (overlay or push).
+        */
+        z-index: 1000;
+        height: 100vh;
     }
 
-    /* When sidebar is collapsed on mobile, it is hidden (off-screen) */
     .sidebar:not(.expanded) {
-        width: var(--sidebar-width-expanded); /* Keep width, just hide via transform */
+        /* Visible collapsed state on mobile */
+        width: var(--sidebar-width-collapsed);
+        transform: none;
+        /* Reset the hidden transform */
+    }
+
+    .sidebar.expanded {
+        width: var(--sidebar-width-expanded);
+        box-shadow: 2px 0 8px rgba(0, 0, 0, 0.15);
     }
 
     /* We need a simplified toggle logic for mobile 
        Actually, the logic: "expanded" class means visible on mobile.
        "not expanded" means hidden. 
     */
-    
+
     /* Overlay for mobile when sidebar is open */
     .app-overlay {
         position: fixed;
-        top: 0; 
+        top: 0;
         left: 0;
         right: 0;
         bottom: 0;
-        background: rgba(0,0,0,0.3);
+        background: rgba(0, 0, 0, 0.3);
         z-index: 99;
         display: none;
     }
-    
+
     body.sidebar-open .app-overlay {
         display: block;
     }
@@ -205,5 +319,105 @@ body {
 
 /* Adjustments for existing CSS inputs/cards to fit new layout */
 .wrap {
-    max-width: 1000px; /* Limit width inside the main panel */
+    max-width: 1000px;
+    margin: 0;
+    /* Limit width inside the main panel */
+}
+
+/* --- Projects List Customization --- */
+.projects-list li {
+    display: flex;
+    /* Use flexbox for the list item itself */
+    justify-content: space-between;
+    align-items: center;
+    padding-right: 8px;
+    /* Space on right */
+}
+
+.project-content {
+    display: flex;
+    align-items: center;
+    flex: 1;
+    /* Take remaining space */
+    min-width: 0;
+    /* Allow shrinking/truncation */
+    overflow: hidden;
+    height: 100%;
+}
+
+/* Collapsed State: Center the project icon */
+.sidebar:not(.expanded) .projects-list li {
+    justify-content: center;
+    /* Center the content */
+    padding: 0;
+    /* Remove padding */
+    width: 40px;
+    /* Fixed width */
+    margin: 0 auto 4px auto;
+    /* Center horizontally */
+}
+
+.sidebar:not(.expanded) .project-content {
+    justify-content: center;
+    /* Center icon inside wrapper */
+    flex: 0 0 auto;
+    /* Don't stretch */
+    width: 100%;
+}
+
+.sidebar:not(.expanded) .project-content .link-text {
+    display: none;
+    /* Already hidden by general rule, but ensuring */
+}
+
+.delete-project-btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+
+    /* Strict dimensions for circle */
+    width: 28px;
+    height: 28px;
+    min-width: 28px;
+    /* Prevent crushing */
+    padding: 0;
+
+    border-radius: 50%;
+    color: #444746;
+
+    display: none;
+    /* Hidden by default */
+    align-items: center;
+    justify-content: center;
+
+    margin-left: 8px;
+    /* Gap from text */
+    flex-shrink: 0;
+    /* Don't shrink */
+
+    transition: background-color 0.2s, color 0.2s;
+}
+
+.delete-project-btn:hover {
+    background-color: #fbecec;
+    color: #d93025;
+}
+
+/* Reset margin on the icon inside the delete button 
+   otherwise .nav-links li .material-symbols-outlined adds 16px margin-right
+   causing the button to be wide/oval.
+*/
+.delete-project-btn .material-symbols-outlined {
+    margin-right: 0 !important;
+    font-size: 18px !important;
+}
+
+/* Show button on hover */
+.projects-list li:hover .delete-project-btn {
+    display: flex;
+}
+
+/* Hide delete button in collapsed sidebar */
+.sidebar:not(.expanded) .delete-project-btn {
+    display: none !important;
 }

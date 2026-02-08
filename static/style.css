@@ -452,13 +452,37 @@
       display: none !important;
     }
 
+    /* Text View Styles */
+    .tv-seg {
+      color: #334155;
+      cursor: pointer;
+      transition: color 0.15s, background-color 0.15s;
+    }
+
+    .tv-seg:hover {
+      background-color: #f1f5f9;
+      color: #0f172a;
+    }
+
+    .tv-seg.active {
+      background-color: #dbeafe;
+      /* Light blue highlight */
+      color: #0f172a;
+      /* Strong black */
+      font-weight: 500;
+    }
+
     /* While playing: emphasize the active line text */
     .segment.active .text-input {
       font-weight: 500;
+      color: #0f172a;
+      /* Darker/Black for active */
     }
 
     .segment.active .speaker-input {
       font-weight: 600;
+      color: var(--meta);
+      /* Restore green for active speaker if desired, or keep dark */
     }
 
     .segment.active .time {
@@ -591,6 +615,10 @@
       border-radius: 10px;
       background: var(--bg);
       outline: none;
+      color: #334155;
+      /* Soften from black */
+      font-weight: 400;
+      /* Ensure normal weight */
     }
 
     .text-input:focus {

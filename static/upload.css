@@ -15,6 +15,9 @@
     color: var(--ink);
     background: var(--bg);
     min-height: 100%;
+
+    padding: 12px 20px 0 20px;
+    /* Reduced margin/padding as requested */
 }
 
 .upload-wrap .top {
