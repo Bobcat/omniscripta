@@ -1,15 +1,22 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import mimetypes
 from pathlib import Path
 from typing import Any, Dict
-from fastapi import FastAPI, UploadFile, File, HTTPException, Form
-from fastapi.responses import FileResponse, Response
-from queue_fs import init_job_in_inbox, JobPaths
+from urllib.parse import urlparse, parse_qs
 
-app = FastAPI(root_path="/api")
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Request
+from fastapi.responses import FileResponse, Response
+from queue_fs import init_job_in_inbox, JobPaths, BASE as BASE_JOBS
+
+ROOT_PATH = os.getenv("TRANSCRIBE_ROOT_PATH", "/api")
+app = FastAPI(root_path=ROOT_PATH)
+
+
+DEFAULT_CALIBRATION_SNIPPET_SECONDS = [60, 180, 300, 480, 600, 1200, 1800, 2700, 3600]
 
 
 @app.get("/health")
@@ -22,8 +29,6 @@ def _safe_filename(name: str) -> str:
     return Path(name).name or "upload.bin"
 
 
-BASE_JOBS = Path("/srv/transcribe/data/demo_jobs")
-
 def _find_job_dir(job_id: str) -> Path | None:
     for state in ("inbox", "running", "done", "error"):
         d = BASE_JOBS / state / job_id
@@ -32,8 +37,56 @@ def _find_job_dir(job_id: str) -> Path | None:
     return None
 
 
+def _as_bool(raw: Any) -> bool:
+    s = str(raw or "").strip().lower()
+    return s in {"1", "true", "yes", "on"}
+
+
+def _parse_calibration_seconds_env() -> list[int]:
+    raw = str(os.getenv("TRANSCRIBE_CALIBRATION_SECONDS", "") or "").strip()
+    if not raw:
+        return list(DEFAULT_CALIBRATION_SNIPPET_SECONDS)
+
+    vals: list[int] = []
+    for part in raw.split(","):
+        p = part.strip()
+        if not p:
+            continue
+        try:
+            v = int(p)
+        except ValueError:
+            continue
+        if v > 0 and v not in vals:
+            vals.append(v)
+    return vals or list(DEFAULT_CALIBRATION_SNIPPET_SECONDS)
+
+
+def _calibration_requested(request: Request) -> bool:
+    # Direct query on upload endpoint:
+    #   POST /api/demo/jobs?calibration=1
+    q = request.query_params.get("calibration")
+    if q is not None:
+        return _as_bool(q)
+
+    # Convenient path from UI page URL:
+    #   /index.html?calibration=1
+    # Browser sends this in Referer for same-origin XHR.
+    ref = request.headers.get("referer") or request.headers.get("referrer")
+    if ref:
+        try:
+            parsed = urlparse(ref)
+            ref_q = parse_qs(parsed.query or "")
+            vals = ref_q.get("calibration") or []
+            if vals:
+                return _as_bool(vals[0])
+        except Exception:
+            pass
+    return False
+
+
 @app.post("/demo/jobs")
 def create_demo_job(
+    request: Request,
     file: UploadFile = File(...),
     language: str = Form("nl"),
     speakers: str = Form("auto"),  # "auto" of bv. "4"
@@ -63,33 +116,58 @@ def create_demo_job(
         min_speakers = max(1, s - 1)
         max_speakers = min(32, s + 2)
 
-    # Maak jobdir in inbox (atomic publish)
+    base_options: Dict[str, Any] = {
+        "language": language,
+        "speaker_mode": speaker_mode,
+        "expected_speakers": expected_speakers,
+        "min_speakers": min_speakers,
+        "max_speakers": max_speakers,
+    }
+
+    calibration_enabled = _calibration_requested(request)
+    calibration_seconds = _parse_calibration_seconds_env() if calibration_enabled else []
+
+    # Primary job (the one returned to frontend)
     jp: JobPaths = init_job_in_inbox(
         orig_filename=orig_name,
-        options={
-            "language": language,
-            "speaker_mode": speaker_mode,
-            "expected_speakers": expected_speakers,
-            "min_speakers": min_speakers,
-            "max_speakers": max_speakers,
-        },
+        options=dict(base_options),
     )
 
     # Schrijf upload naar job upload/
-    dst = jp.upload_dir / orig_name
+    dst_primary = jp.upload_dir / orig_name
     try:
-        with dst.open("wb") as f:
+        with dst_primary.open("wb") as f:
             shutil.copyfileobj(file.file, f)
     finally:
         file.file.close()
 
-    return {"job_id": jp.job_id, "state": "queued"}
+    extra_job_ids: list[str] = []
+    extra_failed: list[str] = []
+    if calibration_enabled:
+        for sec in calibration_seconds:
+            try:
+                opts = dict(base_options)
+                opts["snippet_seconds"] = int(sec)
+                extra = init_job_in_inbox(orig_filename=orig_name, options=opts)
+                dst_extra = extra.upload_dir / orig_name
+                shutil.copy2(dst_primary, dst_extra)
+                extra_job_ids.append(extra.job_id)
+            except Exception as e:
+                extra_failed.append(f"{sec}s:{type(e).__name__}")
+
+    return {
+        "job_id": jp.job_id,
+        "state": "queued",
+        "calibration_enqueued": len(extra_job_ids),
+        "calibration_seconds": calibration_seconds if calibration_enabled else [],
+        "calibration_failed": extra_failed,
+    }
 
 
 @app.get("/demo/jobs/{job_id}")
 def get_demo_job(job_id: str) -> Dict[str, Any]:
     """Return status.json for a job, wherever it currently lives."""
-    base = Path("/srv/transcribe/data/demo_jobs")
+    base = BASE_JOBS
     for state in ("inbox", "running", "done", "error"):
         status_path = base / state / job_id / "status.json"
         if status_path.exists():
