@@ -4,7 +4,7 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 from urllib import request
 
 from worker_status_io import _write_status
@@ -86,11 +86,19 @@ def _extract_content(resp_json: dict[str, Any]) -> str:
     return ""
 
 
-def run_topics_llm(*, job, manifest_path: Path, orig_stem: str, prompt_id: str, service_cfg: dict[str, Any]) -> None:
+def run_topics_llm(
+  *,
+  job,
+  manifest_path: Path,
+  orig_stem: str,
+  prompt_id: str,
+  service_cfg: dict[str, Any],
+  on_progress: Optional[Callable[[str], None]] = None,
+) -> None:
   """
   Phase 41: Call Tabby (PC1) per chunk and write artifacts.
 
-  Required config (in /srv/transcribe/config/service.json):
+  Required config (in config/service.json):
     "topics": {
       "prompt_path": "/path/to/simple_prompt5.txt",
       "model": "matatonic_Mistral-Small-24B-Instruct-2501-4.0bpw-exl2",
@@ -113,6 +121,9 @@ def run_topics_llm(*, job, manifest_path: Path, orig_stem: str, prompt_id: str, 
   tabby_cfg = service_cfg.get("tabby", {}) if isinstance(service_cfg, dict) else {}
 
   prompt_path = Path(str(topics_cfg.get("prompt_path", "")))
+  if not prompt_path.is_absolute():
+    # Resolve relative paths from repo root so configs can use e.g. "prompts/simple_prompt5.txt".
+    prompt_path = (Path(__file__).resolve().parents[1] / prompt_path).resolve()
   if not prompt_path.exists():
     raise RuntimeError("topics.prompt_path missing or not found in service.json")
 
@@ -145,9 +156,15 @@ def run_topics_llm(*, job, manifest_path: Path, orig_stem: str, prompt_id: str, 
   chunks = manifest.get("chunks") or []
   total = max(1, len(chunks))
 
-  _write_status(job.status_path, phase="topics", subphase="call", message="Calling LLM…", topics_prompt_id=prompt_id)
+  msg = "Calling LLM…"
+  if on_progress:
+    try:
+      on_progress(msg)
+    except Exception:
+      pass
+  _write_status(job.status_path, phase="topics", subphase="call", message=msg, topics_prompt_id=prompt_id)
 
-  for idx0, ch in enumerate(chunks, start=1):
+  for ch in chunks:
     chunk_idx = int(ch["index"])
     chunk_file = job.result_dir / ch["filename"]
     chunk_text = _read_text(chunk_file)
@@ -161,8 +178,13 @@ def run_topics_llm(*, job, manifest_path: Path, orig_stem: str, prompt_id: str, 
 
     payload_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
-    p = 0.965 + (idx0 / total) * 0.02
-    _write_status(job.status_path, phase="topics", subphase="call", progress=p, message=f"LLM chunk {chunk_idx}/{total}…")
+    msg = f"LLM chunk {chunk_idx}/{total}…"
+    if on_progress:
+      try:
+        on_progress(msg)
+      except Exception:
+        pass
+    _write_status(job.status_path, phase="topics", subphase="call", message=msg)
 
     last_err: Optional[str] = None
     for attempt in range(retries + 1):
@@ -180,7 +202,19 @@ def run_topics_llm(*, job, manifest_path: Path, orig_stem: str, prompt_id: str, 
           time.sleep(retry_sleep_s)
 
     if last_err:
-      _write_status(job.status_path, phase="topics", subphase="call", message=f"LLM failed: {last_err}")
+      msg = f"LLM failed: {last_err}"
+      if on_progress:
+        try:
+          on_progress(msg)
+        except Exception:
+          pass
+      _write_status(job.status_path, phase="topics", subphase="call", message=msg)
       raise RuntimeError(f"Tabby call failed for chunk {chunk_idx}: {last_err}")
 
-  _write_status(job.status_path, phase="topics", subphase="call", message="LLM calls complete.")
+  msg = "LLM calls complete."
+  if on_progress:
+    try:
+      on_progress(msg)
+    except Exception:
+      pass
+  _write_status(job.status_path, phase="topics", subphase="call", message=msg)

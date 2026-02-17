@@ -2,43 +2,36 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import selectors
-import shlex
 import subprocess
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from worker_status_io import _StatusEmitter, _append_log, _append_wx
 
 
-# WhisperX progress mapping (overall job progress 0.0..1.0)
-P_SNIP_DONE = 0.05
-P_WHISPERX_DONE = 0.80  # overall job progress when WhisperX is complete
-R_VAD = (0.05, 0.08)
-R_TRANSCRIBE = (0.08, 0.68)
-R_ALIGN = (0.68, 0.74)
-R_DIARIZE = (0.74, 0.79)
-R_FINALIZE = (0.79, 0.80)
+# Progress is intentionally kept flat (0.0) during processing.
+# We only move to 1.0 when the job is finalized in worker_daemon.py.
+P_SNIP_DONE = 0.0
+P_WHISPERX_DONE = 0.0
+R_VAD = (0.0, 0.0)
+R_TRANSCRIBE = (0.0, 0.0)
+R_ALIGN = (0.0, 0.0)
+R_DIARIZE = (0.0, 0.0)
+R_FINALIZE = (0.0, 0.0)
 
-# Paths
-SERVER_CFG_PATH = Path("/srv/transcribe/config/whisperx.json")
-WHISPERX_ENTER_SH = Path.home() / "whisperx" / "enter.sh"
-WHISPERX_RUN2_SH = Path.home() / "whisperx" / "run_whisperx2.sh"
-
-
-TIMESTAMP_INFO_RE = re.compile(
-  r"^(?P<ts>\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}) - (?P<mod>[^ ]+) - (?P<lvl>[A-Z]+) - (?P<msg>.*)$"
-)
-TRANSCRIPT_RE = re.compile(
-  r"^Transcript:\s*\[(?P<a>\d+(?:\.\d+)?)\s*-->\s*(?P<b>\d+(?:\.\d+)?)\]"
-)
+# Config paths
+DEFAULT_SERVER_CFG_PATH = Path("/srv/transcribe/config/whisperx.json")
+SERVER_CFG_PATH = Path(os.getenv("TRANSCRIBE_WHISPERX_CONFIG", str(DEFAULT_SERVER_CFG_PATH)))
+WHISPERX_ENV_FILE = Path.home() / ".config" / "whisperx" / "env"
+DEFAULT_WHISPERX_VENV = Path.home() / "whisperx" / ".venv"
 
 
 def _load_server_config() -> dict[str, Any]:
-  # Safe defaults for your environment; overridden by whisperx.json when present.
+  # Safe defaults for this environment; overridden by whisperx.json when present.
   cfg: dict[str, Any] = {
     "model": "large-v3",
     "device": "cuda",
@@ -47,7 +40,8 @@ def _load_server_config() -> dict[str, Any]:
     "chunk_size": 30,
     "beam_size": 5,
     "align_model": "",
-    "keep_raw_whisperx_log": False,
+    "diarize_model": "",
+    "whisperx_venv": str(DEFAULT_WHISPERX_VENV),
   }
   if SERVER_CFG_PATH.exists():
     try:
@@ -59,201 +53,108 @@ def _load_server_config() -> dict[str, Any]:
   return cfg
 
 
-# ---- Simple performance cache for better progress estimates ----
-PERF_CACHE_PATH = Path("/srv/transcribe/config/perf_cache.json")
-PERF_EWMA_ALPHA = 0.35
-
-# Default real-time factor (wall/audio). 0.15 => ~6.7x faster than realtime.
-DEFAULT_TRANSCRIBE_RTF = 0.15
-# Default time-to-first transcript marker (seconds). Used for diagnostics only.
-DEFAULT_TTF_MARKER_S = 20.0
-
-
-def _perf_key(cfg: dict[str, Any]) -> str:
-  # Keep this stable; it keys progress expectations to the main perf-affecting knobs.
-  return (
-    f"model={cfg.get('model')}"
-    f"|device={cfg.get('device')}"
-    f"|compute={cfg.get('compute_type')}"
-    f"|bs={cfg.get('batch_size')}"
-    f"|cs={cfg.get('chunk_size')}"
-    f"|beam={cfg.get('beam_size')}"
-    f"|align={cfg.get('align_model', '')}"
-  )
-
-
-def _ewma(prev: Optional[float], new: float, alpha: float) -> float:
-  if prev is None:
-    return float(new)
-  return float(alpha) * float(new) + (1.0 - float(alpha)) * float(prev)
-
-
-def _load_perf_cache() -> dict[str, Any]:
-  try:
-    return json.loads(PERF_CACHE_PATH.read_text(encoding="utf-8"))
-  except FileNotFoundError:
-    return {}
-  except Exception:
-    # Corrupt cache should never break jobs; just ignore it.
-    return {}
-
-
-def _save_perf_cache(cache: dict[str, Any]) -> None:
-  PERF_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-  tmp = PERF_CACHE_PATH.with_suffix(PERF_CACHE_PATH.suffix + ".tmp")
-  tmp.write_text(json.dumps(cache, indent=2, sort_keys=True), encoding="utf-8")
-  tmp.replace(PERF_CACHE_PATH)
-
-
-def _get_perf_entry(cfg: dict[str, Any]) -> dict[str, Any]:
-  cache = _load_perf_cache()
-  return cache.get(_perf_key(cfg), {})
-
-
-def _update_perf_cache(
-  *,
-  cfg: dict[str, Any],
-  audio_s: float,
-  transcribe_wall_s: Optional[float],
-  ttf_marker_s: Optional[float],
-) -> None:
-  if transcribe_wall_s is None:
+def _load_env_file(path: Path) -> None:
+  if not path.exists():
     return
-  if audio_s <= 0:
+  for raw in path.read_text(encoding="utf-8").splitlines():
+    line = raw.strip()
+    if not line or line.startswith("#"):
+      continue
+    if line.startswith("export "):
+      line = line[len("export "):].strip()
+    if "=" not in line:
+      continue
+    key, val = line.split("=", 1)
+    key = key.strip()
+    val = val.strip().strip("'").strip('"')
+    if key and key not in os.environ:
+      os.environ[key] = val
+
+
+def _discover_site_packages(venv_path: Path) -> list[Path]:
+  if not venv_path.exists():
+    return []
+  found = sorted(p for p in venv_path.glob("lib/python*/site-packages") if p.is_dir())
+  if not found:
+    return []
+  py_tag = f"python{sys.version_info.major}.{sys.version_info.minor}"
+  preferred = [p for p in found if py_tag in p.as_posix()]
+  return preferred or found
+
+
+def _collect_nvidia_lib_dirs(site_packages: list[Path]) -> list[str]:
+  lib_dirs: list[str] = []
+  for sp in site_packages:
+    for p in sorted((sp / "nvidia").glob("*/lib")):
+      if p.is_dir():
+        lib_dirs.append(str(p))
+  # keep order, drop duplicates
+  unique: list[str] = []
+  for p in lib_dirs:
+    if p not in unique:
+      unique.append(p)
+  return unique
+
+
+def _merge_ld_library_path(prepend_dirs: list[str], current: str) -> str:
+  cur = [x for x in (current or "").split(":") if x]
+  merged: list[str] = []
+  for p in [*prepend_dirs, *cur]:
+    if p and p not in merged:
+      merged.append(p)
+  return ":".join(merged)
+
+
+def _resolve_whisperx_python(cfg: dict[str, Any]) -> Path:
+  venv_from_cfg = str(cfg.get("whisperx_venv") or "").strip()
+  candidates: list[Path] = []
+  if venv_from_cfg:
+    candidates.append(Path(venv_from_cfg).expanduser() / "bin" / "python")
+  candidates.append(DEFAULT_WHISPERX_VENV / "bin" / "python")
+  for c in candidates:
+    if c.exists():
+      return c
+  # Last-resort fallback; should normally never be used.
+  return Path(sys.executable)
+
+
+def _build_runner_env(cfg: dict[str, Any]) -> tuple[dict[str, str], list[Path], list[str]]:
+  _load_env_file(WHISPERX_ENV_FILE)
+  env = dict(os.environ)
+  env.setdefault("PYTHONUNBUFFERED", "1")
+  env.setdefault("PYTHONIOENCODING", "utf-8")
+  env.setdefault("FORCE_COLOR", "0")
+  # Match old enter.sh behavior so pyannote checkpoints keep loading.
+  env.setdefault("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", "1")
+
+  site_packages: list[Path] = []
+  venv_from_cfg = str(cfg.get("whisperx_venv") or "").strip()
+  if venv_from_cfg:
+    site_packages = _discover_site_packages(Path(venv_from_cfg).expanduser())
+  if not site_packages:
+    site_packages = _discover_site_packages(DEFAULT_WHISPERX_VENV)
+
+  nvidia_lib_dirs = _collect_nvidia_lib_dirs(site_packages)
+  if nvidia_lib_dirs:
+    env["LD_LIBRARY_PATH"] = _merge_ld_library_path(nvidia_lib_dirs, env.get("LD_LIBRARY_PATH", ""))
+
+  return env, site_packages, nvidia_lib_dirs
+
+
+def _emit_stage(emitter: _StatusEmitter, *, stage: str, snippet_seconds: int) -> None:
+  if stage == "transcribe":
+    emitter.maybe_emit(progress=R_TRANSCRIBE[0], message=f"Transcribing… 0s/{snippet_seconds}s", phase="whisperx_transcribe")
     return
-
-  cache = _load_perf_cache()
-  key = _perf_key(cfg)
-  ent = cache.get(key, {})
-  n = int(ent.get("n", 0)) + 1
-  ent["n"] = n
-
-  rtf = float(transcribe_wall_s) / float(audio_s)
-  ent["ewma_rtf"] = _ewma(ent.get("ewma_rtf"), rtf, PERF_EWMA_ALPHA)
-
-  if ttf_marker_s is not None:
-    ent["ewma_ttf_marker_s"] = _ewma(ent.get("ewma_ttf_marker_s"), float(ttf_marker_s), PERF_EWMA_ALPHA)
-
-  cache[key] = ent
-  _save_perf_cache(cache)
-
-
-def _build_whisperx_cmd(
-  *,
-  snippet_path: Path,
-  out_dir: Path,
-  language: str,
-  speaker_mode: str,
-  min_speakers: Optional[int],
-  max_speakers: Optional[int],
-  cfg: dict[str, Any],
-) -> str:
-  """
-  Run via bash so we can `source enter.sh` and reuse your existing WhisperX venv.
-
-  IMPORTANT:
-  We call the existing `run_whisperx2.sh` using its **positional** signature:
-
-   run_whisperx2.sh <input_audio> <language> <speaker_mode:auto|fixed> <min_speakers_or_-> <max_speakers_or_-> \
-           <output_dir> <model> <device> <compute_type> <batch_size> <chunk_size> <beam_size> <align_model_or_->
-
-  (So we do NOT pass `--model ...` style flags here.)
-  """
-  model = str(cfg.get("model", "large-v3"))
-  device = str(cfg.get("device", "cuda"))
-  compute_type = str(cfg.get("compute_type", "float16"))
-  batch_size = str(int(cfg.get("batch_size", 3)))
-  chunk_size = str(int(cfg.get("chunk_size", 30)))
-  beam_size = str(int(cfg.get("beam_size", 5)))
-
-  # Speaker args: only meaningful in fixed mode
-  min_arg = "-"
-  max_arg = "-"
-  if speaker_mode == "fixed":
-    if min_speakers is not None:
-      min_arg = str(int(min_speakers))
-    if max_speakers is not None:
-      max_arg = str(int(max_speakers))
-
-  align_model = str(cfg.get("align_model") or "").strip() or "-"
-
-  # Build command:
-  #  source enter.sh
-  #  bash run_whisperx2.sh <snippet> <language> <speaker_mode> <min> <max> <outdir> <model> <device> <compute> <batch> <chunk> <beam> <align_model>
-  cmd = (
-    "set -euo pipefail; "
-    f"source {shlex.quote(str(WHISPERX_ENTER_SH))}; "
-    f"bash {shlex.quote(str(WHISPERX_RUN2_SH))} "
-    f"{shlex.quote(str(snippet_path))} "
-    f"{shlex.quote(str(language))} "
-    f"{shlex.quote(str(speaker_mode))} "
-    f"{shlex.quote(str(min_arg))} "
-    f"{shlex.quote(str(max_arg))} "
-    f"{shlex.quote(str(out_dir))} "
-    f"{shlex.quote(str(model))} "
-    f"{shlex.quote(str(device))} "
-    f"{shlex.quote(str(compute_type))} "
-    f"{shlex.quote(str(batch_size))} "
-    f"{shlex.quote(str(chunk_size))} "
-    f"{shlex.quote(str(beam_size))} "
-    f"{shlex.quote(str(align_model))}"
-  )
-  return cmd
-
-
-def _filter_and_parse_line(line: str) -> tuple[Optional[str], dict[str, Any]]:
-  """
-  Returns (log_line_or_none, info_dict).
-
-  info_dict may contain:
-   - stage: "vad"|"transcribe"|"align"|"diarize"
-   - transcript_end_s: float
-  """
-  info: dict[str, Any] = {}
-
-  # WhisperX / tqdm output sometimes uses carriage returns; normalize for matching.
-  raw = line.rstrip("\n")
-  raw = raw.lstrip("\r")
-  if not raw.strip():
-    return None, info
-
-  raw_strip = raw.lstrip()
-
-  m_ts = TIMESTAMP_INFO_RE.match(raw_strip)
-  if m_ts:
-    msg = m_ts.group("msg")
-    msg_l = msg.lower()
-    if "performing voice activity detection" in msg_l:
-      info["stage"] = "vad"
-    elif "performing transcription" in msg_l:
-      info["stage"] = "transcribe"
-    elif "performing alignment" in msg_l or "alignment" in msg_l:
-      info["stage"] = "align"
-    elif "performing diarization" in msg_l or "diarization" in msg_l:
-      info["stage"] = "diarize"
-    # Keep timestamped lines (compact)
-    return raw_strip, info
-
-  m_tr = TRANSCRIPT_RE.match(raw_strip)
-  if m_tr:
-    a = m_tr.group("a")
-    b = m_tr.group("b")
-    try:
-      info["transcript_end_s"] = float(b)
-    except Exception:
-      pass
-    # Log only the bracketed time range, not the transcript text itself.
-    return f"Transcript: [{a} --> {b}]", info
-
-  # Keep only important non-timestamp lines (errors) + our own prefix lines
-  lower = raw_strip.lower()
-  if raw_strip.startswith("[run_whisperx2]") or raw_strip.startswith("WORKER "):
-    return raw_strip, info
-  if ("traceback" in lower) or ("error" in lower) or ("exception" in lower):
-    return raw_strip, info
-
-  # Otherwise: drop (suppresses long warnings / transcript text)
-  return None, info
+  if stage == "align":
+    emitter.maybe_emit(progress=R_ALIGN[0], message="Aligning…", phase="whisperx_align")
+    return
+  if stage == "diarize":
+    emitter.maybe_emit(progress=R_DIARIZE[0], message="Diarizing…", phase="whisperx_diarize")
+    return
+  if stage == "finalize":
+    emitter.maybe_emit(progress=R_FINALIZE[0], message="Finalizing…", phase="finalizing")
+    return
+  emitter.maybe_emit(progress=P_SNIP_DONE, message="Preparing WhisperX…", phase="whisperx_prepare")
 
 
 def _run_whisperx_streaming(
@@ -267,258 +168,194 @@ def _run_whisperx_streaming(
   min_speakers: Optional[int],
   max_speakers: Optional[int],
   cfg: dict[str, Any],
-) -> Path:
+  on_phase_timing: Optional[Callable[[str, float], None]] = None,
+  on_stage_change: Optional[Callable[[str], None]] = None,
+  on_heartbeat: Optional[Callable[[], None]] = None,
+) -> tuple[Path, dict[str, float], set[str]]:
   """
-  Run WhisperX while:
-   - writing a filtered worker.log
-   - updating status.json with realistic progress + messages
-  Returns the produced .srt path.
+  Run WhisperX through a clean WhisperX-venv subprocess that uses direct import calls.
+  This avoids mixed-venv CUDA/library issues while still using Python API (not CLI script wrapper).
   """
-  emitter = _StatusEmitter(job.status_path)
-
-  # stage tracking for timing + progress
-  stage: str = "prepare"
-  stage_t0: float = time.monotonic()
+  use_internal_status = (on_phase_timing is None and on_stage_change is None and on_heartbeat is None)
+  emitter = _StatusEmitter(job.status_path) if use_internal_status else None
   durations: dict[str, float] = {}
-  warned_pyannote = False
-  warned_torch = False
-
-  def close_stage(prev: str) -> None:
-    nonlocal stage_t0
-    t1 = time.monotonic()
-    durations[prev] = durations.get(prev, 0.0) + (t1 - stage_t0)
-    stage_t0 = t1
-
-  def set_stage(new_stage: str) -> None:
-    nonlocal stage
-    if stage != new_stage:
-      close_stage(stage)
-      stage = new_stage
-
-  # Initial status
-  emitter.maybe_emit(progress=P_SNIP_DONE, message="Preparing WhisperX…", phase="whisperx_prepare")
-
-  cmd = _build_whisperx_cmd(
-    snippet_path=snippet_path,
-    out_dir=whisperx_out_dir,
-    language=language,
-    speaker_mode=speaker_mode,
-    min_speakers=min_speakers,
-    max_speakers=max_speakers,
-    cfg=cfg,
-  )
-  _append_log(job.log_path, f"[{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}] WORKER whisperx_cmd={cmd}")
-
-  env = os.environ.copy()
-  # Force WhisperX (python) to flush logs/transcript lines promptly when piped.
-  env.setdefault("PYTHONUNBUFFERED", "1")
-  env.setdefault("PYTHONIOENCODING", "utf-8")
-  env.setdefault("FORCE_COLOR", "0")
-
-  proc = subprocess.Popen(
-    ["bash", "-lc", cmd],
-    stdout=subprocess.PIPE,
-    stderr=subprocess.STDOUT,
-    text=True,
-    bufsize=1,
-    universal_newlines=True,
-    env=env,
-  )
-  assert proc.stdout is not None
-
-  sel = selectors.DefaultSelector()
-  sel.register(proc.stdout, selectors.EVENT_READ)
-
-  last_tick = time.monotonic()
-  last_transcribe_end = 0.0
-  progress = P_SNIP_DONE
-
-  # Performance expectations for progress smoothing (learned over time)
-  perf_ent = _get_perf_entry(cfg)
-  expected_rtf = float(perf_ent.get("ewma_rtf", DEFAULT_TRANSCRIBE_RTF))
-  expected_ttf = float(perf_ent.get("ewma_ttf_marker_s", DEFAULT_TTF_MARKER_S))
-  expected_transcribe_wall_s = max(5.0, expected_rtf * float(snippet_seconds))
-
-  # Transcribe progress state
-  transcribe_stage_t0: Optional[float] = None
-  transcribe_first_marker_dt: Optional[float] = None
-  transcribe_marker_floor_end = 0.0
-
-  # Simple “creep” during stages that may be quiet
-  def creep(current: float, r: tuple[float, float], step: float) -> float:
-    lo, hi = r
-    return min(max(current, lo), hi - 0.002) + step
-
-  try:
-    while True:
-      # Periodic progress creep (helps when a stage produces little output)
-      now = time.monotonic()
-      if (now - last_tick) >= 1.0:
-        last_tick = now
-        if stage == "vad":
-          progress = min(progress, R_VAD[1] - 0.002)
-          progress = max(progress, R_VAD[0])
-          progress = min(progress + 0.002, R_VAD[1] - 0.002)
-          emitter.maybe_emit(progress=progress, message="Detecting speech…", phase="whisperx_vad")
-        elif stage == "transcribe":
-          # Progress that does not depend on Transcript markers (which often arrive late/bursty).
-          # We estimate based on expected wall time for this config, and clamp using markers when they appear.
-          if transcribe_stage_t0 is None:
-            transcribe_stage_t0 = now
-            _append_log(job.log_path, f"[{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}] WORKER expected_transcribe_wall_s={expected_transcribe_wall_s:.3f} expected_rtf={expected_rtf:.4f} expected_ttf_marker_s={expected_ttf:.3f}")
-
-          elapsed = max(0.0, now - transcribe_stage_t0)
-          base_frac = min(0.995, elapsed / max(1e-3, expected_transcribe_wall_s))
-          est_end = base_frac * float(snippet_seconds)
-
-          # Never go backwards; if we have marker info, use it as a floor.
-          est_end = max(est_end, transcribe_marker_floor_end)
-          est_end = min(float(snippet_seconds), est_end)
-
-          frac = min(1.0, max(0.0, est_end / max(1.0, float(snippet_seconds))))
-          progress = R_TRANSCRIBE[0] + frac * (R_TRANSCRIBE[1] - R_TRANSCRIBE[0])
-          pct = int(round(frac * 100))
-          shown_s = int(round(est_end))
-          emitter.maybe_emit(
-            progress=progress,
-            message=f"Transcribing… {shown_s}s/{snippet_seconds}s",
-            phase="whisperx_transcribe",
-          )
-        elif stage == "align":
-          progress = max(progress, R_ALIGN[0])
-          progress = min(progress + 0.0015, R_ALIGN[1] - 0.002)
-          emitter.maybe_emit(progress=progress, message="Aligning…", phase="whisperx_align")
-        elif stage == "diarize":
-          progress = max(progress, R_DIARIZE[0])
-          progress = min(progress + 0.001, R_DIARIZE[1] - 0.002)
-          emitter.maybe_emit(progress=progress, message="Diarizing…", phase="whisperx_diarize")
-
-      events = sel.select(timeout=0.5)
-
-      if events:
-        for key, _ in events:
-          line = key.fileobj.readline()
-          if not line:
-            continue
-
-          # Track suppressed mismatch warnings so we can log a summary once
-          if "Model was trained with pyannote.audio" in line:
-            warned_pyannote = True
-          if "Model was trained with torch" in line:
-            warned_torch = True
-
-          log_line, info = _filter_and_parse_line(line)
-          if log_line:
-            _append_wx(job.log_path, log_line)
-
-          if "stage" in info:
-            new_stage = info["stage"]
-            set_stage(new_stage)
-            if new_stage == "vad":
-              progress = max(progress, R_VAD[0])
-              emitter.maybe_emit(progress=progress, message="Detecting speech…", phase="whisperx_vad")
-            elif new_stage == "transcribe":
-              progress = max(progress, R_TRANSCRIBE[0])
-              # Start transcribe timing immediately so progress ramps from the start of the stage.
-              transcribe_stage_t0 = time.monotonic()
-              transcribe_first_marker_dt = None
-              transcribe_marker_floor_end = 0.0
-              last_transcribe_end = 0.0
-              emitter.maybe_emit(
-                progress=progress,
-                message=f"Transcribing… 0s/{snippet_seconds}s",
-                phase="whisperx_transcribe",
-              )
-            elif new_stage == "align":
-              progress = max(progress, R_ALIGN[0])
-              emitter.maybe_emit(progress=progress, message="Aligning…", phase="whisperx_align")
-            elif new_stage == "diarize":
-              progress = max(progress, R_DIARIZE[0])
-              emitter.maybe_emit(progress=progress, message="Diarizing…", phase="whisperx_diarize")
-
-          if "transcript_end_s" in info:
-            end_s = float(info["transcript_end_s"])
-            last_transcribe_end = max(last_transcribe_end, end_s)
-            transcribe_marker_floor_end = max(transcribe_marker_floor_end, end_s)
-            if transcribe_first_marker_dt is None and transcribe_stage_t0 is not None:
-              transcribe_first_marker_dt = max(0.0, time.monotonic() - transcribe_stage_t0)
-              _append_log(
-                job.log_path,
-                f"[{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}] WORKER ttf_marker_s={transcribe_first_marker_dt:.3f} first_marker_end_s={end_s:.3f}",
-              )
-
-      # exit condition: process ended AND no more data to read
-      if proc.poll() is not None:
-        # drain remaining
-        while True:
-          line = proc.stdout.readline()
-          if not line:
-            break
-          log_line, info = _filter_and_parse_line(line)
-          if log_line:
-            _append_wx(job.log_path, log_line)
-        break
-
-    rc = proc.returncode or 0
-    if warned_pyannote or warned_torch:
-      parts = []
-      if warned_pyannote:
-        parts.append("pyannote.audio")
-      if warned_torch:
-        parts.append("torch")
-      _append_log(job.log_path, f"[{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}] WARN version-mismatch lines suppressed for: {', '.join(parts)}")
-
-    if rc != 0:
-      raise RuntimeError(f"WhisperX exited with rc={rc}")
-
-  finally:
+  emitted_live: set[str] = set()
+  current_stage = "prepare"
+  if emitter is not None:
+    _emit_stage(emitter, stage=current_stage, snippet_seconds=snippet_seconds)
+  if on_stage_change:
     try:
-      sel.unregister(proc.stdout)
-    except Exception:
-      pass
-    try:
-      sel.close()
+      on_stage_change("prepare")
     except Exception:
       pass
 
-  # Close last stage timing
-  close_stage(stage)
-
-  # Update perf cache (learn expected speed for future progress estimates)
   try:
-    _update_perf_cache(
-      cfg=cfg,
-      audio_s=float(snippet_seconds),
-      transcribe_wall_s=durations.get("transcribe"),
-      ttf_marker_s=transcribe_first_marker_dt,
+    t0 = time.monotonic()
+    env, site_packages, nvidia_lib_dirs = _build_runner_env(cfg)
+    runner_python = _resolve_whisperx_python(cfg)
+    runner_script = Path(__file__).with_name("whisperx_import_runner.py")
+    if not runner_script.exists():
+      raise RuntimeError(f"Missing runner script: {runner_script}")
+
+    whisperx_out_dir.mkdir(parents=True, exist_ok=True)
+    args_path = whisperx_out_dir / "_import_runner_args.json"
+    out_path = whisperx_out_dir / "_import_runner_out.json"
+    args_obj = {
+      "snippet_path": str(snippet_path),
+      "whisperx_out_dir": str(whisperx_out_dir),
+      "language": str(language),
+      "speaker_mode": str(speaker_mode),
+      "min_speakers": (int(min_speakers) if min_speakers is not None else None),
+      "max_speakers": (int(max_speakers) if max_speakers is not None else None),
+      "model": str(cfg.get("model", "large-v3")),
+      "device": str(cfg.get("device", "cuda")),
+      "compute_type": str(cfg.get("compute_type", "float16")),
+      "batch_size": int(cfg.get("batch_size", 3)),
+      "chunk_size": int(cfg.get("chunk_size", 30)),
+      "beam_size": int(cfg.get("beam_size", 5)),
+      "align_model": str(cfg.get("align_model") or "").strip(),
+      "diarize_model": str(cfg.get("diarize_model") or "").strip(),
+    }
+    args_path.write_text(json.dumps(args_obj, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    durations["prepare"] = time.monotonic() - t0
+    if on_phase_timing:
+      try:
+        on_phase_timing("whisperx_prepare", float(durations["prepare"]))
+        emitted_live.add("prepare")
+      except Exception:
+        pass
+
+    _append_wx(job.log_path, f"whisperx_runner_python={runner_python}")
+    if site_packages:
+      _append_wx(job.log_path, f"whisperx_site_packages={[str(p) for p in site_packages]}")
+    _append_wx(job.log_path, f"nvidia_lib_dirs={nvidia_lib_dirs}")
+
+    cmd = [str(runner_python), str(runner_script), "--args-json", str(args_path), "--out-json", str(out_path)]
+    _append_log(job.log_path, f"[{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}] WORKER whisperx_runner_cmd={cmd}")
+
+    proc = subprocess.Popen(
+      cmd,
+      stdout=subprocess.PIPE,
+      stderr=subprocess.STDOUT,
+      text=True,
+      bufsize=1,
+      universal_newlines=True,
+      env=env,
     )
-    # Log the learned parameters (best effort)
-    ent = _get_perf_entry(cfg)
-    if ent:
-      _append_log(
-        job.log_path,
-        f"[{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}] WORKER perf_cache n={ent.get('n')} ewma_rtf={ent.get('ewma_rtf')} ewma_ttf_marker_s={ent.get('ewma_ttf_marker_s')}",
+    assert proc.stdout is not None
+
+    sel = selectors.DefaultSelector()
+    sel.register(proc.stdout, selectors.EVENT_READ)
+    last_line = ""
+    last_heartbeat_t = time.monotonic()
+
+    try:
+      while True:
+        events = sel.select(timeout=0.5)
+        now_t = time.monotonic()
+        if on_heartbeat and (now_t - last_heartbeat_t) >= 1.0:
+          try:
+            on_heartbeat()
+          except Exception:
+            pass
+          last_heartbeat_t = now_t
+
+        if events:
+          for key, _ in events:
+            raw = key.fileobj.readline()
+            if not raw:
+              continue
+            line = raw.rstrip("\n").lstrip("\r")
+            if not line:
+              continue
+            last_line = line
+            _append_wx(job.log_path, line)
+            if line.startswith("STAGE "):
+              new_stage = line[len("STAGE "):].strip().lower()
+              if new_stage in {"transcribe", "align", "diarize", "finalize"}:
+                current_stage = new_stage
+                if emitter is not None:
+                  _emit_stage(emitter, stage=current_stage, snippet_seconds=snippet_seconds)
+                if on_stage_change:
+                  try:
+                    on_stage_change(new_stage)
+                  except Exception:
+                    pass
+            if line.startswith("TIMING "):
+              parts = line.split()
+              if len(parts) >= 3:
+                phase_key = parts[1].strip().lower()
+                try:
+                  sec = float(parts[2])
+                except Exception:
+                  sec = None
+                if sec is not None:
+                  durations[phase_key] = sec
+                  if on_phase_timing:
+                    try:
+                      on_phase_timing(f"whisperx_{phase_key}", sec)
+                      emitted_live.add(phase_key)
+                    except Exception:
+                      pass
+
+        if proc.poll() is not None:
+          # Drain remaining output.
+          while True:
+            raw = proc.stdout.readline()
+            if not raw:
+              break
+            line = raw.rstrip("\n").lstrip("\r")
+            if not line:
+              continue
+            last_line = line
+            _append_wx(job.log_path, line)
+          break
+    finally:
+      try:
+        sel.unregister(proc.stdout)
+      except Exception:
+        pass
+      try:
+        sel.close()
+      except Exception:
+        pass
+
+    rc = proc.returncode if proc.returncode is not None else proc.wait()
+    if rc != 0:
+      raise RuntimeError(f"WhisperX runner exited rc={rc} stage={current_stage} last_line={last_line!r}")
+    if not out_path.exists():
+      raise RuntimeError(f"WhisperX runner did not write output metadata: {out_path}")
+
+    out = json.loads(out_path.read_text(encoding="utf-8"))
+    out_timings = out.get("timings")
+    if isinstance(out_timings, dict):
+      for k, v in out_timings.items():
+        try:
+          durations[str(k)] = float(v)
+        except Exception:
+          pass
+
+    srt_path = Path(str(out.get("srt_path", "") or ""))
+    if not srt_path.exists():
+      srts = sorted(whisperx_out_dir.glob("*.srt"), key=lambda p: p.stat().st_mtime)
+      if not srts:
+        raise RuntimeError(f"No .srt produced in {whisperx_out_dir}")
+      srt_path = srts[-1]
+
+    if emitter is not None:
+      _emit_stage(emitter, stage="finalize", snippet_seconds=snippet_seconds)
+      emitter.maybe_emit(
+        progress=P_WHISPERX_DONE,
+        message="WhisperX complete",
+        phase="whisperx_done",
+        extra={"srt_filename": srt_path.name, "timings": {k: round(v, 3) for k, v in durations.items()}},
       )
-  except Exception:
-    pass
 
-  # Find the produced SRT (assume exactly one .srt in output dir; otherwise pick newest)
-  srts = sorted(whisperx_out_dir.glob("*.srt"), key=lambda p: p.stat().st_mtime)
-  if not srts:
-    raise RuntimeError(f"No .srt produced in {whisperx_out_dir}")
-  srt_path = srts[-1]
+    tsz = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _append_log(job.log_path, f"[{tsz}] WORKER timings " + " ".join(f"{k}={durations[k]:.3f}s" for k in sorted(durations.keys())))
+    return srt_path, dict(durations), set(emitted_live)
 
-  # Finalize status
-  emitter.maybe_emit(progress=R_FINALIZE[0], message="Finalizing…", phase="finalizing")
-  emitter.maybe_emit(
-    progress=P_WHISPERX_DONE,
-    message="WhisperX complete",
-    phase="whisperx_done",
-    extra={"srt_filename": srt_path.name, "timings": {k: round(v, 3) for k, v in durations.items()}},
-  )
-
-  # Also log timings explicitly
-  tsz = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-  _append_log(job.log_path, f"[{tsz}] WORKER timings " + " ".join(f"{k}={durations[k]:.3f}s" for k in sorted(durations.keys())))
-
-  return srt_path
+  except Exception as e:
+    tsz = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _append_log(job.log_path, f"[{tsz}] WORKER whisperx_failed stage={current_stage} error={e!r}")
+    raise

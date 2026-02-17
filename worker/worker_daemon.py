@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import fcntl
+import hashlib
 import json
+import os
+import socket
 import time
 from pathlib import Path
 from datetime import datetime, timezone
@@ -14,16 +18,26 @@ from phase_topics_llm import run_topics_llm
 from phase_topics_parse import parse_topics_raw_file
 from phase_topics_validate import validate_all_chunks
 from phase_topics_merge import merge_topics
-from phase_whisperx import P_SNIP_DONE, _load_server_config, _run_whisperx_streaming
+from phase_whisperx import _load_server_config, _run_whisperx_streaming
+from progress_predictor import build_prediction, phase_order_for_job
 
 
 SLEEP_IDLE_SECONDS = 2.0
 
-SERVICE_CONFIG_PATH = "/srv/transcribe/config/service.json"
+def _repo_root() -> Path:
+  # worker/worker_daemon.py -> worker -> repo root
+  return Path(__file__).resolve().parents[1]
+
+
+DEFAULT_SERVICE_CONFIG_PATH = _repo_root() / "config" / "service.json"
+SERVICE_CONFIG_PATH = Path(os.getenv("TRANSCRIBE_SERVICE_CONFIG", str(DEFAULT_SERVICE_CONFIG_PATH)))
+DEFAULT_PROGRESS_DB_DIR = _repo_root() / "data" / "progress_db"
+PROGRESS_DB_DIR = Path(os.getenv("TRANSCRIBE_PROGRESS_DB_DIR", str(DEFAULT_PROGRESS_DB_DIR)))
+RUNS_V1_PATH = Path(os.getenv("TRANSCRIBE_PROGRESS_RUNS_PATH", str(PROGRESS_DB_DIR / "runs_v1.jsonl")))
 
 
 def _load_service_config() -> dict:
-  # Minimal defaults; override via /srv/transcribe/config/service.json if present
+  # Minimal defaults; override via config/service.json (or TRANSCRIBE_SERVICE_CONFIG) if present.
   cfg = {
     "snip": {
       "minutes_default": 5
@@ -49,6 +63,267 @@ def _load_service_config() -> dict:
   return cfg
 
 
+def _format_timings_text(rows: list[tuple[str, float]], *, total_s: float | None = None) -> str:
+  cumulative = 0.0
+  done_rows: list[tuple[str, float]] = []
+  for name, sec in rows:
+    safe = max(0.0, float(sec))
+    cumulative += safe
+    done_rows.append((name, safe))
+
+  shown_total = max(0.0, float(total_s)) if total_s is not None else cumulative
+  parts: list[str] = []
+  for name, sec in done_rows:
+    parts.append(f"{name}={sec:.2f}s")
+  parts.append(f"total={shown_total:.2f}s")
+
+  return " | ".join(parts)
+
+
+def _sha256_file(path: Path, *, chunk_size: int = 1024 * 1024) -> str:
+  h = hashlib.sha256()
+  with path.open("rb") as f:
+    while True:
+      b = f.read(chunk_size)
+      if not b:
+        break
+      h.update(b)
+  return h.hexdigest()
+
+
+def _phase_seconds_from_rows(rows: list[tuple[str, float]]) -> dict[str, float]:
+  out: dict[str, float] = {}
+  for name, sec in rows:
+    safe = max(0.0, float(sec))
+    out[name] = out.get(name, 0.0) + safe
+  return {k: round(v, 6) for k, v in out.items()}
+
+
+def _host_id() -> str:
+  raw = (os.getenv("TRANSCRIBE_HOST_ID") or "").strip()
+  if raw:
+    return raw
+  return (socket.gethostname().split(".")[0] or "unknown-host").strip() or "unknown-host"
+
+
+def _worker_instance() -> str:
+  raw = (os.getenv("TRANSCRIBE_WORKER_INSTANCE") or "").strip()
+  if raw:
+    return raw
+  unit = (os.getenv("SYSTEMD_UNIT") or "").strip()
+  if "@" in unit:
+    return unit.split("@", 1)[1].split(".", 1)[0] or "1"
+  return "1"
+
+
+def _hardware_key(host_id: str) -> str:
+  raw = (os.getenv("TRANSCRIBE_HARDWARE_KEY") or "").strip()
+  if raw:
+    return raw
+  if host_id == "dc1":
+    return "dc1-rtx5070ti-cuda"
+  if host_id == "dc2":
+    return "dc2-rtx5090-cuda"
+  return f"{host_id}-unknown"
+
+
+def _config_key(
+  *,
+  language: str,
+  speaker_mode: str,
+  snippet_seconds: int,
+  topics_enabled: bool,
+  prompt_id: str,
+  whisperx_cfg: dict,
+) -> str:
+  payload = {
+    "language": language,
+    "speaker_mode": speaker_mode,
+    "snippet_seconds": int(snippet_seconds),
+    "topics_enabled": bool(topics_enabled),
+    "prompt_id": prompt_id,
+    "whisperx": {
+      "model": whisperx_cfg.get("model"),
+      "device": whisperx_cfg.get("device"),
+      "compute_type": whisperx_cfg.get("compute_type"),
+      "batch_size": whisperx_cfg.get("batch_size"),
+      "chunk_size": whisperx_cfg.get("chunk_size"),
+      "beam_size": whisperx_cfg.get("beam_size"),
+      "align_model": whisperx_cfg.get("align_model"),
+      "diarize_model": whisperx_cfg.get("diarize_model"),
+    },
+  }
+  blob = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+  return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
+def _append_progress_run_if_new_done(record: dict[str, object]) -> tuple[bool, str]:
+  """
+  Append done-run record to runs_v1.jsonl unless the same (hash, snippet_seconds, topics_enabled)
+  already has a done record.
+  Returns (written, reason).
+  """
+  if str(record.get("outcome", "")) != "done":
+    return False, "non_done_skipped"
+
+  content_hash = str(record.get("content_hash_sha256", "") or "")
+  if not content_hash:
+    return False, "missing_hash"
+  try:
+    snippet_seconds = int(record.get("snippet_seconds", -1))
+  except Exception:
+    snippet_seconds = -1
+  topics_enabled = bool(record.get("topics_enabled", False))
+
+  RUNS_V1_PATH.parent.mkdir(parents=True, exist_ok=True)
+  with RUNS_V1_PATH.open("a+", encoding="utf-8") as f:
+    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+    try:
+      f.seek(0)
+      for line in f:
+        s = line.strip()
+        if not s:
+          continue
+        try:
+          obj = json.loads(s)
+        except Exception:
+          continue
+        if str(obj.get("outcome", "")) != "done":
+          continue
+        if str(obj.get("content_hash_sha256", "")) != content_hash:
+          continue
+        try:
+          obj_snip = int(obj.get("snippet_seconds", -1))
+        except Exception:
+          obj_snip = -1
+        obj_topics = bool(obj.get("topics_enabled", False))
+        if obj_snip == snippet_seconds and obj_topics == topics_enabled:
+          return False, "duplicate_hash_snippet_topics_done"
+
+      f.seek(0, os.SEEK_END)
+      f.write(json.dumps(record, ensure_ascii=False) + "\n")
+      f.flush()
+      os.fsync(f.fileno())
+      return True, "written"
+    finally:
+      fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+
+def _build_progress_tracker(
+  *,
+  status_path: Path,
+  phase_order: list[str],
+  phase_expected_s: dict[str, float],
+  eta_confidence: float,
+  eta_hints: list[str],
+):
+  """
+  Returns closures:
+    start_phase(phase_key, base_message, status_phase)
+    finish_phase(phase_key, actual_elapsed_s)
+    heartbeat()
+    set_base_message(base_message)
+  """
+  completed_actual: dict[str, float] = {}
+  current_phase_key: str | None = None
+  current_phase_started_t = 0.0
+  current_status_phase = ""
+  current_base_message = "Running…"
+  last_progress = 0.0
+  last_write_t = 0.0
+  hints = eta_hints
+  cleaned: list[str] = []
+  for raw in hints:
+    h = str(raw).strip()
+    if h and h not in cleaned:
+      cleaned.append(h)
+  hints[:] = cleaned
+
+  def _after_current(ph: str | None) -> list[str]:
+    if ph is None:
+      return [p for p in phase_order if p not in completed_actual]
+    if ph not in phase_order:
+      return []
+    i = phase_order.index(ph)
+    return [p for p in phase_order[i + 1:] if p not in completed_actual]
+
+  def _sum_completed() -> float:
+    return sum(max(0.0, float(v)) for v in completed_actual.values())
+
+  def _write_eta(*, force: bool = False) -> None:
+    nonlocal last_progress, last_write_t
+    now = time.monotonic()
+    if not force and (now - last_write_t) < 1.0:
+      return
+
+    done_actual = _sum_completed()
+    elapsed_current = max(0.0, now - current_phase_started_t) if current_phase_key else 0.0
+    expected_current = max(0.1, float(phase_expected_s.get(current_phase_key or "", 0.0)))
+    if current_phase_key and expected_current > 0 and elapsed_current > (expected_current * 1.1):
+      if "phase_overrun" not in hints:
+        hints.append("phase_overrun")
+
+    current_projected_total = max(expected_current, elapsed_current)
+    remaining_after = sum(max(0.0, float(phase_expected_s.get(p, 0.0))) for p in _after_current(current_phase_key))
+
+    if current_phase_key:
+      est_total = done_actual + current_projected_total + remaining_after
+      est_elapsed = done_actual + elapsed_current
+      est_remaining = max(0.0, (current_projected_total - elapsed_current) + remaining_after)
+    else:
+      # Between phases
+      est_total = max(0.1, done_actual + remaining_after)
+      est_elapsed = done_actual
+      est_remaining = max(0.0, est_total - est_elapsed)
+
+    # Keep some headroom until done phase sets progress=1.0.
+    raw_progress = est_elapsed / max(est_total, 0.1)
+    progress = min(0.99, max(last_progress, float(raw_progress)))
+    last_progress = progress
+    last_write_t = now
+
+    _write_status(
+      status_path,
+      progress=progress,
+      phase=current_status_phase or None,
+      message=current_base_message,
+      progress_mode="predictive_v1",
+      eta_total_s=round(est_total, 3),
+      eta_remaining_s=round(est_remaining, 3),
+      eta_confidence=round(float(eta_confidence), 3),
+      eta_hints=list(hints),
+    )
+
+  def start_phase(phase_key: str, base_message: str, status_phase: str) -> None:
+    nonlocal current_phase_key, current_phase_started_t, current_status_phase, current_base_message
+    current_phase_key = phase_key
+    current_phase_started_t = time.monotonic()
+    current_status_phase = status_phase
+    current_base_message = base_message
+    _write_eta(force=True)
+
+  def finish_phase(phase_key: str, actual_elapsed_s: float) -> None:
+    nonlocal current_phase_key, current_phase_started_t
+    safe = max(0.0, float(actual_elapsed_s))
+    completed_actual[phase_key] = completed_actual.get(phase_key, 0.0) + safe
+    if current_phase_key == phase_key:
+      current_phase_key = None
+      current_phase_started_t = 0.0
+    _write_eta(force=True)
+
+  def heartbeat() -> None:
+    _write_eta(force=False)
+
+  def set_base_message(base_message: str, *, status_phase: str | None = None) -> None:
+    nonlocal current_base_message, current_status_phase
+    current_base_message = base_message
+    if status_phase:
+      current_status_phase = status_phase
+    _write_eta(force=True)
+
+  return start_phase, finish_phase, heartbeat, set_base_message
+
+
 def main() -> int:
   print("worker_daemon started")
   while True:
@@ -58,13 +333,46 @@ def main() -> int:
       continue
 
     try:
-      now = _utc_iso()
+      job_t0 = time.monotonic()
+      timing_rows: list[tuple[str, float]] = []
+      job_started_utc = _utc_iso()
+      content_hash_sha256 = ""
+      chunks_count = 0
+      eta_confidence = 0.0
+      eta_hints: list[str] = []
+
+      def _noop_start(_phase_key: str, _base_message: str, _status_phase: str) -> None:
+        return None
+
+      def _noop_finish(_phase_key: str, _actual_elapsed_s: float) -> None:
+        return None
+
+      def _noop_heartbeat() -> None:
+        return None
+
+      def _noop_set_message(_base_message: str, *, status_phase: str | None = None) -> None:
+        return None
+
+      progress_start_phase = _noop_start
+      progress_finish_phase = _noop_finish
+      progress_heartbeat = _noop_heartbeat
+      progress_set_message = _noop_set_message
+
+      def record_phase_timing(name: str, elapsed_s: float) -> None:
+        timing_rows.append((name, max(0.0, float(elapsed_s))))
+        txt = _format_timings_text(timing_rows)
+        _write_status(job.status_path, timings_text=txt)
+        _append_log(
+          job.log_path,
+          f"[{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}] WORKER phase_timing name={name} seconds={max(0.0, float(elapsed_s)):.3f} timings_text={txt}",
+        )
+
       _write_status(
         job.status_path,
         state="running",
         phase="snipping",
         progress=0.0,
-        started_at=now,
+        started_at=job_started_utc,
         message="Starting job…",
       )
 
@@ -82,18 +390,49 @@ def main() -> int:
       speaker_mode = str(opts.get("speaker_mode", "auto") or "auto")
       min_speakers = opts.get("min_speakers")
       max_speakers = opts.get("max_speakers")
+      topics_cfg = service_cfg.get("topics", {}) if isinstance(service_cfg, dict) else {}
+      topics_enabled = bool(topics_cfg.get("enabled", False))
+      prompt_id = str(topics_cfg.get("prompt_id", "topics_v1"))
+      host_id_val = _host_id()
+      hardware_key_val = _hardware_key(host_id_val)
 
       input_path = job.upload_dir / orig_filename
       if not input_path.exists():
         raise RuntimeError(f"Upload missing: {input_path}")
+      try:
+        content_hash_sha256 = _sha256_file(input_path)
+        _append_log(job.log_path, f"[{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}] WORKER content_hash_sha256={content_hash_sha256}")
+      except Exception as e_hash:
+        content_hash_sha256 = ""
+        _append_log(job.log_path, f"[{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}] WARN content_hash_failed error={e_hash!r}")
+
+      prediction = build_prediction(
+        runs_path=RUNS_V1_PATH,
+        hardware_key=hardware_key_val,
+        topics_enabled=topics_enabled,
+        snippet_seconds=snippet_seconds,
+      )
+      eta_confidence = float(prediction.confidence)
+      eta_hints = list(prediction.hints)
+      phase_order = phase_order_for_job(topics_enabled=topics_enabled)
+      progress_start_phase, progress_finish_phase, progress_heartbeat, progress_set_message = _build_progress_tracker(
+        status_path=job.status_path,
+        phase_order=phase_order,
+        phase_expected_s=prediction.phase_expected_s,
+        eta_confidence=prediction.confidence,
+        eta_hints=eta_hints,
+      )
 
       disp = f"{snippet_seconds//60} min" if snippet_seconds > 0 and (snippet_seconds % 60) == 0 else f"{snippet_seconds} s"
-      _write_status(job.status_path, phase="snipping", progress=0.0, message=f"Creating snippet ({disp})…")
+      progress_start_phase("snipping", f"Creating snippet ({disp})…", "snipping")
+      snip_t0 = time.monotonic()
       snippet_path = _make_snippet(input_path, job.snippet_dir, seconds=snippet_seconds)
+      snip_elapsed = time.monotonic() - snip_t0
+      record_phase_timing("snipping", snip_elapsed)
+      progress_finish_phase("snipping", snip_elapsed)
       _write_status(
         job.status_path,
         phase="snipping",
-        progress=P_SNIP_DONE,
         snippet_filename=snippet_path.name,
         message=f"Snippet created: {snippet_path.name}",
       )
@@ -102,9 +441,28 @@ def main() -> int:
       _append_log(job.log_path, f"[{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}] WORKER service_cfg={json.dumps(service_cfg, ensure_ascii=False)}")
       _append_log(job.log_path, f"[{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}] WORKER whisperx_cfg={json.dumps(cfg, ensure_ascii=False)}")
 
-      _write_status(job.status_path, phase="whisperx_prepare", progress=P_SNIP_DONE, message="Preparing WhisperX…")
+      progress_start_phase("whisperx_prepare", "Preparing WhisperX…", "whisperx_prepare")
 
-      srt_path = _run_whisperx_streaming(
+      wx_t0 = time.monotonic()
+
+      def on_wx_stage(stage_name: str) -> None:
+        stage = str(stage_name or "").strip().lower()
+        if stage == "prepare":
+          progress_start_phase("whisperx_prepare", "Preparing WhisperX…", "whisperx_prepare")
+        elif stage == "transcribe":
+          progress_start_phase("whisperx_transcribe", "Transcribing…", "whisperx_transcribe")
+        elif stage == "align":
+          progress_start_phase("whisperx_align", "Aligning…", "whisperx_align")
+        elif stage == "diarize":
+          progress_start_phase("whisperx_diarize", "Diarizing…", "whisperx_diarize")
+        elif stage == "finalize":
+          progress_start_phase("whisperx_finalize", "Finalizing…", "finalizing")
+
+      def on_wx_phase_timing(phase_name: str, elapsed_s: float) -> None:
+        record_phase_timing(phase_name, elapsed_s)
+        progress_finish_phase(phase_name, elapsed_s)
+
+      srt_path, wx_timings, wx_emitted_live = _run_whisperx_streaming(
         job=job,
         snippet_path=snippet_path,
         whisperx_out_dir=job.whisperx_dir,
@@ -114,25 +472,78 @@ def main() -> int:
         min_speakers=(int(min_speakers) if min_speakers is not None else None),
         max_speakers=(int(max_speakers) if max_speakers is not None else None),
         cfg=cfg,
+        on_phase_timing=on_wx_phase_timing,
+        on_stage_change=on_wx_stage,
+        on_heartbeat=progress_heartbeat,
       )
+      wx_elapsed = time.monotonic() - wx_t0
+      emitted = False
+      live_keys = set(wx_emitted_live or set())
+      if isinstance(wx_timings, dict):
+        order = ("prepare", "transcribe", "align", "diarize", "finalize")
+        seen: set[str] = set()
+        for key in order:
+          if key in wx_timings:
+            if key in live_keys:
+              seen.add(key)
+              emitted = True
+              continue
+            try:
+              on_wx_phase_timing(f"whisperx_{key}", float(wx_timings[key]))
+              emitted = True
+              seen.add(key)
+            except Exception:
+              pass
+        for key in sorted(k for k in wx_timings.keys() if k not in seen):
+          if key in live_keys:
+            emitted = True
+            continue
+          try:
+            on_wx_phase_timing(f"whisperx_{key}", float(wx_timings[key]))
+            emitted = True
+          except Exception:
+            pass
+      if not emitted:
+        on_wx_phase_timing("whisperx", wx_elapsed)
+
       # Phase 31: SRT -> speaker_lines
       orig_stem = Path(orig_filename).stem if orig_filename else "transcript"
-      _write_status(job.status_path, phase="postprocess", subphase="speaker_lines", progress=0.94, message="Generating speaker_lines…")
+      progress_start_phase("postprocess", "Generating speaker_lines…", "postprocess")
+      post_t0 = time.monotonic()
+      _write_status(job.status_path, phase="postprocess", subphase="speaker_lines", message="Generating speaker_lines…")
       speaker_lines_path, transcript_end_hms = make_speaker_lines_from_srt(job=job, srt_path=srt_path, orig_stem=orig_stem)
 
       # Phase 32: chunk speaker_lines + manifest
-      _write_status(job.status_path, phase="postprocess", subphase="chunk_speaker_lines", progress=0.96, message="Chunking speaker_lines…")
+      progress_set_message("Chunking speaker_lines…", status_phase="postprocess")
+      _write_status(job.status_path, phase="postprocess", subphase="chunk_speaker_lines", message="Chunking speaker_lines…")
       manifest_path = chunk_speaker_lines(job=job, speaker_lines_path=speaker_lines_path, orig_stem=orig_stem, service_cfg=service_cfg, transcript_end_hms=transcript_end_hms)
+      try:
+        manifest_for_count = json.loads(manifest_path.read_text(encoding="utf-8"))
+        chunks_count = len(manifest_for_count.get("chunks") or [])
+      except Exception:
+        chunks_count = 0
+      post_elapsed = time.monotonic() - post_t0
+      record_phase_timing("postprocess", post_elapsed)
+      progress_finish_phase("postprocess", post_elapsed)
 
 
       # Phase 40: topics (optional; disabled by default)
-      topics_cfg = service_cfg.get("topics", {}) if isinstance(service_cfg, dict) else {}
-      topics_enabled = bool(topics_cfg.get("enabled", False))
-      prompt_id = str(topics_cfg.get("prompt_id", "topics_v1"))
-
       if topics_enabled:
+        progress_start_phase("llm_topics", "Calling LLM…", "topics")
+        topics_t0 = time.monotonic()
+
+        def on_topics_progress(message: str) -> None:
+          progress_set_message(message, status_phase="topics")
+
         # 41) Call LLM (stub for now: only writes payloads; no raw output)
-        run_topics_llm(job=job, manifest_path=manifest_path, orig_stem=orig_stem, prompt_id=prompt_id, service_cfg=service_cfg)
+        run_topics_llm(
+          job=job,
+          manifest_path=manifest_path,
+          orig_stem=orig_stem,
+          prompt_id=prompt_id,
+          service_cfg=service_cfg,
+          on_progress=on_topics_progress,
+        )
 
         # 42) Parse (expects *_raw.txt files to exist; since stub doesn't write them, this will be a no-op for now)
         # When PC1 call is implemented, it will write:
@@ -168,25 +579,77 @@ def main() -> int:
           prompt_id=prompt_id,
           out_merged_path=merged_path,
         )
+        topics_elapsed = time.monotonic() - topics_t0
+        record_phase_timing("llm_topics", topics_elapsed)
+        progress_finish_phase("llm_topics", topics_elapsed)
       else:
         _write_status(job.status_path, phase="postprocess", subphase="chunk_speaker_lines", message="Topics disabled; skipping.")
+        record_phase_timing("llm_topics_skipped", 0.0)
+        progress_finish_phase("llm_topics_skipped", 0.0)
 
       # Finalize
+      finished_at_utc = _utc_iso()
+      actual_total_s = max(0.0, float(time.monotonic() - job_t0))
+      final_timings = _format_timings_text(timing_rows, total_s=actual_total_s)
       _write_status(
         job.status_path,
         state="done",
         phase="done",
         progress=1.0,
-        finished_at=_utc_iso(),
+        finished_at=finished_at_utc,
         message="Done",
         srt_filename=srt_path.name,
         speaker_lines_filename=speaker_lines_path.name,
         speaker_lines_manifest_filename=manifest_path.name,
+        timings_text=final_timings,
+        progress_mode="predictive_v1",
+        eta_total_s=round(actual_total_s, 3),
+        eta_remaining_s=0.0,
+        eta_confidence=round(float(eta_confidence), 3),
+        eta_hints=list(eta_hints),
       )
+
+      # Append one run record per unique upload content hash (done-only), to avoid DB pollution on repeated test files.
+      try:
+        host_id_val = _host_id()
+        record = {
+          "schema_version": "1.0",
+          "run_id": job.job_id,
+          "job_id": job.job_id,
+          "content_hash_sha256": content_hash_sha256,
+          "ts_start_utc": job_started_utc,
+          "ts_end_utc": finished_at_utc,
+          "host_id": host_id_val,
+          "worker_instance": _worker_instance(),
+          "snippet_seconds": int(snippet_seconds),
+          "topics_enabled": bool(topics_enabled),
+          "chunks_count": int(chunks_count),
+          "config_key": _config_key(
+            language=language,
+            speaker_mode=speaker_mode,
+            snippet_seconds=snippet_seconds,
+            topics_enabled=topics_enabled,
+            prompt_id=prompt_id,
+            whisperx_cfg=cfg,
+          ),
+          "hardware_key": _hardware_key(host_id_val),
+          "phase_seconds": _phase_seconds_from_rows(timing_rows),
+          "wait_seconds": {},
+          "total_seconds": actual_total_s,
+          "outcome": "done",
+          "error_text": "",
+        }
+        written, reason = _append_progress_run_if_new_done(record)
+        _append_log(job.log_path, f"[{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}] WORKER progress_db {reason} runs_path={RUNS_V1_PATH}")
+      except Exception as e_db:
+        _append_log(job.log_path, f"[{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}] WARN progress_db_write_failed error={e_db!r}")
+
       finish_job(job, ok=True)
       print(f"Done {job.job_id}")
 
     except Exception as e:
+      actual_total_s = max(0.0, float(time.monotonic() - job_t0))
+      final_timings = _format_timings_text(timing_rows, total_s=actual_total_s)
       _write_status(
         job.status_path,
         state="error",
@@ -195,6 +658,12 @@ def main() -> int:
         message=f"Worker error: {e!r}",
         finished_at=_utc_iso(),
         error=str(e),
+        timings_text=final_timings,
+        progress_mode="predictive_v1",
+        eta_total_s=round(actual_total_s, 3),
+        eta_remaining_s=0.0,
+        eta_confidence=round(float(eta_confidence), 3),
+        eta_hints=list(eta_hints),
       )
       finish_job(job, ok=False)
       print(f"Error {job.job_id}: {e!r}")
