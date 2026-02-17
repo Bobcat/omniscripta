@@ -4,7 +4,9 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import socket
+import threading
 import time
 from pathlib import Path
 from datetime import datetime, timezone
@@ -229,8 +231,12 @@ def _build_progress_tracker(
   current_phase_started_t = 0.0
   current_status_phase = ""
   current_base_message = "Running…"
+  current_chunk_idx = 0
+  current_chunk_total = 0
+  current_chunk_started_t = 0.0
   last_progress = 0.0
   last_write_t = 0.0
+  total_expected_all = max(0.1, sum(max(0.0, float(phase_expected_s.get(p, 0.0))) for p in phase_order))
   hints = eta_hints
   cleaned: list[str] = []
   for raw in hints:
@@ -249,6 +255,13 @@ def _build_progress_tracker(
 
   def _sum_completed() -> float:
     return sum(max(0.0, float(v)) for v in completed_actual.values())
+
+  def _sum_completed_expected() -> float:
+    total = 0.0
+    for p in phase_order:
+      if p in completed_actual:
+        total += max(0.0, float(phase_expected_s.get(p, 0.0)))
+    return total
 
   def _write_eta(*, force: bool = False) -> None:
     nonlocal last_progress, last_write_t
@@ -276,8 +289,23 @@ def _build_progress_tracker(
       est_elapsed = done_actual
       est_remaining = max(0.0, est_total - est_elapsed)
 
-    # Keep some headroom until done phase sets progress=1.0.
-    raw_progress = est_elapsed / max(est_total, 0.1)
+    # UX progress is phase-weighted (plan based), so late overruns in earlier
+    # phases do not collapse visibility for remaining phases (notably llm_topics).
+    completed_expected = _sum_completed_expected()
+    if current_phase_key:
+      phase_frac = min(0.995, max(0.0, elapsed_current / expected_current))
+      if current_phase_key == "llm_topics" and current_chunk_total > 1 and 1 <= current_chunk_idx <= current_chunk_total:
+        chunk_base = max(0.0, float(current_chunk_idx - 1) / float(current_chunk_total))
+        chunk_ceiling = min(0.995, float(current_chunk_idx) / float(current_chunk_total))
+        chunk_span = max(0.0001, chunk_ceiling - chunk_base)
+        expected_chunk = max(0.1, expected_current / float(current_chunk_total))
+        elapsed_chunk = max(0.0, now - current_chunk_started_t) if current_chunk_started_t > 0.0 else 0.0
+        chunk_frac = min(0.995, max(0.0, elapsed_chunk / expected_chunk))
+        phase_frac = min(chunk_ceiling, chunk_base + (chunk_frac * chunk_span))
+      raw_progress = (completed_expected + (phase_frac * expected_current)) / total_expected_all
+    else:
+      raw_progress = completed_expected / total_expected_all
+
     progress = min(0.99, max(last_progress, float(raw_progress)))
     last_progress = progress
     last_write_t = now
@@ -296,10 +324,14 @@ def _build_progress_tracker(
 
   def start_phase(phase_key: str, base_message: str, status_phase: str) -> None:
     nonlocal current_phase_key, current_phase_started_t, current_status_phase, current_base_message
+    nonlocal current_chunk_idx, current_chunk_total, current_chunk_started_t
     current_phase_key = phase_key
     current_phase_started_t = time.monotonic()
     current_status_phase = status_phase
     current_base_message = base_message
+    current_chunk_idx = 0
+    current_chunk_total = 0
+    current_chunk_started_t = 0.0
     _write_eta(force=True)
 
   def finish_phase(phase_key: str, actual_elapsed_s: float) -> None:
@@ -316,12 +348,41 @@ def _build_progress_tracker(
 
   def set_base_message(base_message: str, *, status_phase: str | None = None) -> None:
     nonlocal current_base_message, current_status_phase
+    nonlocal current_chunk_idx, current_chunk_total, current_chunk_started_t
     current_base_message = base_message
+    if current_phase_key == "llm_topics":
+      m = re.search(r"\bLLM\s+chunk\s+(\d+)\s*/\s*(\d+)\b", str(base_message), re.IGNORECASE)
+      if m:
+        try:
+          idx = int(m.group(1))
+          total = int(m.group(2))
+        except Exception:
+          idx = 0
+          total = 0
+        if total > 0 and 1 <= idx <= total:
+          current_chunk_idx = idx
+          current_chunk_total = total
+          current_chunk_started_t = time.monotonic()
     if status_phase:
       current_status_phase = status_phase
     _write_eta(force=True)
 
   return start_phase, finish_phase, heartbeat, set_base_message
+
+
+def _start_progress_heartbeat_thread(callback, *, interval_s: float = 0.5):
+  stop_event = threading.Event()
+
+  def _run() -> None:
+    while not stop_event.wait(max(0.05, float(interval_s))):
+      try:
+        callback()
+      except Exception:
+        pass
+
+  t = threading.Thread(target=_run, name="progress-heartbeat", daemon=True)
+  t.start()
+  return stop_event, t
 
 
 def main() -> int:
@@ -535,15 +596,21 @@ def main() -> int:
         def on_topics_progress(message: str) -> None:
           progress_set_message(message, status_phase="topics")
 
-        # 41) Call LLM (stub for now: only writes payloads; no raw output)
-        run_topics_llm(
-          job=job,
-          manifest_path=manifest_path,
-          orig_stem=orig_stem,
-          prompt_id=prompt_id,
-          service_cfg=service_cfg,
-          on_progress=on_topics_progress,
-        )
+        # Keep progress moving during potentially long blocking LLM calls.
+        llm_hb_stop, llm_hb_thread = _start_progress_heartbeat_thread(progress_heartbeat, interval_s=0.5)
+        try:
+          # 41) Call LLM (stub for now: only writes payloads; no raw output)
+          run_topics_llm(
+            job=job,
+            manifest_path=manifest_path,
+            orig_stem=orig_stem,
+            prompt_id=prompt_id,
+            service_cfg=service_cfg,
+            on_progress=on_topics_progress,
+          )
+        finally:
+          llm_hb_stop.set()
+          llm_hb_thread.join(timeout=1.0)
 
         # 42) Parse (expects *_raw.txt files to exist; since stub doesn't write them, this will be a no-op for now)
         # When PC1 call is implemented, it will write:
