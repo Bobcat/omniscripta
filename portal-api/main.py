@@ -42,6 +42,24 @@ def _as_bool(raw: Any) -> bool:
     return s in {"1", "true", "yes", "on"}
 
 
+def _param_from_request_or_referer(request: Request, key: str) -> str:
+    qv = request.query_params.get(key)
+    if qv is not None:
+        return str(qv).strip()
+
+    ref = request.headers.get("referer") or request.headers.get("referrer")
+    if ref:
+        try:
+            parsed = urlparse(ref)
+            ref_q = parse_qs(parsed.query or "")
+            vals = ref_q.get(key) or []
+            if vals:
+                return str(vals[0]).strip()
+        except Exception:
+            pass
+    return ""
+
+
 def _parse_calibration_seconds_env() -> list[int]:
     raw = str(os.getenv("TRANSCRIBE_CALIBRATION_SECONDS", "") or "").strip()
     if not raw:
@@ -62,26 +80,21 @@ def _parse_calibration_seconds_env() -> list[int]:
 
 
 def _calibration_requested(request: Request) -> bool:
-    # Direct query on upload endpoint:
-    #   POST /api/demo/jobs?calibration=1
-    q = request.query_params.get("calibration")
-    if q is not None:
-        return _as_bool(q)
+    q = _param_from_request_or_referer(request, "calibration")
+    return _as_bool(q) if q else False
 
-    # Convenient path from UI page URL:
-    #   /index.html?calibration=1
-    # Browser sends this in Referer for same-origin XHR.
-    ref = request.headers.get("referer") or request.headers.get("referrer")
-    if ref:
-        try:
-            parsed = urlparse(ref)
-            ref_q = parse_qs(parsed.query or "")
-            vals = ref_q.get("calibration") or []
-            if vals:
-                return _as_bool(vals[0])
-        except Exception:
-            pass
-    return False
+
+def _snip_seconds_override(request: Request) -> int | None:
+    raw = _param_from_request_or_referer(request, "snip")
+    if not raw:
+        return None
+    try:
+        minutes = int(raw)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="snip must be an integer number of minutes")
+    if minutes < 1 or minutes > 720:
+        raise HTTPException(status_code=400, detail="snip out of range (1..720 minutes)")
+    return int(minutes * 60)
 
 
 @app.post("/demo/jobs")
@@ -123,6 +136,9 @@ def create_demo_job(
         "min_speakers": min_speakers,
         "max_speakers": max_speakers,
     }
+    snippet_seconds_override = _snip_seconds_override(request)
+    if snippet_seconds_override is not None:
+        base_options["snippet_seconds"] = int(snippet_seconds_override)
 
     calibration_enabled = _calibration_requested(request)
     calibration_seconds = _parse_calibration_seconds_env() if calibration_enabled else []
@@ -144,7 +160,10 @@ def create_demo_job(
     extra_job_ids: list[str] = []
     extra_failed: list[str] = []
     if calibration_enabled:
-        for sec in calibration_seconds:
+        sec_list = list(calibration_seconds)
+        if snippet_seconds_override is not None:
+            sec_list = [s for s in sec_list if int(s) != int(snippet_seconds_override)]
+        for sec in sec_list:
             try:
                 opts = dict(base_options)
                 opts["snippet_seconds"] = int(sec)
@@ -161,6 +180,7 @@ def create_demo_job(
         "calibration_enqueued": len(extra_job_ids),
         "calibration_seconds": calibration_seconds if calibration_enabled else [],
         "calibration_failed": extra_failed,
+        "snippet_seconds": base_options.get("snippet_seconds"),
     }
 
 
