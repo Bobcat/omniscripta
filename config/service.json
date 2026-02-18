@@ -17,7 +17,7 @@
     "token_estimator": "chars_div4",
     "enabled": true,
     "prompt_id": "topics_v1",
-    "prompt_path": "prompts/simple_prompt5.txt",
+    "prompt_path": "/srv/transcribe/prompts/simple_prompt5.txt",
     "model": "matatonic_Mistral-Small-24B-Instruct-2501-4.0bpw-exl2",
     "generation": {
       "max_tokens": 2048,
