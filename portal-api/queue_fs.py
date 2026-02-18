@@ -9,7 +9,22 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 
-BASE = Path("/srv/transcribe/data/demo_jobs")
+def _repo_root() -> Path:
+    # portal-api/queue_fs.py -> portal-api -> repo root
+    return Path(__file__).resolve().parents[1]
+
+
+def _jobs_base() -> Path:
+    # Allow override for e.g. local dev: TRANSCRIBE_JOBS_BASE=/tmp/demo_jobs
+    raw = (os.getenv("TRANSCRIBE_JOBS_BASE") or "").strip()
+    if raw:
+        p = Path(raw)
+        return p if p.is_absolute() else (_repo_root() / p)
+
+    return _repo_root() / "data" / "demo_jobs"
+
+
+BASE = _jobs_base()
 INBOX = BASE / "inbox"
 RUNNING = BASE / "running"
 DONE = BASE / "done"

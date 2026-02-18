@@ -452,6 +452,106 @@
       display: none !important;
     }
 
+    .svc-settings-wrap {
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      max-width: 1100px;
+    }
+
+    .svc-settings-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .svc-settings-title {
+      margin: 0;
+      font-size: 1.3rem;
+      line-height: 1.2;
+    }
+
+    .svc-settings-subtitle {
+      margin: 6px 0 0;
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+
+    .svc-settings-status {
+      font-size: 0.9rem;
+    }
+
+    .svc-settings-tabs {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .svc-settings-tab {
+      border: 1px solid var(--border);
+      background: #fff;
+      border-radius: 8px;
+      padding: 6px 10px;
+      cursor: pointer;
+      font-size: 0.9rem;
+    }
+
+    .svc-settings-tab.active {
+      background: var(--active);
+      border-color: #9ac6f6;
+      font-weight: 600;
+    }
+
+    .svc-settings-panel {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: #fff;
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      min-height: 220px;
+    }
+
+    .svc-settings-empty {
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+
+    .svc-settings-meta {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 4px;
+      font-size: 0.9rem;
+      color: #111;
+    }
+
+    .svc-settings-error {
+      color: #a11;
+      background: #fff2f2;
+      border: 1px solid #ffd5d5;
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-size: 0.9rem;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .svc-settings-json {
+      margin: 0;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #f8fafc;
+      padding: 10px;
+      overflow: auto;
+      font-size: 0.84rem;
+      line-height: 1.45;
+      max-height: 65vh;
+    }
+
     /* Text View Styles */
     .tv-seg {
       color: #334155;
@@ -1911,16 +2011,17 @@
       padding: 16px;
       width: 100%;
       order: 1;
-      /* Text first */
+    }
+
+    body.mobile .doc-view-splitter {
+      order: 2;
     }
 
     body.mobile #topicsView {
       width: 100%;
-      height: 18vh;
-      /* Shared height */
       border-left: none;
-      border-top: 1px solid var(--border);
-      order: 2;
+      border-top: none;
+      order: 3;
     }
 
     body.mobile .tv-block {
@@ -1962,8 +2063,135 @@
     /* Additional cleanup for mobile review mode */
     body.mobile .header-actions {
       gap: 4px;
-      position: relative;
-      /* Anchor for dropdown */
+    }
+
+    /* --- Step 1: Upload Zone --- */
+    .upload-zone {
+      border: 2px dashed #e2e8f0;
+      border-radius: 16px;
+      background: #fcfdfe;
+      padding: 48px 24px;
+      text-align: center;
+      transition: all 0.2s ease;
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      width: 100%;
+      box-sizing: border-box;
+    }
+
+    .upload-zone:hover {
+      border-color: var(--primary);
+      background: #f8faff;
+    }
+
+    .upload-zone-content {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .upload-icon {
+      color: #94a3b8;
+      transition: color 0.2s ease;
+    }
+
+    .upload-zone:hover .upload-icon {
+      color: var(--primary);
+      transform: translateY(-2px);
+    }
+
+    .upload-zone.drag-over {
+      border-color: var(--primary);
+      background: #eff6ff;
+      transform: scale(1.02);
+    }
+
+    .upload-hint {
+      font-size: 14px;
+      color: #64748b;
+      margin: 0;
+    }
+
+    /* --- File Confirm Box (Premium Redesign) --- */
+    .file-confirm-box {
+      display: flex;
+      align-items: center;
+      background: linear-gradient(135deg, #ffffff 0%, #f8faff 100%);
+      border: 1px solid #e2e8f0;
+      border-radius: 14px;
+      padding: 16px;
+      gap: 16px;
+      box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
+      margin-bottom: 0;
+    }
+
+    .file-icon-styled {
+      flex-shrink: 0;
+      width: 48px;
+      height: 48px;
+      background: #eff6ff;
+      color: var(--primary);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 12px;
+      border: 1px solid #dbeafe;
+      box-shadow: inset 0 2px 4px rgba(37, 99, 235, 0.03);
+    }
+
+    .file-info {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+    }
+
+    .file-name-label {
+      font-size: 15px;
+      font-weight: 600;
+      color: #0f172a;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      line-height: 1.3;
+    }
+
+    .change-file-link {
+      background: none;
+      border: none;
+      padding: 0;
+      margin: 4px 0 0 0;
+      color: #64748b;
+      font-size: 13px;
+      cursor: pointer;
+      text-align: left;
+      transition: color 0.2s ease;
+      width: fit-content;
+      font-weight: 500;
+    }
+
+    .change-file-link:hover {
+      color: var(--primary);
+      text-decoration: underline;
+    }
+
+    /* Update Start Translation button to be more prominent in step 2 */
+    #startUploadBtn.primary {
+      padding: 12px 24px;
+      font-size: 15px;
+      font-weight: 600;
+      border-radius: 10px;
+      letter-spacing: 0.01em;
+      box-shadow: 0 4px 6px -1px rgba(37, 99, 235, 0.1);
+      transition: opacity 0.2s ease;
+    }
+
+    #startUploadBtn.primary:hover {
+      opacity: 0.9;
     }
 
     /* Desktop: Flow normally */
@@ -2175,8 +2403,8 @@
       height: 100dvh;
       /* Use dynamic viewport height */
       box-sizing: border-box;
-      overflow-y: auto;
-      /* Ensure scrolling happens here */
+      overflow: hidden;
+      /* Children scroll individually, not the container */
     }
 
     body.mobile #textView {
@@ -2288,54 +2516,63 @@
       overflow: hidden !important;
     }
 
-    /* --- Mobile Relative Sizing (60/40) --- */
+    /* --- Mobile Draggable Split (textView / topicsView) --- */
     body.mobile #docViewContainer {
       flex-direction: column !important;
-      /* Stack vertically */
+      --tv-split-ratio: 0.6;
+      /* default 60% text / 40% topics — overridden by JS */
     }
-
-
 
     body.mobile #textView {
-      /* 60% relative height */
-      flex: 6 1 0% !important;
+      flex: none !important;
+      height: calc(var(--tv-split-ratio) * (100% - 12px)) !important;
       overflow-y: auto !important;
-      padding-bottom: 20px !important;
-      min-height: 0;
-      /* Fix indentation - Give some breathing room */
-      padding-left: 10px !important;
-      margin-left: 0 !important;
-      padding-right: 10px !important;
-      padding-top: 10px;
-    }
-
-    /* Fix Metadata alignment on mobile */
-    body.mobile .tv-time {
-      width: auto !important;
-      text-align: left !important;
-      padding-right: 8px !important;
-      /* Small gap before speaker */
-      flex: 0 0 auto !important;
-    }
-
-    body.mobile .tv-speaker {
-      width: auto !important;
-      max-width: none !important;
-      /* Allow full name */
+      padding: 10px !important;
+      min-height: 60px !important;
     }
 
     body.mobile #topicsView {
-      /* 40% relative height */
-      flex: 4 1 0% !important;
+      flex: 1 1 0% !important;
       width: 100% !important;
-      /* Full width */
       border-left: none !important;
-      border-top: 1px solid var(--border) !important;
-      min-height: 0 !important;
-      /* Allow shrinking */
-      padding-bottom: 100px;
+      border-top: none !important;
+      min-height: 60px !important;
       overflow-y: auto !important;
       display: block !important;
+      padding-bottom: 100px;
+    }
+
+    /* --- Doc-View Splitter Handle (mobile only) --- */
+    .doc-view-splitter {
+      flex: 0 0 auto;
+      height: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: row-resize;
+      touch-action: none;
+      user-select: none;
+      -webkit-user-select: none;
+      background: #f5f5f5;
+      border-top: 1px solid var(--border, #e0e0e0);
+      border-bottom: 1px solid var(--border, #e0e0e0);
+      z-index: 10;
+      position: relative;
+    }
+
+    .doc-view-splitter-grip {
+      width: 32px;
+      height: 3px;
+      border-radius: 2px;
+      background: #999;
+      opacity: 0.7;
+      transition: opacity 0.15s;
+    }
+
+    .doc-view-splitter:active .doc-view-splitter-grip,
+    .doc-view-splitter.dragging .doc-view-splitter-grip {
+      opacity: 1;
+      background: #555;
     }
 
 

@@ -26,6 +26,33 @@ def _fmt_eta(seconds: float) -> str:
   return f"{m:02d}:{sec:02d}"
 
 
+def _timings_with_running_total(timings_text: str, running_total_s: float | None) -> str:
+  timings = str(timings_text or "").strip()
+  if not timings:
+    return timings
+  if running_total_s is None:
+    return timings
+  try:
+    total = max(0.0, float(running_total_s))
+  except Exception:
+    return timings
+
+  parts = [p.strip() for p in timings.split("|")]
+  out: list[str] = []
+  replaced = False
+  for p in parts:
+    if not p:
+      continue
+    if p.startswith("total="):
+      out.append(f"total={total:.2f}s")
+      replaced = True
+    else:
+      out.append(p)
+  if not replaced:
+    out.append(f"total={total:.2f}s")
+  return " | ".join(out)
+
+
 def _append_log(log_path: Path, line: str) -> None:
   log_path.parent.mkdir(parents=True, exist_ok=True)
   with log_path.open("a", encoding="utf-8") as f:
@@ -63,8 +90,23 @@ def _write_status(status_path: Path, **patch: Any) -> None:
   timings = str(cur.get("timings_text", "") or "").strip()
   eta_total = cur.get("eta_total_s")
   eta_remaining = cur.get("eta_remaining_s")
+  elapsed_s = cur.get("elapsed_s")
   eta_hints_raw = cur.get("eta_hints")
   msg = str(cur.get("message", "") or "")
+
+  running_total_s: float | None = None
+  if elapsed_s is not None:
+    try:
+      running_total_s = float(elapsed_s)
+    except Exception:
+      running_total_s = None
+  elif eta_total is not None and eta_remaining is not None:
+    try:
+      running_total_s = float(eta_total) - float(eta_remaining)
+    except Exception:
+      running_total_s = None
+  timings = _timings_with_running_total(timings, running_total_s)
+
   if msg:
     if " || eta: " in msg:
       msg = msg.split(" || eta: ", 1)[0]

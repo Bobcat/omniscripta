@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omniscripta.local/schemas/progress/hardware_profiles_v1.schema.json",
+  "title": "Progress Hardware Profiles v1",
+  "type": "object",
+  "required": ["schema_version", "profiles"],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "profiles": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "host_id",
+          "gpu_name",
+          "gpu_vram_gb",
+          "cuda_version",
+          "torch_version",
+          "whisperx_version",
+          "notes"
+        ],
+        "properties": {
+          "host_id": { "type": "string", "minLength": 1 },
+          "gpu_name": { "type": "string", "minLength": 1 },
+          "gpu_vram_gb": { "type": "number", "minimum": 0 },
+          "cuda_version": { "type": "string", "minLength": 1 },
+          "torch_version": { "type": "string", "minLength": 1 },
+          "whisperx_version": { "type": "string", "minLength": 1 },
+          "notes": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

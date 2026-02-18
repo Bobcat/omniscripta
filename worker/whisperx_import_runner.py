@@ -18,9 +18,68 @@ def _cleanup_torch(torch_mod: Any) -> None:
     pass
 
 
+def _as_positive_int(value: Any) -> int | None:
+  try:
+    v = int(value)
+  except Exception:
+    return None
+  if v <= 0:
+    return None
+  return v
+
+
+def _apply_torch_thread_tuning(
+  torch_mod: Any,
+  *,
+  torch_num_threads: int | None,
+  torch_num_interop_threads: int | None,
+) -> dict[str, Any]:
+  errors: list[str] = []
+  if torch_num_threads is not None:
+    try:
+      torch_mod.set_num_threads(int(torch_num_threads))
+    except Exception as e:
+      errors.append(f"set_num_threads_failed:{e!r}")
+  if torch_num_interop_threads is not None:
+    try:
+      torch_mod.set_num_interop_threads(int(torch_num_interop_threads))
+    except Exception as e:
+      errors.append(f"set_num_interop_threads_failed:{e!r}")
+
+  effective_threads: int | None = None
+  effective_interop: int | None = None
+  try:
+    effective_threads = int(torch_mod.get_num_threads())
+  except Exception as e:
+    errors.append(f"get_num_threads_failed:{e!r}")
+  try:
+    effective_interop = int(torch_mod.get_num_interop_threads())
+  except Exception as e:
+    errors.append(f"get_num_interop_threads_failed:{e!r}")
+
+  return {
+    "requested": {
+      "torch_num_threads": torch_num_threads,
+      "torch_num_interop_threads": torch_num_interop_threads,
+    },
+    "effective": {
+      "torch_num_threads": effective_threads,
+      "torch_num_interop_threads": effective_interop,
+    },
+    "errors": errors,
+  }
+
+
+def _is_likely_hf_gated_none_pipeline_error(exc: Exception) -> bool:
+  # whisperx.diarize currently chains `.to(device)` directly after
+  # Pipeline.from_pretrained(...). When Hugging Face access is denied for a
+  # gated/private model, from_pretrained may yield None and trigger this shape.
+  msg = str(exc).lower()
+  return isinstance(exc, AttributeError) and ("nonetype" in msg) and ("to" in msg)
+
+
 def _run(args_obj: dict[str, Any], out_json: Path) -> int:
   import whisperx
-  from whisperx.diarize import DiarizationPipeline
   from whisperx.utils import get_writer
   import torch
 
@@ -29,7 +88,9 @@ def _run(args_obj: dict[str, Any], out_json: Path) -> int:
   whisperx_out_dir.mkdir(parents=True, exist_ok=True)
 
   language = str(args_obj.get("language", "nl") or "nl")
-  speaker_mode = str(args_obj.get("speaker_mode", "auto") or "auto")
+  speaker_mode = str(args_obj.get("speaker_mode", "auto") or "auto").strip().lower()
+  if speaker_mode in {"none", "off", "disabled", "no_speaker", "nospeaker", "no-speaker"}:
+    speaker_mode = "none"
   min_speakers = args_obj.get("min_speakers")
   max_speakers = args_obj.get("max_speakers")
 
@@ -41,14 +102,27 @@ def _run(args_obj: dict[str, Any], out_json: Path) -> int:
   beam_size = int(args_obj.get("beam_size", 5))
   align_model = str(args_obj.get("align_model") or "").strip() or None
   diarize_model = str(args_obj.get("diarize_model") or "").strip() or None
+  torch_num_threads = _as_positive_int(args_obj.get("torch_num_threads"))
+  torch_num_interop_threads = _as_positive_int(args_obj.get("torch_num_interop_threads"))
 
   durations: dict[str, float] = {}
+
+  thread_info = _apply_torch_thread_tuning(
+    torch,
+    torch_num_threads=torch_num_threads,
+    torch_num_interop_threads=torch_num_interop_threads,
+  )
+  thread_info["env"] = {
+    "OMP_NUM_THREADS": (os.getenv("OMP_NUM_THREADS") or "").strip(),
+    "MKL_NUM_THREADS": (os.getenv("MKL_NUM_THREADS") or "").strip(),
+  }
 
   print(f"INFO whisperx_file={getattr(whisperx, '__file__', '<unknown>')}", flush=True)
   print(
     f"INFO config model={model_name} device={device} compute={compute_type} batch={batch_size} chunk={chunk_size} beam={beam_size} language={language} speaker_mode={speaker_mode}",
     flush=True,
   )
+  print(f"INFO thread_tuning={json.dumps(thread_info, ensure_ascii=False, sort_keys=True)}", flush=True)
 
   print("STAGE transcribe", flush=True)
   t0 = time.monotonic()
@@ -100,29 +174,44 @@ def _run(args_obj: dict[str, Any], out_json: Path) -> int:
   del aligner
   _cleanup_torch(torch)
 
-  print("STAGE diarize", flush=True)
-  t0 = time.monotonic()
-  hf_token = (os.getenv("HF_TOKEN") or "").strip() or None
-  if not hf_token:
-    print("WARN HF_TOKEN is not set; diarization model loading may fail", flush=True)
-  diarize_kwargs: dict[str, Any] = {}
-  if speaker_mode == "fixed":
-    if min_speakers is not None:
-      diarize_kwargs["min_speakers"] = int(min_speakers)
-    if max_speakers is not None:
-      diarize_kwargs["max_speakers"] = int(max_speakers)
-  diarize_pipe = DiarizationPipeline(
-    model_name=diarize_model,
-    use_auth_token=hf_token,
-    device=device,
-  )
-  diarize_df = diarize_pipe(str(snippet_path), **diarize_kwargs)
-  aligned = whisperx.assign_word_speakers(diarize_df, aligned)
-  durations["diarize"] = time.monotonic() - t0
-  print(f"TIMING diarize {durations['diarize']:.6f}", flush=True)
+  if speaker_mode == "none":
+    print("INFO diarize_skipped speaker_mode=none", flush=True)
+  else:
+    from whisperx.diarize import DiarizationPipeline
 
-  del diarize_pipe
-  _cleanup_torch(torch)
+    print("STAGE diarize", flush=True)
+    t0 = time.monotonic()
+    hf_token = (os.getenv("HF_TOKEN") or "").strip() or None
+    if not hf_token:
+      print("WARN HF_TOKEN is not set; diarization model loading may fail", flush=True)
+    diarize_kwargs: dict[str, Any] = {}
+    if speaker_mode == "fixed":
+      if min_speakers is not None:
+        diarize_kwargs["min_speakers"] = int(min_speakers)
+      if max_speakers is not None:
+        diarize_kwargs["max_speakers"] = int(max_speakers)
+    try:
+      diarize_pipe = DiarizationPipeline(
+        model_name=diarize_model,
+        use_auth_token=hf_token,
+        device=device,
+      )
+    except Exception as e:
+      if _is_likely_hf_gated_none_pipeline_error(e):
+        model_ref = str(diarize_model or "pyannote/speaker-diarization-3.1")
+        raise RuntimeError(
+          f"Could not load diarization model '{model_ref}'. "
+          "Hugging Face access is likely missing for this gated/private model. "
+          f"Accept model terms at https://hf.co/{model_ref} and ensure HF_TOKEN has read access."
+        ) from e
+      raise
+    diarize_df = diarize_pipe(str(snippet_path), **diarize_kwargs)
+    aligned = whisperx.assign_word_speakers(diarize_df, aligned)
+    durations["diarize"] = time.monotonic() - t0
+    print(f"TIMING diarize {durations['diarize']:.6f}", flush=True)
+
+    del diarize_pipe
+    _cleanup_torch(torch)
 
   print("STAGE finalize", flush=True)
   t0 = time.monotonic()

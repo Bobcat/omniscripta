@@ -1,0 +1,14 @@
+[Unit]
+Description=Transcribe Dev API (Uvicorn)
+
+[Service]
+Type=simple
+WorkingDirectory=/home/gunnar/projects/transcribe-dev/portal-api
+ExecStart=/srv/transcribe/portal-api/.venv/bin/uvicorn main:app --host 127.0.0.1 --port 8001
+Restart=always
+RestartSec=2
+Environment=TRANSCRIBE_JOBS_BASE=/home/gunnar/projects/transcribe-dev/data/demo_jobs
+Environment=TRANSCRIBE_ROOT_PATH=/api
+
+[Install]
+WantedBy=default.target

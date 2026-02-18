@@ -7,12 +7,17 @@
   <title>Omniscripta</title>
   <meta name="description" content="Audio Transcription and Editing" />
 
+  <!-- Cache Control for Mobile Browsers -->
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
+
   <!-- Material Symbols -->
   <link rel="stylesheet"
     href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" />
-  <link rel="stylesheet" href="css/style.css?v=35">
-  <link rel="stylesheet" href="css/layout.css?v=35">
-  <link rel="stylesheet" href="css/upload.css?v=27">
+  <link rel="stylesheet" href="style.css?v=7">
+  <link rel="stylesheet" href="layout.css?v=7">
+  <link rel="stylesheet" href="upload.css?v=7">
 </head>
 
 <body>
@@ -31,12 +36,17 @@
             <span class="material-symbols-outlined">upload</span>
             <span class="link-text">Upload audio</span>
           </li>
+          <li data-action="open-local" title="Open local .srt">
+            <span class="material-symbols-outlined">folder_open</span>
+            <span class="link-text">Open local project</span>
+          </li>
+          <input type="file" id="localProjectInput" accept=".srt" hidden />
         </ul>
 
         <!-- Projects will be injected here by app.js -->
 
         <ul class="nav-links" style="margin-top: auto;">
-          <li data-action="settings" title="Settings (Coming Soon)" class="disabled">
+          <li data-action="settings" title="Settings">
             <span class="material-symbols-outlined">settings</span>
             <span class="link-text">Settings</span>
           </li>
@@ -49,7 +59,18 @@
     </main>
   </div>
 
-  <script  src="app.bundle.js"></script>
+  <!-- Alert modal -->
+  <div aria-labelledby="alertTitle" aria-modal="true" class="modal hidden" id="alertModal" role="dialog">
+    <div class="modal-card">
+      <h3 id="alertTitle">Notification</h3>
+      <p id="alertMessage" style="margin-top: 10px; line-height: 1.5; color: var(--muted);"></p>
+      <div class="modal-actions">
+        <button class="primary" id="alertOkBtn">OK</button>
+      </div>
+    </div>
+  </div>
+
+  <script  src="app.bundle.js?v=7"></script>
 </body>
 
 </html>

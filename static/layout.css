@@ -142,6 +142,19 @@ body {
     flex-direction: column;
 }
 
+.build-stamp {
+    padding: 8px 16px 4px;
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+    opacity: 0.75;
+    letter-spacing: 0.02em;
+    user-select: none;
+}
+
+.sidebar:not(.expanded) .build-stamp {
+    display: none;
+}
+
 /* Ensure projects list takes available space and scrolls */
 .projects-list {
     flex: 1;
@@ -249,15 +262,39 @@ body {
     /* Optional: add some padding if needed, but views might handle their own */
 }
 
-@media (max-width: 768px) {
+/* Floating hamburger button (created by JS, lives outside sidebar) */
+#mobile-menu-toggle {
+    display: none;
+    position: fixed;
+    top: 4px;
+    left: 16px;
+    z-index: 10001;
+    width: 40px;
+    height: 40px;
+    padding: 0;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.95);
+    border: 1px solid var(--border);
+    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+    cursor: pointer;
+    line-height: 1;
+}
+
+#mobile-menu-toggle .material-symbols-outlined {
+    font-size: 20px;
+}
+
+@media (max-width: 600px) {
     .main-content {
-        margin-left: var(--sidebar-width-collapsed);
+        margin-left: 0;
     }
 }
 
 
 /* --- Mobile Responsiveness --- */
-@media (max-width: 768px) {
+@media (max-width: 600px) {
     .sidebar {
         position: fixed;
         /* When expanded, it covers content. When collapsed, it sits on left? 
@@ -272,10 +309,9 @@ body {
     }
 
     .sidebar:not(.expanded) {
-        /* Visible collapsed state on mobile */
-        width: var(--sidebar-width-collapsed);
-        transform: none;
-        /* Reset the hidden transform */
+        width: 0;
+        overflow: hidden;
+        border-right: none;
     }
 
     .sidebar.expanded {
@@ -304,17 +340,15 @@ body {
         display: block;
     }
 
-    /* Since the sidebar toggle is INSIDE the sidebar, 
-       we need a way to open it from the main content if it's closed.
-       The existing designs usually have a header bar on mobile.
-       Our design puts the toggle inside the sidebar.
-       
-       We should add a mobile-only toggle button in the main view or 
-       rely on the view's internal header having a menu button (like Gemini).
-       
-       Proposed: The Views (Upload/Editor) should have a hamburger button 
-       that triggers the configured "open sidebar" event.
-    */
+    /* Show floating toggle on mobile when sidebar is NOT open */
+    #mobile-menu-toggle {
+        display: flex;
+    }
+
+    /* Hide floating toggle when sidebar is expanded (sidebar's own toggle takes over) */
+    body.sidebar-open #mobile-menu-toggle {
+        display: none;
+    }
 }
 
 /* Adjustments for existing CSS inputs/cards to fit new layout */
@@ -325,6 +359,10 @@ body {
 }
 
 /* --- Projects List Customization --- */
+.projects-list li.local .link-text {
+    color: var(--meta);
+}
+
 .projects-list li {
     display: flex;
     /* Use flexbox for the list item itself */
