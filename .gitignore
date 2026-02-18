@@ -3,9 +3,8 @@ __pycache__/
 *.pyc
 .venv/
 
-# Local config (real config + secrets)
-config/service.json
-config/whisperx.json
+# Runtime config (track real JSON configs)
+config/*.json.example
 *.env
 
 # Data / job outputs / logs
