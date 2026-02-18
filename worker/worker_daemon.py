@@ -129,6 +129,15 @@ def _hardware_key(host_id: str) -> str:
   return f"{host_id}-unknown"
 
 
+def _normalize_speaker_mode(value: object) -> str:
+  raw = str(value or "auto").strip().lower()
+  if raw in {"none", "off", "disabled", "no_speaker", "nospeaker", "no-speaker"}:
+    return "none"
+  if raw == "fixed":
+    return "fixed"
+  return "auto"
+
+
 def _config_key(
   *,
   language: str,
@@ -161,7 +170,8 @@ def _config_key(
 
 def _append_progress_run_if_new_done(record: dict[str, object]) -> tuple[bool, str]:
   """
-  Append done-run record to runs_v1.jsonl unless the same (hash, snippet_seconds, topics_enabled)
+  Append done-run record to runs_v1.jsonl unless the same
+  (hash, snippet_seconds, topics_enabled, speaker_mode)
   already has a done record.
   Returns (written, reason).
   """
@@ -176,6 +186,7 @@ def _append_progress_run_if_new_done(record: dict[str, object]) -> tuple[bool, s
   except Exception:
     snippet_seconds = -1
   topics_enabled = bool(record.get("topics_enabled", False))
+  speaker_mode = _normalize_speaker_mode(record.get("speaker_mode", "auto"))
 
   RUNS_V1_PATH.parent.mkdir(parents=True, exist_ok=True)
   with RUNS_V1_PATH.open("a+", encoding="utf-8") as f:
@@ -199,8 +210,9 @@ def _append_progress_run_if_new_done(record: dict[str, object]) -> tuple[bool, s
         except Exception:
           obj_snip = -1
         obj_topics = bool(obj.get("topics_enabled", False))
-        if obj_snip == snippet_seconds and obj_topics == topics_enabled:
-          return False, "duplicate_hash_snippet_topics_done"
+        obj_speaker_mode = _normalize_speaker_mode(obj.get("speaker_mode", "auto"))
+        if obj_snip == snippet_seconds and obj_topics == topics_enabled and obj_speaker_mode == speaker_mode:
+          return False, "duplicate_hash_snippet_topics_speaker_done"
 
       f.seek(0, os.SEEK_END)
       f.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -289,6 +301,36 @@ def _build_progress_tracker(
       est_elapsed = done_actual
       est_remaining = max(0.0, est_total - est_elapsed)
 
+    # For chunked llm_topics, keep ETA chunk-aware so it does not collapse to
+    # zero too early while there are clearly chunks left.
+    if (
+      current_phase_key == "llm_topics"
+      and current_chunk_total > 1
+      and 1 <= current_chunk_idx <= current_chunk_total
+    ):
+      expected_chunk = max(0.1, expected_current / float(current_chunk_total))
+      elapsed_chunk = max(0.0, now - current_chunk_started_t) if current_chunk_started_t > 0.0 else 0.0
+      projected_current_chunk = max(expected_chunk, elapsed_chunk)
+      remaining_chunks = max(0, current_chunk_total - current_chunk_idx)
+
+      if current_chunk_idx > 1:
+        elapsed_prev_chunks = max(0.0, elapsed_current - elapsed_chunk)
+        avg_done_chunk = max(0.1, elapsed_prev_chunks / float(current_chunk_idx - 1))
+      else:
+        avg_done_chunk = expected_chunk
+      projected_next_chunk = max(expected_chunk, avg_done_chunk)
+
+      llm_remaining = max(0.0, projected_current_chunk - elapsed_chunk) + (remaining_chunks * projected_next_chunk)
+      if llm_remaining > est_remaining:
+        est_remaining = llm_remaining
+        est_total = max(est_total, est_elapsed + est_remaining)
+
+    # Avoid showing 0:00 while work is still active.
+    min_active_remaining = 3.0 if current_phase_key == "llm_topics" else 1.0
+    if current_phase_key is not None and est_remaining < min_active_remaining:
+      est_remaining = min_active_remaining
+      est_total = max(est_total, est_elapsed + est_remaining)
+
     # UX progress is phase-weighted (plan based), so late overruns in earlier
     # phases do not collapse visibility for remaining phases (notably llm_topics).
     completed_expected = _sum_completed_expected()
@@ -318,6 +360,7 @@ def _build_progress_tracker(
       progress_mode="predictive_v1",
       eta_total_s=round(est_total, 3),
       eta_remaining_s=round(est_remaining, 3),
+      elapsed_s=round(est_elapsed, 3),
       eta_confidence=round(float(eta_confidence), 3),
       eta_hints=list(hints),
     )
@@ -448,7 +491,7 @@ def main() -> int:
       else:
         snippet_seconds = int(default_min * 60)
       language = str(opts.get("language", "nl") or "nl")
-      speaker_mode = str(opts.get("speaker_mode", "auto") or "auto")
+      speaker_mode = _normalize_speaker_mode(opts.get("speaker_mode", "auto"))
       min_speakers = opts.get("min_speakers")
       max_speakers = opts.get("max_speakers")
       topics_cfg = service_cfg.get("topics", {}) if isinstance(service_cfg, dict) else {}
@@ -471,11 +514,12 @@ def main() -> int:
         runs_path=RUNS_V1_PATH,
         hardware_key=hardware_key_val,
         topics_enabled=topics_enabled,
+        speaker_mode=speaker_mode,
         snippet_seconds=snippet_seconds,
       )
       eta_confidence = float(prediction.confidence)
       eta_hints = list(prediction.hints)
-      phase_order = phase_order_for_job(topics_enabled=topics_enabled)
+      phase_order = phase_order_for_job(topics_enabled=topics_enabled, speaker_mode=speaker_mode)
       progress_start_phase, progress_finish_phase, progress_heartbeat, progress_set_message = _build_progress_tracker(
         status_path=job.status_path,
         phase_order=phase_order,
@@ -588,67 +632,87 @@ def main() -> int:
       progress_finish_phase("postprocess", post_elapsed)
 
 
+      topics_status = "disabled"
+      topics_warning = ""
+
       # Phase 40: topics (optional; disabled by default)
       if topics_enabled:
         progress_start_phase("llm_topics", "Calling LLM…", "topics")
         topics_t0 = time.monotonic()
+        topics_status = "ok"
 
         def on_topics_progress(message: str) -> None:
           progress_set_message(message, status_phase="topics")
 
-        # Keep progress moving during potentially long blocking LLM calls.
-        llm_hb_stop, llm_hb_thread = _start_progress_heartbeat_thread(progress_heartbeat, interval_s=0.5)
         try:
-          # 41) Call LLM (stub for now: only writes payloads; no raw output)
-          run_topics_llm(
-            job=job,
+          # Keep progress moving during potentially long blocking LLM calls.
+          llm_hb_stop, llm_hb_thread = _start_progress_heartbeat_thread(progress_heartbeat, interval_s=0.5)
+          try:
+            # 41) Call LLM (stub for now: only writes payloads; no raw output)
+            run_topics_llm(
+              job=job,
+              manifest_path=manifest_path,
+              orig_stem=orig_stem,
+              prompt_id=prompt_id,
+              service_cfg=service_cfg,
+              on_progress=on_topics_progress,
+            )
+          finally:
+            llm_hb_stop.set()
+            llm_hb_thread.join(timeout=1.0)
+
+          # 42) Parse (expects *_raw.txt files to exist; since stub doesn't write them, this will be a no-op for now)
+          # When PC1 call is implemented, it will write:
+          #   <orig_stem>_<prompt_id>_chunk_0001_raw.txt
+          # ... and then this loop will produce parsed JSON per chunk.
+          manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+          for ch in (manifest.get("chunks") or []):
+            idx = int(ch["index"])
+            raw_path = job.result_dir / f"{orig_stem}_{prompt_id}_chunk_{idx:04d}_raw.txt"
+            parsed_path = job.result_dir / f"{orig_stem}_{prompt_id}_chunk_{idx:04d}.json"
+            if raw_path.exists():
+              parse_topics_raw_file(raw_txt_path=raw_path, out_json_path=parsed_path)
+
+          # 43) Validate
+          report_path = job.result_dir / f"{orig_stem}_{prompt_id}_validation.json"
+          validate_all_chunks(
             manifest_path=manifest_path,
+            parsed_dir=job.result_dir,
             orig_stem=orig_stem,
             prompt_id=prompt_id,
-            service_cfg=service_cfg,
-            on_progress=on_topics_progress,
+            out_report_path=report_path,
           )
+          report = json.loads(report_path.read_text(encoding="utf-8"))
+          if not report.get("is_valid", False):
+            topics_status = "validation_failed"
+            topics_warning = f"Topics validation failed: {report_path.name}"
+            _append_log(
+              job.log_path,
+              f"[{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}] WARN topics_nonfatal validation_failed report={report_path.name}",
+            )
+            progress_set_message("Topics validation failed; continuing without topics.", status_phase="topics")
+          else:
+            # 44) Merge
+            merged_path = job.result_dir / f"{orig_stem}_{prompt_id}_merged.json"
+            merge_topics(
+              manifest_path=manifest_path,
+              parsed_dir=job.result_dir,
+              orig_stem=orig_stem,
+              prompt_id=prompt_id,
+              out_merged_path=merged_path,
+            )
+        except Exception as e_topics:
+          topics_status = "failed"
+          topics_warning = str(e_topics)
+          _append_log(
+            job.log_path,
+            f"[{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}] WARN topics_nonfatal error={e_topics!r}",
+          )
+          progress_set_message("Topics failed; continuing without topics.", status_phase="topics")
         finally:
-          llm_hb_stop.set()
-          llm_hb_thread.join(timeout=1.0)
-
-        # 42) Parse (expects *_raw.txt files to exist; since stub doesn't write them, this will be a no-op for now)
-        # When PC1 call is implemented, it will write:
-        #   <orig_stem>_<prompt_id>_chunk_0001_raw.txt
-        # ... and then this loop will produce parsed JSON per chunk.
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        for ch in (manifest.get("chunks") or []):
-          idx = int(ch["index"])
-          raw_path = job.result_dir / f"{orig_stem}_{prompt_id}_chunk_{idx:04d}_raw.txt"
-          parsed_path = job.result_dir / f"{orig_stem}_{prompt_id}_chunk_{idx:04d}.json"
-          if raw_path.exists():
-            parse_topics_raw_file(raw_txt_path=raw_path, out_json_path=parsed_path)
-
-        # 43) Validate
-        report_path = job.result_dir / f"{orig_stem}_{prompt_id}_validation.json"
-        validate_all_chunks(
-          manifest_path=manifest_path,
-          parsed_dir=job.result_dir,
-          orig_stem=orig_stem,
-          prompt_id=prompt_id,
-          out_report_path=report_path,
-        )
-        report = json.loads(report_path.read_text(encoding="utf-8"))
-        if not report.get("is_valid", False):
-          raise RuntimeError(f"Topics validation failed: {report_path.name}")
-
-        # 44) Merge
-        merged_path = job.result_dir / f"{orig_stem}_{prompt_id}_merged.json"
-        merge_topics(
-          manifest_path=manifest_path,
-          parsed_dir=job.result_dir,
-          orig_stem=orig_stem,
-          prompt_id=prompt_id,
-          out_merged_path=merged_path,
-        )
-        topics_elapsed = time.monotonic() - topics_t0
-        record_phase_timing("llm_topics", topics_elapsed)
-        progress_finish_phase("llm_topics", topics_elapsed)
+          topics_elapsed = time.monotonic() - topics_t0
+          record_phase_timing("llm_topics", topics_elapsed)
+          progress_finish_phase("llm_topics", topics_elapsed)
       else:
         _write_status(job.status_path, phase="postprocess", subphase="chunk_speaker_lines", message="Topics disabled; skipping.")
         record_phase_timing("llm_topics_skipped", 0.0)
@@ -672,8 +736,11 @@ def main() -> int:
         progress_mode="predictive_v1",
         eta_total_s=round(actual_total_s, 3),
         eta_remaining_s=0.0,
+        elapsed_s=round(actual_total_s, 3),
         eta_confidence=round(float(eta_confidence), 3),
         eta_hints=list(eta_hints),
+        topics_status=topics_status,
+        topics_warning=topics_warning,
       )
 
       # Append one run record per unique upload content hash (done-only), to avoid DB pollution on repeated test files.
@@ -690,6 +757,7 @@ def main() -> int:
           "worker_instance": _worker_instance(),
           "snippet_seconds": int(snippet_seconds),
           "topics_enabled": bool(topics_enabled),
+          "speaker_mode": speaker_mode,
           "chunks_count": int(chunks_count),
           "config_key": _config_key(
             language=language,
@@ -729,6 +797,7 @@ def main() -> int:
         progress_mode="predictive_v1",
         eta_total_s=round(actual_total_s, 3),
         eta_remaining_s=0.0,
+        elapsed_s=round(actual_total_s, 3),
         eta_confidence=round(float(eta_confidence), 3),
         eta_hints=list(eta_hints),
       )

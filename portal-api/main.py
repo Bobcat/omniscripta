@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import mimetypes
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
 from urllib.parse import urlparse, parse_qs
@@ -22,6 +23,108 @@ DEFAULT_CALIBRATION_SNIPPET_SECONDS = [60, 180, 300, 480, 600, 1200, 1800, 2700,
 @app.get("/health")
 def health() -> Dict[str, bool]:
     return {"ok": True}
+
+
+def _repo_root() -> Path:
+    # portal-api/main.py -> portal-api -> repo root
+    return Path(__file__).resolve().parents[1]
+
+
+def _resolve_json_config_path(env_key: str, default_rel: str) -> Path:
+    raw = (os.getenv(env_key) or "").strip()
+    if raw:
+        p = Path(raw)
+        if p.is_absolute():
+            return p
+        return (_repo_root() / p).resolve()
+    return (_repo_root() / default_rel).resolve()
+
+
+def _iso_utc(ts: float) -> str:
+    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _is_sensitive_key(name: str) -> bool:
+    k = str(name or "").strip().lower()
+    if not k or k.endswith("_env"):
+        return False
+    if k in {
+        "token",
+        "hf_token",
+        "api_key",
+        "apikey",
+        "password",
+        "secret",
+        "access_token",
+        "refresh_token",
+        "authorization",
+        "bearer_token",
+    }:
+        return True
+    return (
+        k.endswith("_token")
+        or k.endswith("_api_key")
+        or k.endswith("_apikey")
+        or k.endswith("_password")
+        or k.endswith("_secret")
+    )
+
+
+def _redact_sensitive(value: Any) -> Any:
+    if isinstance(value, dict):
+        out: Dict[str, Any] = {}
+        for key, child in value.items():
+            if _is_sensitive_key(str(key)):
+                out[str(key)] = "***REDACTED***"
+            else:
+                out[str(key)] = _redact_sensitive(child)
+        return out
+    if isinstance(value, list):
+        return [_redact_sensitive(v) for v in value]
+    return value
+
+
+def _read_config_source(*, source_id: str, title: str, path: Path) -> Dict[str, Any]:
+    item: Dict[str, Any] = {
+        "id": source_id,
+        "title": title,
+        "path": str(path),
+        "exists": path.exists(),
+        "size_bytes": None,
+        "mtime_utc": None,
+        "parse_ok": False,
+        "data": None,
+        "error": None,
+    }
+    if not path.exists():
+        item["error"] = "file_not_found"
+        return item
+    try:
+        st = path.stat()
+        item["size_bytes"] = int(st.st_size)
+        item["mtime_utc"] = _iso_utc(st.st_mtime)
+    except Exception:
+        pass
+    try:
+        obj = json.loads(path.read_text(encoding="utf-8"))
+        item["data"] = _redact_sensitive(obj)
+        item["parse_ok"] = True
+    except Exception as e:
+        item["error"] = f"{type(e).__name__}: {e}"
+    return item
+
+
+@app.get("/demo/settings")
+def get_demo_settings() -> Dict[str, Any]:
+    service_path = _resolve_json_config_path("TRANSCRIBE_SERVICE_CONFIG", "config/service.json")
+    whisperx_path = _resolve_json_config_path("TRANSCRIBE_WHISPERX_CONFIG", "config/whisperx.json")
+    return {
+        "generated_at_utc": _iso_utc(datetime.now(timezone.utc).timestamp()),
+        "sources": [
+            _read_config_source(source_id="service", title="service.json", path=service_path),
+            _read_config_source(source_id="whisperx", title="whisperx.json", path=whisperx_path),
+        ],
+    }
 
 
 def _safe_filename(name: str) -> str:
@@ -102,24 +205,28 @@ def create_demo_job(
     request: Request,
     file: UploadFile = File(...),
     language: str = Form("nl"),
-    speakers: str = Form("auto"),  # "auto" of bv. "4"
+    speakers: str = Form("none"),  # "none", "auto" of bv. "4"
 ) -> Dict[str, Any]:
     orig_name = _safe_filename(file.filename or "")
     if not orig_name:
         raise HTTPException(status_code=400, detail="Missing filename")
 
-    sp = (speakers or "auto").strip().lower()
+    sp = (speakers or "none").strip().lower()
 
-    speaker_mode = "auto"
+    speaker_mode = "none"
     expected_speakers = None
     min_speakers = None
     max_speakers = None
 
-    if sp != "auto":
+    if sp in {"none", "off", "disabled", "no_speaker", "nospeaker", "no-speaker"}:
+        speaker_mode = "none"
+    elif sp == "auto":
+        speaker_mode = "auto"
+    else:
         try:
             s = int(sp)
         except ValueError:
-            raise HTTPException(status_code=400, detail="speakers must be 'auto' or an integer")
+            raise HTTPException(status_code=400, detail="speakers must be 'none', 'auto' or an integer")
 
         if s < 1 or s > 32:
             raise HTTPException(status_code=400, detail="speakers out of range (1..32)")

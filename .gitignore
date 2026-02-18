@@ -25,3 +25,7 @@ data/
 # VS Code local workspace
 .vscode/
 *.code-workspace
+
+# Local agent/worktree artifacts
+.snapshots/
+AGENTS.md

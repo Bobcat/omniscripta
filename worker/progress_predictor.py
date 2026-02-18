@@ -12,7 +12,6 @@ PHASE_ORDER_BASE = [
   "whisperx_prepare",
   "whisperx_transcribe",
   "whisperx_align",
-  "whisperx_diarize",
   "postprocess",
 ]
 
@@ -50,8 +49,25 @@ def _phase_name_for_topics(topics_enabled: bool) -> str:
   return "llm_topics" if topics_enabled else "llm_topics_skipped"
 
 
-def phase_order_for_job(*, topics_enabled: bool) -> list[str]:
-  return [*PHASE_ORDER_BASE, _phase_name_for_topics(topics_enabled)]
+def _normalize_speaker_mode(mode: Any) -> str:
+  raw = str(mode or "auto").strip().lower()
+  if raw in {"none", "off", "disabled", "no_speaker", "nospeaker", "no-speaker"}:
+    return "none"
+  if raw == "fixed":
+    return "fixed"
+  return "auto"
+
+
+def _diarization_enabled(*, speaker_mode: Any) -> bool:
+  return _normalize_speaker_mode(speaker_mode) != "none"
+
+
+def phase_order_for_job(*, topics_enabled: bool, speaker_mode: str) -> list[str]:
+  order = [*PHASE_ORDER_BASE]
+  if _diarization_enabled(speaker_mode=speaker_mode):
+    order.insert(4, "whisperx_diarize")
+  order.append(_phase_name_for_topics(topics_enabled))
+  return order
 
 
 def _iter_done_records(runs_path: Path) -> list[dict[str, Any]]:
@@ -80,13 +96,21 @@ def build_prediction(
   runs_path: Path,
   hardware_key: str,
   topics_enabled: bool,
+  speaker_mode: str,
   snippet_seconds: int,
 ) -> ProgressPrediction:
-  phase_order = phase_order_for_job(topics_enabled=topics_enabled)
+  phase_order = phase_order_for_job(topics_enabled=topics_enabled, speaker_mode=speaker_mode)
   snippet_seconds = max(1, int(snippet_seconds))
+  norm_mode = _normalize_speaker_mode(speaker_mode)
 
   all_done = _iter_done_records(runs_path)
-  candidates = [r for r in all_done if str(r.get("hardware_key", "")) == str(hardware_key)]
+  candidates = []
+  for r in all_done:
+    if str(r.get("hardware_key", "")) != str(hardware_key):
+      continue
+    if _normalize_speaker_mode(r.get("speaker_mode", "auto")) != norm_mode:
+      continue
+    candidates.append(r)
 
   hints: list[str] = []
   n = len(candidates)

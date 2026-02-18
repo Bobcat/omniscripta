@@ -23,8 +23,17 @@
 .upload-wrap .top {
     display: flex;
     align-items: center;
-    gap: 10px;
-    padding: 4px 0 10px;
+    gap: 8px;
+    padding: 10px 0 24px;
+    /* Increased bottom padding/gap */
+}
+
+@media (max-width: 600px) {
+    .upload-wrap .top {
+        justify-content: flex-end;
+        padding-bottom: 16px;
+        /* Adjusted mobile gap */
+    }
 }
 
 .upload-wrap .dot {
@@ -35,24 +44,27 @@
 }
 
 .upload-wrap .brand {
-    font-weight: 800;
+    font-weight: 600;
     letter-spacing: .2px;
-    font-size: 14px;
+    font-size: 15px;
 }
 
-.upload-wrap h1 {
-    margin: 8px 0 6px;
-    font-size: clamp(20px, 2.7vw, 34px);
-    letter-spacing: -0.35px;
+.upload-wrap h1,
+.upload-wrap .subtle-header {
+    margin: 8px 0 4px;
+    font-size: clamp(15px, 1.6vw, 19px);
+    letter-spacing: -0.1px;
     text-align: center;
+    color: var(--ink);
+    font-weight: 500;
 }
 
 .upload-wrap .sub {
-    margin: 0 auto 12px;
+    margin: 0 auto 16px;
     max-width: 920px;
-    color: var(--muted);
-    font-size: 13.5px;
-    line-height: 1.45;
+    color: var(--muted2);
+    font-size: 13px;
+    line-height: 1.4;
     text-align: center;
 }
 
@@ -63,7 +75,7 @@
     margin: 10px 0 12px;
 }
 
-@media (max-width: 900px) {
+@media (max-width: 600px) {
     .upload-wrap .steps {
         grid-template-columns: 1fr;
     }
@@ -154,17 +166,21 @@
     margin-top: 8px;
 }
 
-@media (max-width: 900px) {
+/* Removed stacking on mobile to keep items side-by-side */
+/*
+@media (max-width: 600px) {
     .upload-wrap .row {
         grid-template-columns: 1fr;
     }
 }
+*/
 
 .upload-wrap label {
     display: block;
-    font-size: 11.5px;
-    color: var(--muted2);
-    margin: 6px 0 5px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--muted);
+    margin: 4px 0 4px;
 }
 
 .upload-wrap select {
@@ -175,6 +191,15 @@
     padding: 10px 9px;
     font-size: 12.8px;
     color: var(--ink);
+    transition: all 0.2s ease;
+}
+
+.upload-wrap select:disabled {
+    background: #f1f5f9;
+    color: var(--muted2);
+    opacity: 0.7;
+    cursor: not-allowed;
+    border-color: #e2e8f0;
 }
 
 .upload-wrap .progressWrap {
@@ -229,4 +254,12 @@
 
 .upload-wrap input[type="file"] {
     display: none;
+}
+
+@media (max-width: 600px) {
+
+    .desktop-only,
+    .upload-wrap .dot {
+        display: none;
+    }
 }

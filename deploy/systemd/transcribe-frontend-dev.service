@@ -1,0 +1,18 @@
+[Unit]
+Description=Transcribe Dev Frontend + /api Proxy
+After=transcribe-api-dev.service
+Requires=transcribe-api-dev.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/gunnar/projects/transcribe-dev
+ExecStart=/usr/bin/python3 /home/gunnar/projects/transcribe-dev/deploy/dev_frontend_proxy.py
+Environment=TRANSCRIBE_FRONTEND_DIR=/home/gunnar/projects/transcribe-dev/static
+Environment=TRANSCRIBE_API_BASE=http://127.0.0.1:8001
+Environment=TRANSCRIBE_FRONTEND_HOST=127.0.0.1
+Environment=TRANSCRIBE_FRONTEND_PORT=8010
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target

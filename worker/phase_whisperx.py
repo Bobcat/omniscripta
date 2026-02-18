@@ -41,6 +41,10 @@ def _load_server_config() -> dict[str, Any]:
     "beam_size": 5,
     "align_model": "",
     "diarize_model": "",
+    "omp_num_threads": None,
+    "mkl_num_threads": None,
+    "torch_num_threads": None,
+    "torch_num_interop_threads": None,
     "whisperx_venv": str(DEFAULT_WHISPERX_VENV),
   }
   if SERVER_CFG_PATH.exists():
@@ -51,6 +55,16 @@ def _load_server_config() -> dict[str, Any]:
     except Exception:
       pass
   return cfg
+
+
+def _cfg_positive_int(cfg: dict[str, Any], key: str) -> int | None:
+  try:
+    val = int(cfg.get(key))
+  except Exception:
+    return None
+  if val <= 0:
+    return None
+  return val
 
 
 def _load_env_file(path: Path) -> None:
@@ -126,6 +140,12 @@ def _build_runner_env(cfg: dict[str, Any]) -> tuple[dict[str, str], list[Path], 
   env.setdefault("FORCE_COLOR", "0")
   # Match old enter.sh behavior so pyannote checkpoints keep loading.
   env.setdefault("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", "1")
+  omp_num_threads = _cfg_positive_int(cfg, "omp_num_threads")
+  mkl_num_threads = _cfg_positive_int(cfg, "mkl_num_threads")
+  if omp_num_threads is not None:
+    env["OMP_NUM_THREADS"] = str(omp_num_threads)
+  if mkl_num_threads is not None:
+    env["MKL_NUM_THREADS"] = str(mkl_num_threads)
 
   site_packages: list[Path] = []
   venv_from_cfg = str(cfg.get("whisperx_venv") or "").strip()
@@ -215,6 +235,8 @@ def _run_whisperx_streaming(
       "beam_size": int(cfg.get("beam_size", 5)),
       "align_model": str(cfg.get("align_model") or "").strip(),
       "diarize_model": str(cfg.get("diarize_model") or "").strip(),
+      "torch_num_threads": _cfg_positive_int(cfg, "torch_num_threads"),
+      "torch_num_interop_threads": _cfg_positive_int(cfg, "torch_num_interop_threads"),
     }
     args_path.write_text(json.dumps(args_obj, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     durations["prepare"] = time.monotonic() - t0

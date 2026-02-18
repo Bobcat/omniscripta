@@ -5,5 +5,9 @@
   "batch_size": 16,
   "chunk_size": 20,
   "beam_size": 5,
-  "align_model": "jonatasgrosman/wav2vec2-large-xlsr-53-dutch"
+  "align_model": "jonatasgrosman/wav2vec2-large-xlsr-53-dutch",
+  "omp_num_threads": null,
+  "mkl_num_threads": null,
+  "torch_num_threads": null,
+  "torch_num_interop_threads": null
 }
