@@ -477,8 +477,26 @@ def _rooted_path(path: str) -> str:
 
 
 def _ws_url_for_request(request: Request, ws_path: str) -> str:
-    scheme = "wss" if request.url.scheme == "https" else "ws"
-    host = request.headers.get("host") or request.url.netloc
+    forwarded_proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower()
+    if forwarded_proto in {"https", "wss"}:
+        scheme = "wss"
+    elif forwarded_proto in {"http", "ws"}:
+        scheme = "ws"
+    else:
+        origin = (request.headers.get("origin") or "").strip()
+        try:
+            origin_scheme = urlparse(origin).scheme.lower()
+        except Exception:
+            origin_scheme = ""
+        if origin_scheme == "https":
+            scheme = "wss"
+        elif origin_scheme == "http":
+            scheme = "ws"
+        else:
+            scheme = "wss" if request.url.scheme == "https" else "ws"
+
+    forwarded_host = (request.headers.get("x-forwarded-host") or "").split(",")[0].strip()
+    host = forwarded_host or request.headers.get("host") or request.url.netloc
     return f"{scheme}://{host}{ws_path}"
 
 
