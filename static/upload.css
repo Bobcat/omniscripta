@@ -166,14 +166,11 @@
     margin-top: 8px;
 }
 
-/* Removed stacking on mobile to keep items side-by-side */
-/*
 @media (max-width: 600px) {
     .upload-wrap .row {
         grid-template-columns: 1fr;
     }
 }
-*/
 
 .upload-wrap label {
     display: block;

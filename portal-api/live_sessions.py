@@ -1,15 +1,22 @@
 from __future__ import annotations
 
+import json
 import secrets
 import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 
 def _utc_iso(ts: float) -> str:
     return datetime.fromtimestamp(float(ts), tz=timezone.utc).isoformat()
+
+
+def _repo_root() -> Path:
+    # portal-api/live_sessions.py -> portal-api -> repo root
+    return Path(__file__).resolve().parents[1]
 
 
 @dataclass
@@ -60,6 +67,7 @@ class LiveSessionManager:
         self._sessions: dict[str, LiveSession] = {}
         self._archives: dict[str, ClosedSessionArchive] = {}
         self._lock = threading.Lock()
+        self._stats_log_dir = (_repo_root() / "data" / "live_stats").resolve()
 
     def _new_session_id(self) -> str:
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -109,7 +117,12 @@ class LiveSessionManager:
                 last_seen_unix=now_unix,
             )
             self._sessions[session_id] = sess
-            return self._snapshot_locked(sess)
+            snapshot = self._snapshot_locked(sess)
+        try:
+            self.append_stats_log(session_id, {"kind": "session_created", "session": snapshot})
+        except Exception:
+            pass
+        return snapshot
 
     def open_websocket(self, session_id: str) -> dict[str, Any]:
         now_unix = time.time()
@@ -188,7 +201,19 @@ class LiveSessionManager:
             sess.close_reason = str(reason or "closed")
             sess.state = "ended"
             sess.last_seen_unix = time.time()
-            return self._snapshot_locked(sess)
+            snapshot = self._snapshot_locked(sess)
+        try:
+            self.append_stats_log(
+                session_id,
+                {
+                    "kind": "session_closed",
+                    "close_reason": str(reason or "closed"),
+                    "session": snapshot,
+                },
+            )
+        except Exception:
+            pass
+        return snapshot
 
     def archive_transcript(
         self,
@@ -243,6 +268,7 @@ class LiveSessionManager:
             "bytes_received": int(sess.bytes_received),
             "frames_received": int(sess.frames_received),
             "controls_received": int(sess.controls_received),
+            "stats_log_path": str(self._stats_log_path(sess.session_id)),
         }
 
     def _archive_snapshot_locked(self, arc: ClosedSessionArchive) -> dict[str, Any]:
@@ -300,3 +326,22 @@ class LiveSessionManager:
                     "max_archives": int(self._max_archives),
                 },
             }
+
+    def _stats_log_path(self, session_id: str) -> Path:
+        safe_id = str(session_id or "unknown").strip() or "unknown"
+        return (self._stats_log_dir / f"{safe_id}.stats.jsonl").resolve()
+
+    def stats_log_path(self, session_id: str) -> str:
+        return str(self._stats_log_path(session_id))
+
+    def append_stats_log(self, session_id: str, payload: dict[str, Any]) -> None:
+        path = self._stats_log_path(session_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        row: dict[str, Any] = {
+            "ts_utc": datetime.now(timezone.utc).isoformat(),
+            "session_id": str(session_id),
+        }
+        if isinstance(payload, dict):
+            row.update(payload)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, ensure_ascii=True, separators=(",", ":")) + "\n")

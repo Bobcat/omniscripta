@@ -279,32 +279,35 @@ async def live_session_ws(session_id: str, websocket: WebSocket) -> None:
                 )
                 if should_emit_stats:
                     tstats = transcriber.stats_snapshot() if transcriber is not None else {}
-                    await send_event(
-                        stats_event(
-                            session_id,
-                            bytes_received=snapshot["bytes_received"],
-                            frames_received=snapshot["frames_received"],
-                            controls_received=snapshot["controls_received"],
-                            uptime_s=snapshot["age_s"],
-                            engine=tstats.get("engine_driver"),
-                            decode_calls=tstats.get("decode_calls"),
-                            decode_ms_total=tstats.get("decode_ms_total"),
-                            decode_ms_last=tstats.get("decode_ms_last"),
-                            rtf=tstats.get("rtf"),
-                            partials_emitted=tstats.get("partials_emitted"),
-                            finals_emitted=tstats.get("finals_emitted"),
-                            engine_ready=tstats.get("engine_ready"),
-                            engine_rx_messages=tstats.get("engine_rx_messages"),
-                            engine_rx_parse_errors=tstats.get("engine_rx_parse_errors"),
-                            engine_rx_unknown_messages=tstats.get("engine_rx_unknown_messages"),
-                            engine_tx_sidecar_audio_bytes=tstats.get("engine_tx_sidecar_audio_bytes"),
-                            revision=tstats.get("revision"),
-                            committed_until_ms=tstats.get("committed_until_ms"),
-                            committed_segments=tstats.get("committed_segments"),
-                            committed_chars=tstats.get("committed_chars"),
-                            has_partial_tail=tstats.get("has_partial_tail"),
-                        )
+                    stats_payload = stats_event(
+                        session_id,
+                        bytes_received=snapshot["bytes_received"],
+                        frames_received=snapshot["frames_received"],
+                        controls_received=snapshot["controls_received"],
+                        uptime_s=snapshot["age_s"],
+                        engine=tstats.get("engine_driver"),
+                        decode_calls=tstats.get("decode_calls"),
+                        decode_ms_total=tstats.get("decode_ms_total"),
+                        decode_ms_last=tstats.get("decode_ms_last"),
+                        rtf=tstats.get("rtf"),
+                        partials_emitted=tstats.get("partials_emitted"),
+                        finals_emitted=tstats.get("finals_emitted"),
+                        engine_ready=tstats.get("engine_ready"),
+                        engine_rx_messages=tstats.get("engine_rx_messages"),
+                        engine_rx_parse_errors=tstats.get("engine_rx_parse_errors"),
+                        engine_rx_unknown_messages=tstats.get("engine_rx_unknown_messages"),
+                        engine_tx_sidecar_audio_bytes=tstats.get("engine_tx_sidecar_audio_bytes"),
+                        revision=tstats.get("revision"),
+                        committed_until_ms=tstats.get("committed_until_ms"),
+                        committed_segments=tstats.get("committed_segments"),
+                        committed_chars=tstats.get("committed_chars"),
+                        has_partial_tail=tstats.get("has_partial_tail"),
                     )
+                    try:
+                        LIVE_SESSIONS.append_stats_log(session_id, stats_payload)
+                    except Exception:
+                        pass
+                    await send_event(stats_payload)
                 continue
 
             raw_text = incoming.get("text")

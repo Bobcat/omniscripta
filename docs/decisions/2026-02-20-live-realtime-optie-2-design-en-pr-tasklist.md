@@ -246,10 +246,10 @@ Known issue / tijdelijke afbakening (2026-02-21):
 Known issue / hardware-afhankelijke afbakening (2026-02-21):
 - Specifieke Bluetooth headset-configuraties (o.a. EPOS ADAPT 560 zonder originele dongle, via generieke BT-dongle) kunnen intermitterende of zeer lage microfooninput leveren in Linux browser capture.
 - Dit is beoordeeld als audio profiel/driver/hardware pad issue (client-side), niet als blocker voor backend/proxy implementatie of protocolflow.
-- Voor functionele validatie van live transcriptie wordt tijdelijk `mock_stream` ondersteund via URL-toggle (`?live_recording_mock=1`) en kan echte transcriptie getest worden met andere mic-hardware (USB/laptopmic/proprietary dongle).
+- Functionele validatie van live transcriptie blijft hardware-afhankelijk; gebruik bij twijfel een andere mic (USB/laptopmic/proprietary dongle) en valideer OS/browser-capture apart (`arecord`, PipeWire source state).
 
 Werkend profiel (2026-02-23, dev validatie op Linux + Chromium + Nedis USB mic):
-- Echte live transcriptie werkt betrouwbaar met `?live_recording_mock=0&live_audio_dsp=0` (browser DSP uit).
+- Echte live transcriptie werkt betrouwbaar met de huidige defaults (mock verwijderd; browser DSP standaard uit in frontend capture constraints).
 - Root cause van eerdere slechte transcriptie/hallucinaties bleek vooral browser capture DSP (`echoCancellation`, `noiseSuppression`, `autoGainControl`) in combinatie met deze testsetup/hardware.
 - PipeWire/Chromium routing is gevalideerd op actieve Nedis-source (`alsa_input.usb-C-Media_Electronics_Inc._nedis_MICCU100BK-00.mono-fallback`, state `RUNNING` tijdens opname).
 - `arecord` lokale mic-test (`S16_LE`, `16kHz`, mono) klonk helder; daarmee is microfoonhardware + OS inputpad bevestigd.
@@ -262,6 +262,37 @@ Werkend profiel (2026-02-23, dev validatie op Linux + Chromium + Nedis USB mic):
 - `live.whisperlive_sidecar.flush_timeout_s = 45.0`
 - `live.whisperlive_sidecar.max_drain_messages = 64`
 - Bij cleanup/generalizatie deze waarden niet stilzwijgend terugzetten zonder her-test op dezelfde hardware; markeer dit expliciet als hardware-/browser-afhankelijk profiel.
+
+Kwaliteitsknoppen / tuning-notes (2026-02-23):
+- Grootste kwaliteitsimpact in huidige implementatie: `model`, `language`, `input_gain`, `use_vad`, `no_speech_thresh`, en browser capture DSP (frontend capture constraints: `echoCancellation`/`noiseSuppression`/`autoGainControl`, nu standaard uit).
+- `model`: hogere modellen (bijv. `large-v3`, indien ondersteund door WhisperLive sidecar) kunnen transcriptkwaliteit verbeteren, maar kosten meer compute en verhogen vaak latency.
+- `language`: expliciet instellen op de spreektaal (`en`, `nl`, etc.) voorkomt detectiefouten en verbetert stabiliteit.
+- `input_gain`: voor lage/zwakke mics kan hogere gain nodig zijn; te hoog geeft vervorming/ruisversterking.
+- `use_vad=true` kan tekst missen in deze setup; `false` gaf betere dekking bij de Nedis USB mic test.
+- `send_last_n_segments` en `same_output_threshold` sturen vooral stabiliteit/partial gedrag (minder "springen"), minder de pure herkenningskwaliteit.
+- `recv_timeout_s`, `flush_timeout_s`, `max_drain_messages` sturen vooral latency/robustness en flush-gedrag; impact op transcriptkwaliteit is indirect.
+
+Communitybevindingen / best practices (2026-02-23, WhisperLive + faster-whisper + streaming):
+- Er is geen enkele "beste" instelling voor meetings/panels; community-bronnen benadrukken dat capturekwaliteit, VAD/segmentatie en commitlogica in streaming vaak meer impact hebben dan alleen modelkeuze.
+- WhisperLive expose't expliciet runtimeknoppen zoals `model`, `lang`, `use_vad` (server/client params) en noemt debug-opties zoals het opslaan van input-audio (`save_output_recording`) voor diagnose van captureproblemen.
+- `faster-whisper` documenteert VAD-filtering (Silero) en tunebare `vad_parameters` (o.a. `min_silence_duration_ms`); conservatieve stilteknippen kan in realtime tot gemiste tekst leiden.
+- Community-issues melden bekende streamingproblemen zoals herhalingen/duplicaten en VAD/segmentatieproblemen bij stiltes of chunkgrenzen; deze symptomen lijken op wat we in onze live tests zien.
+- Whisper-Streaming (open-source streaming aanpak bovenop Whisper) gebruikt "local agreement" + adaptieve latency: commit tekst pas wanneer meerdere iteraties overeenkomen. Dit is direct relevant voor ons `partial -> final` verliesprobleem.
+
+Uitwerking in onze experimenten (mapping naar huidige bevindingen):
+- Bevestigd: audio capture is een primaire factor. In onze setup was browser DSP de grootste blocker; uitschakelen van browser DSP gaf direct grote kwaliteitswinst zonder backendwijziging.
+- Bevestigd: `use_vad=true` was voor deze mic/setup te agressief; `use_vad=false` gaf betere dekking en minder gemiste stukken.
+- Bevestigd: sidecar/protocolketen zelf werkt (`ready/rx/parse/unknown` gezond), terwijl transcriptkwaliteit toch slecht kan zijn; kwaliteit en protocol-health zijn dus aparte dimensies.
+- Open probleem: `partial` is vaak inhoudelijk beter dan `final`, waarna stukken verdwijnen. Dit wijst op segment-/timestamp-commitgedrag in onze `partial -> final` logica (commit cutoff op `committed_until_ms`) en niet alleen op de UI.
+- Richting voor volgende iteratie: conservatievere final-commit (overlap-tolerantie) en/of "local agreement"-achtige stabilisatie voordat partials definitief gecommit worden.
+
+Bronnen (community/docs):
+- WhisperLive README: https://github.com/collabora/WhisperLive
+- faster-whisper README (VAD/filtering/models): https://github.com/SYSTRAN/faster-whisper
+- faster-whisper issue #811 (repetities/duplicate words): https://github.com/SYSTRAN/faster-whisper/issues/811
+- faster-whisper issue #1127 (streaming/VAD silent chunks): https://github.com/SYSTRAN/faster-whisper/issues/1127
+- WhisperLive issue #291 (`no_speech_prob` interpretatie/behavior caveat): https://github.com/collabora/WhisperLive/issues/291
+- Whisper-Streaming (local agreement / adaptive latency): https://github.com/ufal/whisper_streaming
 
 ## Acceptatiecriteria op productniveau
 

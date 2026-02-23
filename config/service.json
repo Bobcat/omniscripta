@@ -2,13 +2,9 @@
   "snip": { "minutes_default": 15 },
 
   "live": {
-    "driver": "mock_stream",
+    "driver": "whisperlive_sidecar",
     "sample_rate_hz": 16000,
     "channels": 1,
-    "mock_stream": {
-      "partial_step_ms": 350,
-      "final_step_ms": 1600
-    },
     "whisperlive_sidecar": {
       "ws_url": "ws://127.0.0.1:9090",
       "language": "en",

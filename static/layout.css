@@ -349,6 +349,15 @@ body {
     body.sidebar-open #mobile-menu-toggle {
         display: none;
     }
+
+    /* Long-press on project items should not select text on mobile */
+    .projects-list li,
+    .projects-list .project-content,
+    .projects-list .link-text {
+        user-select: none;
+        -webkit-user-select: none;
+        -webkit-touch-callout: none;
+    }
 }
 
 /* Adjustments for existing CSS inputs/cards to fit new layout */
@@ -366,10 +375,14 @@ body {
 .projects-list li {
     display: flex;
     /* Use flexbox for the list item itself */
-    justify-content: space-between;
+    justify-content: flex-start;
     align-items: center;
-    padding-right: 8px;
+    padding-right: 2px;
     /* Space on right */
+}
+
+.projects-list li:hover:not(.active) {
+    background-color: var(--hover-bg);
 }
 
 .project-content {
@@ -408,7 +421,7 @@ body {
     /* Already hidden by general rule, but ensuring */
 }
 
-.delete-project-btn {
+.project-menu-btn {
     background: none;
     border: none;
     cursor: pointer;
@@ -424,38 +437,122 @@ body {
     color: #444746;
 
     display: none;
-    /* Hidden by default */
     align-items: center;
     justify-content: center;
 
-    margin-left: 8px;
-    /* Gap from text */
+    margin-left: auto;
+    margin-right: -2px;
     flex-shrink: 0;
     /* Don't shrink */
 
     transition: background-color 0.2s, color 0.2s;
 }
 
-.delete-project-btn:hover {
-    background-color: #fbecec;
-    color: #d93025;
+.project-menu-btn:hover {
+    background-color: #cfd6e0;
+    color: #111827;
 }
 
 /* Reset margin on the icon inside the delete button 
    otherwise .nav-links li .material-symbols-outlined adds 16px margin-right
    causing the button to be wide/oval.
 */
-.delete-project-btn .material-symbols-outlined {
+.project-menu-btn .material-symbols-outlined {
     margin-right: 0 !important;
     font-size: 18px !important;
 }
 
 /* Show button on hover */
-.projects-list li:hover .delete-project-btn {
+.projects-list li:hover .project-menu-btn,
+.projects-list li:focus-within .project-menu-btn {
     display: flex;
 }
 
-/* Hide delete button in collapsed sidebar */
-.sidebar:not(.expanded) .delete-project-btn {
+/* Keep action button available on mobile where no hover exists */
+body.mobile .projects-list .project-menu-btn {
+    display: flex;
+}
+
+/* Hide action button in collapsed sidebar */
+.sidebar:not(.expanded) .project-menu-btn {
     display: none !important;
+}
+
+.project-action-menu {
+    position: fixed;
+    min-width: 148px;
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    box-shadow: 0 12px 30px rgba(0, 0, 0, 0.16);
+    padding: 6px;
+    z-index: 12000;
+}
+
+.project-action-item {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    border: none;
+    background: transparent;
+    border-radius: 8px;
+    padding: 10px 10px;
+    color: #111827;
+    font-size: 0.9rem;
+    cursor: pointer;
+}
+
+.project-action-item .material-symbols-outlined {
+    margin-right: 0 !important;
+    font-size: 18px !important;
+}
+
+.project-action-item.delete:hover {
+    background: #f3f4f6;
+    color: #111827;
+}
+
+.project-action-sheet-backdrop {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: flex-end;
+    justify-content: stretch;
+    background: rgba(15, 23, 42, 0);
+    transition: background-color 160ms ease;
+    z-index: 13000;
+}
+
+.project-action-sheet-backdrop.open {
+    background: rgba(15, 23, 42, 0.35);
+}
+
+.project-action-sheet {
+    width: 100%;
+    background: #fff;
+    border-radius: 16px 16px 0 0;
+    border-top: 1px solid var(--border);
+    padding: 8px 12px calc(12px + env(safe-area-inset-bottom));
+    box-shadow: 0 -10px 24px rgba(0, 0, 0, 0.18);
+    transform: translateY(100%);
+    transition: transform 160ms ease;
+}
+
+.project-action-sheet.open {
+    transform: translateY(0);
+}
+
+.project-action-sheet-handle {
+    width: 44px;
+    height: 5px;
+    border-radius: 999px;
+    background: #cbd5e1;
+    margin: 0 auto 10px;
+}
+
+@media (min-width: 601px) {
+    .project-action-sheet-backdrop {
+        display: none !important;
+    }
 }
