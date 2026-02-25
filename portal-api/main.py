@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import mimetypes
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
@@ -15,21 +16,23 @@ from fastapi.responses import FileResponse, Response
 from live_protocol import (
     PROTOCOL_VERSION,
     control_ack_event,
-    final_event,
     ended_event,
     error_event,
-    partial_event,
     parse_client_message,
     pong_event,
     ready_event,
     stats_event,
 )
+from live_chunker import LiveAudioChunker, LiveChunkerConfig
+from live_chunk_transcribe import LiveChunkBatchBridge
+from live_recordings import LiveWavRecorder
+from live_quality import score_semilive_text_against_fixture
 from live_sessions import LiveSessionManager
-from live_transcriber import LiveTranscriber
 from queue_fs import init_job_in_inbox, JobPaths, BASE as BASE_JOBS
 
 ROOT_PATH = os.getenv("TRANSCRIBE_ROOT_PATH", "/api")
 app = FastAPI(root_path=ROOT_PATH)
+LIVE_RECORDINGS_ROOT = (Path(__file__).resolve().parents[1] / "data" / "live_recordings").resolve()
 
 
 DEFAULT_CALIBRATION_SNIPPET_SECONDS = [60, 180, 300, 480, 600, 1200, 1800, 2700, 3600]
@@ -40,12 +43,97 @@ LIVE_ARCHIVE_TTL_S = int(os.getenv("TRANSCRIBE_LIVE_ARCHIVE_TTL_S", "3600"))
 LIVE_MAX_ARCHIVES = int(os.getenv("TRANSCRIBE_LIVE_MAX_ARCHIVES", "256"))
 LIVE_AUDIO_SAMPLE_RATE_HZ = int(os.getenv("TRANSCRIBE_LIVE_SAMPLE_RATE_HZ", "16000"))
 LIVE_AUDIO_CHANNELS = int(os.getenv("TRANSCRIBE_LIVE_CHANNELS", "1"))
+LIVE_SEMILIVE_CHUNK_BATCH_SHADOW = str(os.getenv("TRANSCRIBE_LIVE_SEMILIVE_CHUNK_BATCH_SHADOW", "1")).strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+try:
+    LIVE_SEMILIVE_CHUNK_POLL_INTERVAL_S = max(
+        0.1,
+        float(str(os.getenv("TRANSCRIBE_LIVE_SEMILIVE_CHUNK_POLL_INTERVAL_S", "0.75")).strip() or "0.75"),
+    )
+except Exception:
+    LIVE_SEMILIVE_CHUNK_POLL_INTERVAL_S = 0.75
+try:
+    LIVE_SEMILIVE_CHUNK_STOP_WAIT_S = max(
+        0.0,
+        float(str(os.getenv("TRANSCRIBE_LIVE_SEMILIVE_CHUNK_STOP_WAIT_S", "20.0")).strip() or "20.0"),
+    )
+except Exception:
+    LIVE_SEMILIVE_CHUNK_STOP_WAIT_S = 20.0
+try:
+    LIVE_SEMILIVE_CHUNK_POST_CLOSE_WAIT_S = max(
+        0.0,
+        float(str(os.getenv("TRANSCRIBE_LIVE_SEMILIVE_CHUNK_POST_CLOSE_WAIT_S", "60.0")).strip() or "60.0"),
+    )
+except Exception:
+    LIVE_SEMILIVE_CHUNK_POST_CLOSE_WAIT_S = 60.0
+LIVE_SEMILIVE_CHUNK_LANGUAGE = (str(os.getenv("TRANSCRIBE_LIVE_SEMILIVE_CHUNK_LANGUAGE", "en")) or "en").strip() or "en"
+LIVE_SEMILIVE_CHUNK_ENERGY_THRESHOLD = max(
+    0,
+    int(str(os.getenv("TRANSCRIBE_LIVE_SEMILIVE_CHUNK_ENERGY_THRESHOLD", "12")).strip() or "12"),
+)
+LIVE_SEMILIVE_CHUNK_SILENCE_MS = max(
+    0,
+    int(str(os.getenv("TRANSCRIBE_LIVE_SEMILIVE_CHUNK_SILENCE_MS", "1200")).strip() or "1200"),
+)
+LIVE_SEMILIVE_CHUNK_MAX_MS = max(
+    200,
+    int(str(os.getenv("TRANSCRIBE_LIVE_SEMILIVE_CHUNK_MAX_MS", "20000")).strip() or "20000"),
+)
+LIVE_SEMILIVE_CHUNK_MIN_MS = max(
+    0,
+    int(str(os.getenv("TRANSCRIBE_LIVE_SEMILIVE_CHUNK_MIN_MS", "800")).strip() or "800"),
+)
+LIVE_SEMILIVE_CHUNK_PRE_ROLL_MS = max(
+    0,
+    int(str(os.getenv("TRANSCRIBE_LIVE_SEMILIVE_CHUNK_PRE_ROLL_MS", "800")).strip() or "800"),
+)
+LIVE_SEMILIVE_DEDUP_ENABLED = str(os.getenv("TRANSCRIBE_LIVE_SEMILIVE_DEDUP_ENABLED", "1")).strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+LIVE_SEMILIVE_DEDUP_MIN_WORDS = max(
+    1,
+    int(str(os.getenv("TRANSCRIBE_LIVE_SEMILIVE_DEDUP_MIN_WORDS", "3")).strip() or "3"),
+)
+LIVE_SEMILIVE_DEDUP_MAX_TRIM_WORDS = max(
+    LIVE_SEMILIVE_DEDUP_MIN_WORDS,
+    int(str(os.getenv("TRANSCRIBE_LIVE_SEMILIVE_DEDUP_MAX_TRIM_WORDS", "24")).strip() or "24"),
+)
+LIVE_SEMILIVE_INITIAL_PROMPT_ENABLED = str(
+    os.getenv("TRANSCRIBE_LIVE_SEMILIVE_INITIAL_PROMPT_ENABLED", "1")
+).strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+LIVE_SEMILIVE_INITIAL_PROMPT_TAIL_WORDS = max(
+    1,
+    int(str(os.getenv("TRANSCRIBE_LIVE_SEMILIVE_INITIAL_PROMPT_TAIL_WORDS", "30")).strip() or "30"),
+)
+LIVE_SEMILIVE_INITIAL_PROMPT_MIN_WORDS = max(
+    1,
+    int(str(os.getenv("TRANSCRIBE_LIVE_SEMILIVE_INITIAL_PROMPT_MIN_WORDS", "6")).strip() or "6"),
+)
+LIVE_SEMILIVE_INITIAL_PROMPT_MAX_CHARS = max(
+    0,
+    int(str(os.getenv("TRANSCRIBE_LIVE_SEMILIVE_INITIAL_PROMPT_MAX_CHARS", "400")).strip() or "400"),
+)
 LIVE_SESSIONS = LiveSessionManager(
     default_ttl_seconds=LIVE_SESSION_TTL_S,
     preconnect_ttl_seconds=LIVE_SESSION_PRECONNECT_TTL_S,
     max_sessions=LIVE_MAX_SESSIONS,
     archive_ttl_seconds=LIVE_ARCHIVE_TTL_S,
     max_archives=LIVE_MAX_ARCHIVES,
+    semilive_text_dedup_enabled=LIVE_SEMILIVE_DEDUP_ENABLED,
+    semilive_text_dedup_min_words=LIVE_SEMILIVE_DEDUP_MIN_WORDS,
+    semilive_text_dedup_max_trim_words=LIVE_SEMILIVE_DEDUP_MAX_TRIM_WORDS,
 )
 
 
@@ -80,11 +168,6 @@ def create_live_session(request: Request) -> Dict[str, Any]:
 
     session_id = str(session["session_id"])
     ws_path = _rooted_path(f"/demo/live/sessions/{session_id}/ws")
-    mock_toggle_raw = _param_from_request_or_referer(request, "live_recording_mock")
-    mock_toggle = _optional_bool_param(mock_toggle_raw)
-    if mock_toggle is not None:
-        val = "1" if mock_toggle else "0"
-        ws_path = f"{ws_path}?live_recording_mock={val}"
     return {
         "protocol_version": PROTOCOL_VERSION,
         "session": session,
@@ -123,6 +206,143 @@ def get_live_session_final(session_id: str) -> Dict[str, Any]:
     }
 
 
+@app.get("/demo/live/sessions/{session_id}/result")
+def get_live_session_result(session_id: str) -> Dict[str, Any]:
+    try:
+        result = LIVE_SESSIONS.semilive_result_snapshot(session_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Live session result not found")
+    final_text = str(result.get("final_text") or "")
+    final_segments = result.get("final_segments")
+    has_segments = isinstance(final_segments, list) and any(isinstance(s, dict) for s in final_segments)
+    has_recording_wav = _live_recording_wav_path_from_result(result) is not None
+    can_export = bool(final_text.strip()) or has_segments
+    return {
+        "protocol_version": PROTOCOL_VERSION,
+        "session_id": str(session_id),
+        "result": result,
+        "ready": str(result.get("finalization_state") or "").strip().lower() in {"ready", "finalized", "recording_finalized"},
+        "can_export_txt": bool(can_export),
+        "can_export_srt": bool(has_segments),
+        "can_export_wav": bool(has_recording_wav),
+        "transcript_txt_url": _rooted_path(f"/demo/live/sessions/{session_id}/transcript.txt") if can_export else None,
+        "transcript_srt_url": _rooted_path(f"/demo/live/sessions/{session_id}/transcript.srt") if has_segments else None,
+        "recording_wav_url": _rooted_path(f"/demo/live/sessions/{session_id}/recording.wav") if has_recording_wav else None,
+    }
+
+
+@app.post("/demo/live/sessions/{session_id}/fixture")
+async def set_live_session_fixture(session_id: str, request: Request) -> Dict[str, Any]:
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="fixture payload must be a JSON object")
+
+    fixture_id = str(payload.get("fixture_id") or "").strip()
+    fixture_version = str(payload.get("fixture_version") or "").strip()
+    fixture_test_mode = str(payload.get("fixture_test_mode") or "").strip()
+    if not fixture_id:
+        raise HTTPException(status_code=400, detail="fixture_id is required")
+
+    try:
+        session = LIVE_SESSIONS.set_fixture_metadata(
+            session_id,
+            fixture_id=fixture_id,
+            fixture_version=fixture_version,
+            fixture_test_mode=(fixture_test_mode or "playback"),
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Live session not found")
+    return {
+        "protocol_version": PROTOCOL_VERSION,
+        "session": session,
+    }
+
+
+@app.get("/demo/live/sessions/{session_id}/quality")
+def get_live_session_quality(session_id: str, fixture_id: str | None = None) -> Dict[str, Any]:
+    try:
+        result = LIVE_SESSIONS.semilive_result_snapshot(session_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Live session result not found")
+
+    finalization_state = str(result.get("finalization_state") or "").strip().lower()
+    if finalization_state not in {"ready", "finalized", "recording_finalized"}:
+        raise HTTPException(status_code=409, detail="Transcript result not ready")
+
+    resolved_fixture_id = str(fixture_id or result.get("fixture_id") or "").strip()
+    if not resolved_fixture_id:
+        raise HTTPException(status_code=409, detail="No fixture metadata for this session")
+
+    final_text = str(result.get("final_text") or "")
+    if not final_text.strip():
+        raise HTTPException(status_code=409, detail="Transcript text not ready")
+
+    try:
+        quality = score_semilive_text_against_fixture(
+            fixture_id=resolved_fixture_id,
+            semilive_text=final_text,
+            semilive_result=result,
+            stats_log_path=LIVE_SESSIONS.stats_log_path(session_id),
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"quality_score_failed:{type(e).__name__}")
+
+    return {
+        "protocol_version": PROTOCOL_VERSION,
+        "session_id": str(session_id),
+        "fixture_id": resolved_fixture_id,
+        "ready": True,
+        "quality": quality,
+    }
+
+
+@app.get("/demo/live/sessions/{session_id}/transcript.txt")
+def get_live_session_transcript_txt(session_id: str) -> Response:
+    try:
+        result = LIVE_SESSIONS.semilive_result_snapshot(session_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Live session result not found")
+    text = str(result.get("final_text") or "")
+    if not text.strip():
+        raise HTTPException(status_code=409, detail="Transcript text not ready")
+    headers = {"Content-Disposition": f'attachment; filename="{_safe_filename(session_id)}.txt"'}
+    return Response(content=text, media_type="text/plain; charset=utf-8", headers=headers)
+
+
+@app.get("/demo/live/sessions/{session_id}/transcript.srt")
+def get_live_session_transcript_srt(session_id: str) -> Response:
+    try:
+        result = LIVE_SESSIONS.semilive_result_snapshot(session_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Live session result not found")
+    srt_text = _live_result_to_srt_text(result)
+    if not srt_text.strip():
+        raise HTTPException(status_code=409, detail="Transcript segments not ready")
+    headers = {"Content-Disposition": f'attachment; filename="{_safe_filename(session_id)}.srt"'}
+    return Response(content=srt_text, media_type="application/x-subrip", headers=headers)
+
+
+@app.get("/demo/live/sessions/{session_id}/recording.wav")
+def get_live_session_recording_wav(session_id: str) -> FileResponse:
+    try:
+        result = LIVE_SESSIONS.semilive_result_snapshot(session_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Live session result not found")
+    wav_path = _live_recording_wav_path_from_result(result)
+    if wav_path is None:
+        raise HTTPException(status_code=404, detail="Live recording WAV not found")
+    return FileResponse(
+        path=str(wav_path),
+        media_type="audio/wav",
+        filename=f"{_safe_filename(session_id)}.wav",
+    )
+
+
 @app.get("/demo/live/metrics")
 def get_live_metrics() -> Dict[str, Any]:
     return {
@@ -151,13 +371,25 @@ async def live_session_ws(session_id: str, websocket: WebSocket) -> None:
     await websocket.accept()
     stop_reason = "client_disconnected"
     websocket_closed = False
-    transcriber: LiveTranscriber | None = None
-    mock_toggle = _optional_bool_param(websocket.query_params.get("live_recording_mock"))
-    driver_override: str | None = None
-    if mock_toggle is True:
-        driver_override = "mock_stream"
-    elif mock_toggle is False:
-        driver_override = "whisperlive_sidecar"
+    recorder: LiveWavRecorder | None = None
+    chunker: LiveAudioChunker | None = None
+    chunk_bridge: LiveChunkBatchBridge | None = None
+    semilive_chunk_jobs_enabled = bool(LIVE_SEMILIVE_CHUNK_BATCH_SHADOW)
+    semilive_chunk_jobs_pending: dict[int, dict[str, Any]] = {}
+    semilive_chunk_jobs_to_enqueue: list[Any] = []
+    semilive_chunk_jobs_last_poll_mono = 0.0
+    semilive_recording_state = "idle"
+    semilive_recording_path = ""
+    semilive_recording_bytes = 0
+    semilive_recording_duration_ms = 0
+    semilive_chunk_index_next = 0
+    semilive_chunks_total = 0
+    semilive_chunks_done = 0
+    semilive_chunks_failed = 0
+    semilive_finalization_state = "idle"
+    semilive_shadow_disabled_reason = ""
+    semilive_recording_finalized = False
+    semilive_chunker_snapshot: dict[str, Any] = {}
 
     async def send_event(payload: Dict[str, Any]) -> None:
         payload = dict(payload)
@@ -167,78 +399,498 @@ async def live_session_ws(session_id: str, websocket: WebSocket) -> None:
             pass
         await websocket.send_json(payload)
 
-    async def emit_engine_events(events: list[Any]) -> None:
-        for ev in events:
-            kind = str(getattr(ev, "kind", "")).strip().lower()
-            txt = str(getattr(ev, "text", "") or "").strip()
-            if not txt:
+    def _semilive_archive_kwargs() -> dict[str, Any]:
+        return {
+            "recording_path": str(semilive_recording_path or ""),
+            "recording_bytes": int(max(0, semilive_recording_bytes)),
+            "recording_duration_ms": int(max(0, semilive_recording_duration_ms)),
+            "chunks_total": int(max(0, semilive_chunks_total)),
+            "chunks_done": int(max(0, semilive_chunks_done)),
+            "chunks_failed": int(max(0, semilive_chunks_failed)),
+            "finalization_state": str(semilive_finalization_state or ""),
+            "batch_job_id": "",
+        }
+
+    def _archive_current_semilive_result(*, close_reason: str) -> dict[str, Any]:
+        try:
+            semilive_result = LIVE_SESSIONS.semilive_result_snapshot(session_id)
+        except Exception:
+            return {}
+        if not semilive_result:
+            return {}
+        has_content = (
+            bool(str(semilive_result.get("final_text") or "").strip())
+            or bool(semilive_result.get("final_segments"))
+            or int(semilive_result.get("chunks_total") or 0) > 0
+            or int(max(0, semilive_recording_duration_ms)) > 0
+        )
+        if not has_content:
+            return semilive_result
+        LIVE_SESSIONS.archive_transcript(
+            session_id,
+            close_reason=str(close_reason or stop_reason or "closed"),
+            final_text=str(semilive_result.get("final_text") or ""),
+            final_segments=[
+                dict(seg)
+                for seg in (semilive_result.get("final_segments") or [])
+                if isinstance(seg, dict)
+            ],
+            transcript_revision=int(max(0, int(semilive_result.get("transcript_revision") or 0))),
+            **_semilive_archive_kwargs(),
+        )
+        return semilive_result
+
+    def _append_semilive_log(kind: str, **fields: Any) -> None:
+        try:
+            row = {"kind": str(kind)}
+            row.update(fields)
+            LIVE_SESSIONS.append_stats_log(session_id, row)
+        except Exception:
+            pass
+
+    def _update_semilive_session_state() -> None:
+        try:
+            LIVE_SESSIONS.update_semilive(
+                session_id,
+                recording_state=semilive_recording_state,
+                recording_path=semilive_recording_path,
+                recording_bytes=semilive_recording_bytes,
+                recording_duration_ms=semilive_recording_duration_ms,
+                chunk_index_next=semilive_chunk_index_next,
+                chunks_total=semilive_chunks_total,
+                chunks_done=semilive_chunks_done,
+                chunks_failed=semilive_chunks_failed,
+                finalization_state=semilive_finalization_state,
+                batch_job_id="",
+            )
+        except Exception:
+            pass
+
+    def _build_semilive_initial_prompt() -> tuple[str, dict[str, Any]]:
+        if not LIVE_SEMILIVE_INITIAL_PROMPT_ENABLED:
+            return "", {"enabled": False, "used": False, "reason": "disabled"}
+        try:
+            result = LIVE_SESSIONS.semilive_result_snapshot(session_id)
+        except Exception as e:
+            return "", {"enabled": True, "used": False, "reason": f"snapshot_error:{type(e).__name__}"}
+
+        final_text = " ".join(str(result.get("final_text") or "").split()).strip()
+        if not final_text:
+            return "", {"enabled": True, "used": False, "reason": "no_context_text"}
+
+        tokens = [tok for tok in final_text.split(" ") if tok]
+        source_words = len(tokens)
+        if source_words < LIVE_SEMILIVE_INITIAL_PROMPT_MIN_WORDS:
+            return "", {
+                "enabled": True,
+                "used": False,
+                "reason": "too_few_words",
+                "source_words": int(source_words),
+            }
+
+        tail_tokens = tokens[-LIVE_SEMILIVE_INITIAL_PROMPT_TAIL_WORDS :]
+        prompt = " ".join(tail_tokens).strip()
+        if LIVE_SEMILIVE_INITIAL_PROMPT_MAX_CHARS > 0 and len(prompt) > LIVE_SEMILIVE_INITIAL_PROMPT_MAX_CHARS:
+            tail = prompt[-LIVE_SEMILIVE_INITIAL_PROMPT_MAX_CHARS :].strip()
+            if " " in tail:
+                tail = tail.split(" ", 1)[1].strip()
+            prompt = tail or prompt[-LIVE_SEMILIVE_INITIAL_PROMPT_MAX_CHARS :].strip()
+        prompt_words = len([tok for tok in prompt.split() if tok])
+        if prompt_words < LIVE_SEMILIVE_INITIAL_PROMPT_MIN_WORDS:
+            return "", {
+                "enabled": True,
+                "used": False,
+                "reason": "trimmed_too_short",
+                "source_words": int(source_words),
+                "tail_words": int(prompt_words),
+            }
+        return prompt, {
+            "enabled": True,
+            "used": True,
+            "chars": len(prompt),
+            "words": int(prompt_words),
+            "source_words": int(source_words),
+            "transcript_revision": int(max(0, int(result.get("transcript_revision") or 0))),
+        }
+
+    def _ingest_closed_chunks(chunks: list[Any]) -> None:
+        nonlocal semilive_chunks_total, semilive_chunk_index_next, semilive_chunker_snapshot
+        nonlocal semilive_chunk_jobs_to_enqueue
+        if not chunks:
+            return
+        for chunk in chunks:
+            semilive_chunks_total += 1
+            semilive_chunk_index_next = max(
+                int(semilive_chunk_index_next),
+                int(getattr(chunk, "chunk_index", semilive_chunk_index_next)) + 1,
+            )
+            _append_semilive_log(
+                "semilive_chunk_closed",
+                chunk=getattr(chunk, "to_dict", lambda: {})(),
+            )
+            if semilive_chunk_jobs_enabled and chunk_bridge is not None:
+                semilive_chunk_jobs_to_enqueue.append(chunk)
+        if chunker is not None:
+            try:
+                semilive_chunker_snapshot = dict(chunker.snapshot())
+            except Exception:
+                semilive_chunker_snapshot = {}
+        if (semilive_chunk_jobs_pending or semilive_chunk_jobs_to_enqueue) and semilive_finalization_state not in {"error", "ready"}:
+            # Shadow processing is in progress, even if chunk jobs are feature-flagged.
+            pass
+        _update_semilive_session_state()
+
+    def _sync_semilive_counts_from_result(result: dict[str, Any]) -> None:
+        nonlocal semilive_chunks_total, semilive_chunks_done, semilive_chunks_failed
+        nonlocal semilive_finalization_state
+        semilive_chunks_total = int(max(0, int(result.get("chunks_total") or semilive_chunks_total)))
+        semilive_chunks_done = int(max(0, int(result.get("chunks_done") or semilive_chunks_done)))
+        semilive_chunks_failed = int(max(0, int(result.get("chunks_failed") or semilive_chunks_failed)))
+        if semilive_recording_finalized:
+            if semilive_chunk_jobs_pending or semilive_chunk_jobs_to_enqueue:
+                semilive_finalization_state = "processing_chunks"
+            elif semilive_chunks_failed > 0:
+                semilive_finalization_state = "error"
+            elif semilive_chunk_jobs_enabled and (semilive_chunks_total > 0 or semilive_chunks_done > 0):
+                semilive_finalization_state = "ready"
+
+    async def _record_semilive_chunk_job_state(
+        *,
+        chunk_index: int,
+        t0_ms: int,
+        t1_ms: int,
+        state: str,
+        text: str = "",
+        segments: list[dict[str, Any]] | None = None,
+        error: str = "",
+    ) -> None:
+        try:
+            result = LIVE_SESSIONS.record_semilive_chunk_result(
+                session_id,
+                chunk_index=int(chunk_index),
+                t0_ms=int(t0_ms),
+                t1_ms=int(t1_ms),
+                text=str(text or ""),
+                segments=segments,
+                state=str(state or "ready"),
+                error=str(error or ""),
+            )
+            _sync_semilive_counts_from_result(result)
+            _update_semilive_session_state()
+        except Exception as e:
+            _append_semilive_log(
+                "semilive_chunk_result_store_error",
+                chunk_index=int(chunk_index),
+                state=str(state or ""),
+                error=f"{type(e).__name__}: {e}",
+            )
+
+    async def _drain_semilive_chunk_enqueues() -> None:
+        nonlocal semilive_finalization_state
+        nonlocal semilive_shadow_disabled_reason
+        if not semilive_chunk_jobs_enabled or chunk_bridge is None:
+            return
+        while semilive_chunk_jobs_to_enqueue:
+            chunk = semilive_chunk_jobs_to_enqueue.pop(0)
+            chunk_meta = getattr(chunk, "to_dict", lambda: {})()
+            chunk_index = int(getattr(chunk, "chunk_index", 0))
+            t0_ms = int(getattr(chunk, "t0_ms", 0))
+            t1_ms = int(getattr(chunk, "t1_ms", t0_ms))
+            initial_prompt, initial_prompt_meta = _build_semilive_initial_prompt()
+            if semilive_finalization_state not in {"error"}:
+                semilive_finalization_state = "processing_chunks"
+            try:
+                enq = await asyncio.to_thread(
+                    chunk_bridge.enqueue_chunk_pcm16,
+                    session_id=session_id,
+                    chunk_index=chunk_index,
+                    t0_ms=t0_ms,
+                    t1_ms=t1_ms,
+                    pcm16le=bytes(getattr(chunk, "pcm16le", b"") or b""),
+                    language=LIVE_SEMILIVE_CHUNK_LANGUAGE,
+                    initial_prompt=initial_prompt,
+                )
+                semilive_chunk_jobs_pending[chunk_index] = {
+                    "chunk_index": chunk_index,
+                    "t0_ms": t0_ms,
+                    "t1_ms": t1_ms,
+                    "job_id": str(enq.job_id),
+                    "job_dir": str(enq.job_dir),
+                    "state": "queued",
+                    "reported_state": "",
+                    "enqueued_mono": time.monotonic(),
+                    "last_poll_mono": 0.0,
+                    "chunk_meta": dict(chunk_meta) if isinstance(chunk_meta, dict) else {},
+                    "initial_prompt_meta": dict(initial_prompt_meta) if isinstance(initial_prompt_meta, dict) else {},
+                }
+                await _record_semilive_chunk_job_state(
+                    chunk_index=chunk_index,
+                    t0_ms=t0_ms,
+                    t1_ms=t1_ms,
+                    state="queued",
+                )
+                _append_semilive_log(
+                    "semilive_chunk_enqueued",
+                    chunk=dict(chunk_meta) if isinstance(chunk_meta, dict) else {"chunk_index": chunk_index},
+                    job=enq.to_dict(),
+                    initial_prompt_meta=dict(initial_prompt_meta) if isinstance(initial_prompt_meta, dict) else {},
+                )
+            except Exception as e:
+                semilive_shadow_disabled_reason = f"chunk_enqueue_failed:{type(e).__name__}"
+                semilive_finalization_state = "error"
+                await _record_semilive_chunk_job_state(
+                    chunk_index=chunk_index,
+                    t0_ms=t0_ms,
+                    t1_ms=t1_ms,
+                    state="error",
+                    error=f"{type(e).__name__}: {e}",
+                )
+                _append_semilive_log(
+                    "semilive_chunk_enqueue_error",
+                    chunk=dict(chunk_meta) if isinstance(chunk_meta, dict) else {"chunk_index": chunk_index},
+                    error=f"{type(e).__name__}: {e}",
+                )
+                _update_semilive_session_state()
+
+    async def _poll_semilive_chunk_jobs(*, force: bool = False) -> None:
+        nonlocal semilive_chunk_jobs_last_poll_mono
+        nonlocal semilive_finalization_state
+        nonlocal semilive_shadow_disabled_reason
+        if not semilive_chunk_jobs_enabled or chunk_bridge is None:
+            return
+        now_mono = time.monotonic()
+        if not force and (now_mono - semilive_chunk_jobs_last_poll_mono) < LIVE_SEMILIVE_CHUNK_POLL_INTERVAL_S:
+            return
+        semilive_chunk_jobs_last_poll_mono = now_mono
+        if semilive_chunk_jobs_pending and semilive_finalization_state not in {"error"}:
+            semilive_finalization_state = "processing_chunks"
+        for chunk_index in sorted(list(semilive_chunk_jobs_pending.keys())):
+            item = semilive_chunk_jobs_pending.get(chunk_index)
+            if not item:
                 continue
-            t0_ms = int(max(0, int(getattr(ev, "t0_ms", 0))))
-            t1_ms = int(max(t0_ms, int(getattr(ev, "t1_ms", t0_ms))))
-            segment_id = str(getattr(ev, "segment_id", "") or "")
-            revision = int(max(0, int(getattr(ev, "revision", 0))))
-            committed_chars = int(max(0, int(getattr(ev, "committed_chars", 0))))
-            committed_segments = int(max(0, int(getattr(ev, "committed_segments", 0))))
-            committed_until_ms = int(max(0, int(getattr(ev, "committed_until_ms", 0))))
-            if kind == "partial":
-                await send_event(
-                    partial_event(
-                        session_id,
-                        text=txt,
+            item["last_poll_mono"] = now_mono
+            t0_ms = int(item.get("t0_ms") or 0)
+            t1_ms = int(item.get("t1_ms") or t0_ms)
+            job_id = str(item.get("job_id") or "")
+            if not job_id:
+                continue
+            try:
+                poll = await asyncio.to_thread(
+                    chunk_bridge.poll_job,
+                    job_id,
+                    t0_offset_ms=t0_ms,
+                )
+            except FileNotFoundError:
+                # Worker may not have published the dir yet; keep queued.
+                continue
+            except Exception as e:
+                await _record_semilive_chunk_job_state(
+                    chunk_index=chunk_index,
+                    t0_ms=t0_ms,
+                    t1_ms=t1_ms,
+                    state="error",
+                    error=f"{type(e).__name__}: {e}",
+                )
+                semilive_chunk_jobs_pending.pop(chunk_index, None)
+                semilive_shadow_disabled_reason = f"chunk_poll_failed:{type(e).__name__}"
+                semilive_finalization_state = "error"
+                _append_semilive_log(
+                    "semilive_chunk_poll_error",
+                    chunk_index=chunk_index,
+                    job_id=job_id,
+                    error=f"{type(e).__name__}: {e}",
+                )
+                continue
+
+            poll_state = "ready" if poll.ok else ("error" if poll.done else str(poll.state or "queued"))
+            if str(item.get("reported_state") or "") != poll_state:
+                item["reported_state"] = poll_state
+                if poll_state == "ready":
+                    await _record_semilive_chunk_job_state(
+                        chunk_index=chunk_index,
                         t0_ms=t0_ms,
                         t1_ms=t1_ms,
-                        segment_id=segment_id or "tail",
-                        revision=revision,
-                        committed_chars=committed_chars,
-                        committed_segments=committed_segments,
-                        committed_until_ms=committed_until_ms,
+                        state="ready",
+                        text=str(poll.text or ""),
+                        segments=[dict(seg) for seg in (poll.segments or []) if isinstance(seg, dict)],
                     )
-                )
-            elif kind == "final":
-                await send_event(
-                    final_event(
-                        session_id,
-                        text=txt,
+                    _append_semilive_log(
+                        "semilive_chunk_ready",
+                        chunk_index=chunk_index,
+                        job_id=job_id,
+                        status={"state": poll.state, "ok": poll.ok, "done": poll.done},
+                        text_chars=len(str(poll.text or "")),
+                        segments_count=len(poll.segments or []),
+                    )
+                elif poll_state == "error":
+                    await _record_semilive_chunk_job_state(
+                        chunk_index=chunk_index,
                         t0_ms=t0_ms,
                         t1_ms=t1_ms,
-                        segment_id=segment_id,
-                        revision=revision,
-                        committed_chars=committed_chars,
-                        committed_segments=committed_segments,
-                        committed_until_ms=committed_until_ms,
+                        state="error",
+                        error=str(poll.error or f"job_state:{poll.state}"),
                     )
+                    _append_semilive_log(
+                        "semilive_chunk_error",
+                        chunk_index=chunk_index,
+                        job_id=job_id,
+                        status={"state": poll.state, "ok": poll.ok, "done": poll.done},
+                        error=str(poll.error or ""),
+                    )
+                else:
+                    await _record_semilive_chunk_job_state(
+                        chunk_index=chunk_index,
+                        t0_ms=t0_ms,
+                        t1_ms=t1_ms,
+                        state=poll_state,
+                    )
+            item["state"] = poll_state
+            if poll.done:
+                semilive_chunk_jobs_pending.pop(chunk_index, None)
+
+        if semilive_recording_finalized and not semilive_chunk_jobs_pending and not semilive_chunk_jobs_to_enqueue:
+            if semilive_chunks_failed > 0:
+                semilive_finalization_state = "error"
+            elif semilive_chunk_jobs_enabled and (semilive_chunks_total > 0 or semilive_chunks_done > 0):
+                semilive_finalization_state = "ready"
+        _update_semilive_session_state()
+
+    async def _process_semilive_chunk_jobs(*, force_poll: bool = False) -> None:
+        if not semilive_chunk_jobs_enabled:
+            return
+        await _drain_semilive_chunk_enqueues()
+        await _poll_semilive_chunk_jobs(force=force_poll)
+
+    async def _await_semilive_chunk_jobs_until_done(*, timeout_s: float) -> None:
+        if not semilive_chunk_jobs_enabled:
+            return
+        deadline = time.monotonic() + max(0.0, float(timeout_s))
+        while True:
+            await _process_semilive_chunk_jobs(force_poll=True)
+            if not semilive_chunk_jobs_to_enqueue and not semilive_chunk_jobs_pending:
+                return
+            if time.monotonic() >= deadline:
+                return
+            await asyncio.sleep(0.25)
+
+    def _finalize_semilive_shadow(*, reason: str) -> None:
+        nonlocal semilive_recording_finalized
+        nonlocal semilive_recording_state
+        nonlocal semilive_recording_path
+        nonlocal semilive_recording_bytes
+        nonlocal semilive_recording_duration_ms
+        nonlocal semilive_chunker_snapshot
+        nonlocal semilive_finalization_state
+        nonlocal semilive_shadow_disabled_reason
+        if semilive_recording_finalized:
+            return
+        semilive_finalization_state = "finalizing"
+        if chunker is not None:
+            try:
+                _ingest_closed_chunks(chunker.flush_tail())
+                semilive_chunker_snapshot = dict(chunker.snapshot())
+            except Exception as e:
+                semilive_shadow_disabled_reason = f"chunker_finalize_failed:{type(e).__name__}"
+                semilive_recording_state = "error"
+                semilive_finalization_state = "error"
+                _append_semilive_log(
+                    "semilive_chunker_finalize_error",
+                    reason=reason,
+                    error=f"{type(e).__name__}: {e}",
                 )
+        if recorder is not None:
+            try:
+                rs = recorder.finalize()
+                semilive_recording_path = str(rs.wav_path)
+                semilive_recording_bytes = int(rs.bytes_written)
+                semilive_recording_duration_ms = int(rs.duration_ms)
+                semilive_recording_state = "finalized"
+                if semilive_finalization_state != "error":
+                    semilive_finalization_state = "recording_finalized"
+                _append_semilive_log(
+                    "semilive_recording_finalized",
+                    reason=reason,
+                    recording=rs.to_dict(),
+                    chunker_snapshot=dict(semilive_chunker_snapshot),
+                )
+            except Exception as e:
+                semilive_shadow_disabled_reason = f"recording_finalize_failed:{type(e).__name__}"
+                semilive_recording_state = "error"
+                semilive_finalization_state = "error"
+                _append_semilive_log(
+                    "semilive_recording_finalize_error",
+                    reason=reason,
+                    error=f"{type(e).__name__}: {e}",
+                )
+        else:
+            if semilive_finalization_state != "error":
+                semilive_finalization_state = "idle"
+        semilive_recording_finalized = True
+        _update_semilive_session_state()
 
     try:
-        try:
-            transcriber = await asyncio.to_thread(
-                LiveTranscriber,
-                session_id=session_id,
-                sample_rate_hz=LIVE_AUDIO_SAMPLE_RATE_HZ,
-                channels=LIVE_AUDIO_CHANNELS,
-                driver_override=driver_override,
-            )
-        except Exception as e:
-            stop_reason = "engine_init_failed"
-            await send_event(
-                error_event(
-                    session_id,
-                    code="engine_init_failed",
-                    message=f"{type(e).__name__}: {e}",
-                    fatal=True,
-                )
-            )
-            await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
-            websocket_closed = True
-            return
-
         await send_event(
             ready_event(
                 session_id,
                 message="Live websocket connected. Send binary PCM16 frames and JSON controls.",
-                engine=transcriber.driver_name,
+                engine="semilive_chunked",
             )
         )
+
+        # Semilive pipeline (WAV recorder + silence chunker + chunk batch jobs).
+        try:
+            recorder = LiveWavRecorder(
+                session_id=session_id,
+                sample_rate_hz=LIVE_AUDIO_SAMPLE_RATE_HZ,
+                channels=LIVE_AUDIO_CHANNELS,
+            )
+            rec_snap = recorder.start()
+            chunker = LiveAudioChunker(
+                config=LiveChunkerConfig(
+                    sample_rate_hz=LIVE_AUDIO_SAMPLE_RATE_HZ,
+                    channels=LIVE_AUDIO_CHANNELS,
+                    energy_threshold=LIVE_SEMILIVE_CHUNK_ENERGY_THRESHOLD,
+                    silence_threshold_ms=LIVE_SEMILIVE_CHUNK_SILENCE_MS,
+                    max_chunk_ms=LIVE_SEMILIVE_CHUNK_MAX_MS,
+                    min_chunk_ms=LIVE_SEMILIVE_CHUNK_MIN_MS,
+                    pre_roll_ms=LIVE_SEMILIVE_CHUNK_PRE_ROLL_MS,
+                )
+            )
+            if semilive_chunk_jobs_enabled:
+                chunk_bridge = LiveChunkBatchBridge(
+                    sample_rate_hz=LIVE_AUDIO_SAMPLE_RATE_HZ,
+                    channels=LIVE_AUDIO_CHANNELS,
+                    language=LIVE_SEMILIVE_CHUNK_LANGUAGE,
+                )
+            semilive_recording_state = "recording"
+            semilive_recording_path = str(rec_snap.wav_path)
+            semilive_recording_bytes = int(rec_snap.bytes_written)
+            semilive_recording_duration_ms = int(rec_snap.duration_ms)
+            semilive_chunk_index_next = 0
+            semilive_chunks_total = 0
+            semilive_chunks_done = 0
+            semilive_chunks_failed = 0
+            semilive_finalization_state = "recording"
+            semilive_chunker_snapshot = dict(chunker.snapshot())
+            _update_semilive_session_state()
+            _append_semilive_log(
+                "semilive_shadow_started",
+                recording=rec_snap.to_dict(),
+                chunk_jobs_enabled=bool(semilive_chunk_jobs_enabled),
+                chunker_config=chunker.config.__dict__,
+                chunker_snapshot=dict(semilive_chunker_snapshot),
+            )
+        except Exception as e:
+            recorder = None
+            chunker = None
+            semilive_recording_state = "error"
+            semilive_finalization_state = "error"
+            semilive_shadow_disabled_reason = f"semilive_init_failed:{type(e).__name__}"
+            _update_semilive_session_state()
+            _append_semilive_log(
+                "semilive_shadow_init_error",
+                error=f"{type(e).__name__}: {e}",
+            )
 
         while True:
             incoming = await websocket.receive()
@@ -250,58 +902,76 @@ async def live_session_ws(session_id: str, websocket: WebSocket) -> None:
             raw_bytes = incoming.get("bytes")
             if raw_bytes is not None:
                 snapshot = LIVE_SESSIONS.record_audio(session_id, byte_count=len(raw_bytes))
-                engine_events: list[Any] = []
-                try:
-                    if transcriber is not None:
-                        engine_events = await asyncio.to_thread(transcriber.feed_audio, raw_bytes)
-                except Exception as e:
-                    stop_reason = "engine_runtime_error"
-                    await send_event(
-                        error_event(
-                            session_id,
-                            code="engine_runtime_error",
-                            message=f"{type(e).__name__}: {e}",
-                            fatal=True,
+                if recorder is not None:
+                    try:
+                        rec_snap = recorder.append_pcm16(raw_bytes)
+                        semilive_recording_bytes = int(rec_snap.bytes_written)
+                        semilive_recording_duration_ms = int(rec_snap.duration_ms)
+                        semilive_recording_path = str(rec_snap.wav_path)
+                    except Exception as e:
+                        semilive_shadow_disabled_reason = f"recording_append_failed:{type(e).__name__}"
+                        semilive_recording_state = "error"
+                        semilive_finalization_state = "error"
+                        _append_semilive_log(
+                            "semilive_recording_append_error",
+                            error=f"{type(e).__name__}: {e}",
+                            at_frame=int(snapshot.get("frames_received") or 0),
                         )
-                    )
-                    if not websocket_closed:
-                        await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
-                        websocket_closed = True
-                    break
-
-                await emit_engine_events(engine_events)
-
-                # Emit transport + decode stats at startup, periodically and after transcript updates.
+                        try:
+                            recorder.abort()
+                        except Exception:
+                            pass
+                        recorder = None
+                        _update_semilive_session_state()
+                if chunker is not None:
+                    try:
+                        closed_chunks = chunker.feed_pcm16(raw_bytes)
+                        semilive_chunker_snapshot = dict(chunker.snapshot())
+                        _ingest_closed_chunks(closed_chunks)
+                    except Exception as e:
+                        semilive_shadow_disabled_reason = f"chunker_feed_failed:{type(e).__name__}"
+                        semilive_recording_state = "error"
+                        semilive_finalization_state = "error"
+                        _append_semilive_log(
+                            "semilive_chunker_feed_error",
+                            error=f"{type(e).__name__}: {e}",
+                            at_frame=int(snapshot.get("frames_received") or 0),
+                        )
+                        chunker = None
+                        _update_semilive_session_state()
+                await _process_semilive_chunk_jobs(force_poll=False)
+                # Emit transport + semilive stats at startup and periodically.
                 should_emit_stats = (
                     snapshot["frames_received"] == 1
                     or (snapshot["frames_received"] % 50) == 0
-                    or bool(engine_events)
                 )
                 if should_emit_stats:
-                    tstats = transcriber.stats_snapshot() if transcriber is not None else {}
                     stats_payload = stats_event(
                         session_id,
                         bytes_received=snapshot["bytes_received"],
                         frames_received=snapshot["frames_received"],
                         controls_received=snapshot["controls_received"],
                         uptime_s=snapshot["age_s"],
-                        engine=tstats.get("engine_driver"),
-                        decode_calls=tstats.get("decode_calls"),
-                        decode_ms_total=tstats.get("decode_ms_total"),
-                        decode_ms_last=tstats.get("decode_ms_last"),
-                        rtf=tstats.get("rtf"),
-                        partials_emitted=tstats.get("partials_emitted"),
-                        finals_emitted=tstats.get("finals_emitted"),
-                        engine_ready=tstats.get("engine_ready"),
-                        engine_rx_messages=tstats.get("engine_rx_messages"),
-                        engine_rx_parse_errors=tstats.get("engine_rx_parse_errors"),
-                        engine_rx_unknown_messages=tstats.get("engine_rx_unknown_messages"),
-                        engine_tx_sidecar_audio_bytes=tstats.get("engine_tx_sidecar_audio_bytes"),
-                        revision=tstats.get("revision"),
-                        committed_until_ms=tstats.get("committed_until_ms"),
-                        committed_segments=tstats.get("committed_segments"),
-                        committed_chars=tstats.get("committed_chars"),
-                        has_partial_tail=tstats.get("has_partial_tail"),
+                        live_mode="semilive_chunked",
+                        semilive_recording_state=str(semilive_recording_state or ""),
+                        semilive_recording_bytes=int(max(0, semilive_recording_bytes)),
+                        semilive_recording_duration_ms=int(max(0, semilive_recording_duration_ms)),
+                        semilive_chunk_index_next=int(max(0, semilive_chunk_index_next)),
+                        semilive_chunks_total=int(max(0, semilive_chunks_total)),
+                        semilive_chunks_done=int(max(0, semilive_chunks_done)),
+                        semilive_chunks_failed=int(max(0, semilive_chunks_failed)),
+                        semilive_finalization_state=str(semilive_finalization_state or ""),
+                        semilive_chunk_jobs_enabled=bool(semilive_chunk_jobs_enabled),
+                        semilive_chunk_jobs_pending=int(max(0, len(semilive_chunk_jobs_pending))),
+                        semilive_chunk_jobs_to_enqueue=int(max(0, len(semilive_chunk_jobs_to_enqueue))),
+                        semilive_shadow_disabled_reason=str(semilive_shadow_disabled_reason or ""),
+                        semilive_chunker_chunk_open=bool(semilive_chunker_snapshot.get("chunk_open")),
+                        semilive_chunker_active_chunk_duration_ms=int(
+                            max(0, int(semilive_chunker_snapshot.get("active_chunk_duration_ms") or 0))
+                        ),
+                        semilive_chunker_pre_roll_frames=int(
+                            max(0, int(semilive_chunker_snapshot.get("pre_roll_frames_buffered") or 0))
+                        ),
                     )
                     try:
                         LIVE_SESSIONS.append_stats_log(session_id, stats_payload)
@@ -340,6 +1010,8 @@ async def live_session_ws(session_id: str, websocket: WebSocket) -> None:
 
             if control_type == "start":
                 snapshot = LIVE_SESSIONS.mark_state(session_id, state="listening")
+                semilive_recording_state = "recording"
+                _update_semilive_session_state()
                 await send_event(
                     control_ack_event(
                         session_id,
@@ -351,6 +1023,8 @@ async def live_session_ws(session_id: str, websocket: WebSocket) -> None:
 
             if control_type == "pause":
                 snapshot = LIVE_SESSIONS.mark_state(session_id, state="paused")
+                semilive_recording_state = "paused"
+                _update_semilive_session_state()
                 await send_event(
                     control_ack_event(
                         session_id,
@@ -362,6 +1036,8 @@ async def live_session_ws(session_id: str, websocket: WebSocket) -> None:
 
             if control_type == "resume":
                 snapshot = LIVE_SESSIONS.mark_state(session_id, state="listening")
+                semilive_recording_state = "recording"
+                _update_semilive_session_state()
                 await send_event(
                     control_ack_event(
                         session_id,
@@ -373,39 +1049,22 @@ async def live_session_ws(session_id: str, websocket: WebSocket) -> None:
 
             if control_type == "stop":
                 stop_reason = "client_stop"
-                transcript_snapshot: dict[str, Any] = {}
-                if transcriber is not None:
-                    try:
-                        await emit_engine_events(await asyncio.to_thread(transcriber.flush))
-                    except Exception as e:
-                        await send_event(
-                            error_event(
-                                session_id,
-                                code="engine_flush_error",
-                                message=f"{type(e).__name__}: {e}",
-                                fatal=False,
-                            )
-                        )
-                    transcript_snapshot = await asyncio.to_thread(transcriber.transcript_snapshot)
-                if transcript_snapshot:
-                    LIVE_SESSIONS.archive_transcript(
-                        session_id,
-                        close_reason=stop_reason,
-                        final_text=str(transcript_snapshot.get("final_text") or ""),
-                        final_segments=[
-                            dict(seg)
-                            for seg in (transcript_snapshot.get("final_segments") or [])
-                            if isinstance(seg, dict)
-                        ],
-                        transcript_revision=int(max(0, int(transcript_snapshot.get("revision") or 0))),
-                    )
+                semilive_result: dict[str, Any] = {}
+                _finalize_semilive_shadow(reason="client_stop")
+                await _process_semilive_chunk_jobs(force_poll=True)
+                if LIVE_SEMILIVE_CHUNK_STOP_WAIT_S > 0:
+                    await _await_semilive_chunk_jobs_until_done(timeout_s=LIVE_SEMILIVE_CHUNK_STOP_WAIT_S)
+                try:
+                    semilive_result = _archive_current_semilive_result(close_reason=stop_reason)
+                except Exception:
+                    semilive_result = {}
                 await send_event(
                     ended_event(
                         session_id,
                         reason=stop_reason,
-                        transcript_revision=int(max(0, int(transcript_snapshot.get("revision") or 0))),
-                        final_segments_count=len(transcript_snapshot.get("final_segments") or []),
-                        final_text=str(transcript_snapshot.get("final_text") or ""),
+                        transcript_revision=int(max(0, int(semilive_result.get("transcript_revision") or 0))),
+                        final_segments_count=len(semilive_result.get("final_segments") or []),
+                        final_text=str(semilive_result.get("final_text") or ""),
                         final_transcript_url=_rooted_path(f"/demo/live/sessions/{session_id}/final"),
                     )
                 )
@@ -434,32 +1093,23 @@ async def live_session_ws(session_id: str, websocket: WebSocket) -> None:
             except Exception:
                 pass
     finally:
+        _finalize_semilive_shadow(reason=stop_reason)
+        await _process_semilive_chunk_jobs(force_poll=True)
+        if stop_reason == "client_stop":
+            if LIVE_SEMILIVE_CHUNK_POST_CLOSE_WAIT_S > 0:
+                await _await_semilive_chunk_jobs_until_done(timeout_s=LIVE_SEMILIVE_CHUNK_POST_CLOSE_WAIT_S)
+        else:
+            if LIVE_SEMILIVE_CHUNK_STOP_WAIT_S > 0:
+                await _await_semilive_chunk_jobs_until_done(timeout_s=LIVE_SEMILIVE_CHUNK_STOP_WAIT_S)
+        try:
+            _archive_current_semilive_result(close_reason=stop_reason)
+        except Exception:
+            pass
         # Release capacity slot first; downstream close operations may block.
         LIVE_SESSIONS.close_session(session_id, reason=stop_reason)
-        if transcriber is not None:
+        if recorder is not None and not semilive_recording_finalized:
             try:
-                if stop_reason != "client_stop":
-                    snapshot = await asyncio.to_thread(transcriber.transcript_snapshot)
-                    if snapshot and (
-                        str(snapshot.get("final_text") or "").strip()
-                        or bool(snapshot.get("final_segments"))
-                    ):
-                        LIVE_SESSIONS.archive_transcript(
-                            session_id,
-                            close_reason=stop_reason,
-                            final_text=str(snapshot.get("final_text") or ""),
-                            final_segments=[
-                                dict(seg)
-                                for seg in (snapshot.get("final_segments") or [])
-                                if isinstance(seg, dict)
-                            ],
-                            transcript_revision=int(max(0, int(snapshot.get("revision") or 0))),
-                        )
-            except Exception:
-                pass
-        if transcriber is not None:
-            try:
-                await asyncio.to_thread(transcriber.close)
+                recorder.abort()
             except Exception:
                 pass
 
@@ -467,6 +1117,58 @@ async def live_session_ws(session_id: str, websocket: WebSocket) -> None:
 def _repo_root() -> Path:
     # portal-api/main.py -> portal-api -> repo root
     return Path(__file__).resolve().parents[1]
+
+
+def _format_srt_timestamp(ms: int) -> str:
+    total_ms = int(max(0, ms))
+    hours = total_ms // 3_600_000
+    rem = total_ms % 3_600_000
+    minutes = rem // 60_000
+    rem = rem % 60_000
+    seconds = rem // 1000
+    millis = rem % 1000
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d},{millis:03d}"
+
+
+def _live_result_to_srt_text(result: dict[str, Any]) -> str:
+    segments_any = result.get("final_segments")
+    if not isinstance(segments_any, list):
+        return ""
+    rows: list[str] = []
+    idx = 0
+    for seg in segments_any:
+        if not isinstance(seg, dict):
+            continue
+        text = str(seg.get("text") or "").strip()
+        if not text:
+            continue
+        t0_ms = int(max(0, int(seg.get("t0_ms") or 0)))
+        t1_ms = int(max(t0_ms + 1, int(seg.get("t1_ms") or (t0_ms + 1))))
+        idx += 1
+        rows.append(str(idx))
+        rows.append(f"{_format_srt_timestamp(t0_ms)} --> {_format_srt_timestamp(t1_ms)}")
+        rows.append(text)
+        rows.append("")
+    return "\n".join(rows).strip() + ("\n" if rows else "")
+
+
+def _live_recording_wav_path_from_result(result: dict[str, Any]) -> Path | None:
+    raw = str((result or {}).get("recording_path") or "").strip()
+    if not raw:
+        return None
+    try:
+        candidate = Path(raw).expanduser().resolve()
+    except Exception:
+        return None
+    try:
+        candidate.relative_to(LIVE_RECORDINGS_ROOT)
+    except Exception:
+        return None
+    if candidate.suffix.lower() != ".wav":
+        return None
+    if not candidate.is_file():
+        return None
+    return candidate
 
 
 def _rooted_path(path: str) -> str:
@@ -618,17 +1320,6 @@ def _as_bool(raw: Any) -> bool:
     return s in {"1", "true", "yes", "on"}
 
 
-def _optional_bool_param(raw: Any) -> bool | None:
-    s = str(raw or "").strip().lower()
-    if not s:
-        return None
-    if s in {"1", "true", "yes", "on"}:
-        return True
-    if s in {"0", "false", "no", "off"}:
-        return False
-    return None
-
-
 def _param_from_request_or_referer(request: Request, key: str) -> str:
     qv = request.query_params.get(key)
     if qv is not None:
@@ -738,6 +1429,7 @@ def create_demo_job(
     jp: JobPaths = init_job_in_inbox(
         orig_filename=orig_name,
         options=dict(base_options),
+        job_kind="upload_audio",
     )
 
     # Schrijf upload naar job upload/
@@ -758,7 +1450,7 @@ def create_demo_job(
             try:
                 opts = dict(base_options)
                 opts["snippet_seconds"] = int(sec)
-                extra = init_job_in_inbox(orig_filename=orig_name, options=opts)
+                extra = init_job_in_inbox(orig_filename=orig_name, options=opts, job_kind="upload_audio")
                 dst_extra = extra.upload_dir / orig_name
                 shutil.copy2(dst_primary, dst_extra)
                 extra_job_ids.append(extra.job_id)

@@ -2,28 +2,9 @@
   "snip": { "minutes_default": 15 },
 
   "live": {
-    "driver": "whisperlive_sidecar",
+    "mode": "semilive_chunked",
     "sample_rate_hz": 16000,
-    "channels": 1,
-    "whisperlive_sidecar": {
-      "ws_url": "ws://127.0.0.1:9090",
-      "language": "en",
-      "task": "transcribe",
-      "model": "medium",
-      "input_gain": 8.0,
-      "use_vad": false,
-      "no_speech_thresh": 0.45,
-      "send_last_n_segments": 10,
-      "clip_audio": false,
-      "same_output_threshold": 10,
-      "enable_translation": false,
-      "target_language": "en",
-      "open_timeout_s": 4.0,
-      "ready_timeout_s": 3.0,
-      "recv_timeout_s": 0.02,
-      "flush_timeout_s": 45.0,
-      "max_drain_messages": 64
-    }
+    "channels": 1
   },
 
   "tabby": {

@@ -28,6 +28,21 @@ def _as_positive_int(value: Any) -> int | None:
   return v
 
 
+def _as_bool(value: Any, default: bool = True) -> bool:
+  if value is None:
+    return bool(default)
+  if isinstance(value, bool):
+    return value
+  s = str(value).strip().lower()
+  if not s:
+    return bool(default)
+  if s in {"1", "true", "yes", "on", "y"}:
+    return True
+  if s in {"0", "false", "no", "off", "n"}:
+    return False
+  return bool(default)
+
+
 def _apply_torch_thread_tuning(
   torch_mod: Any,
   *,
@@ -100,7 +115,9 @@ def _run(args_obj: dict[str, Any], out_json: Path) -> int:
   batch_size = int(args_obj.get("batch_size", 3))
   chunk_size = int(args_obj.get("chunk_size", 30))
   beam_size = int(args_obj.get("beam_size", 5))
+  initial_prompt = str(args_obj.get("initial_prompt") or "").strip() or None
   align_model = str(args_obj.get("align_model") or "").strip() or None
+  align_enabled = _as_bool(args_obj.get("align_enabled"), True)
   diarize_model = str(args_obj.get("diarize_model") or "").strip() or None
   torch_num_threads = _as_positive_int(args_obj.get("torch_num_threads"))
   torch_num_interop_threads = _as_positive_int(args_obj.get("torch_num_interop_threads"))
@@ -126,25 +143,30 @@ def _run(args_obj: dict[str, Any], out_json: Path) -> int:
 
   print("STAGE transcribe", flush=True)
   t0 = time.monotonic()
+  asr_options: dict[str, Any] = {"beam_size": beam_size}
+  if initial_prompt is not None:
+    asr_options["initial_prompt"] = initial_prompt
   asr_model = whisperx.load_model(
     model_name,
     device=device,
     compute_type=compute_type,
     language=language,
-    asr_options={"beam_size": beam_size},
+    asr_options=asr_options,
     vad_options={"chunk_size": chunk_size},
   )
   audio = whisperx.load_audio(str(snippet_path))
-  result = asr_model.transcribe(
-    audio,
-    batch_size=batch_size,
-    chunk_size=chunk_size,
-    print_progress=False,
-    verbose=False,
-  )
+  transcribe_kwargs: dict[str, Any] = {
+    "batch_size": batch_size,
+    "chunk_size": chunk_size,
+    "print_progress": False,
+    "verbose": False,
+  }
+  result = asr_model.transcribe(audio, **transcribe_kwargs)
+  initial_prompt_applied = bool(initial_prompt is not None)
   durations["transcribe"] = time.monotonic() - t0
   print(f"TIMING transcribe {durations['transcribe']:.6f}", flush=True)
   print(f"INFO transcribe_segments={len(result.get('segments') or [])}", flush=True)
+  print(f"INFO initial_prompt_applied={str(bool(initial_prompt_applied)).lower()}", flush=True)
 
   del asr_model
   _cleanup_torch(torch)
@@ -152,27 +174,35 @@ def _run(args_obj: dict[str, Any], out_json: Path) -> int:
   print("STAGE align", flush=True)
   t0 = time.monotonic()
   align_language = str(result.get("language") or language or "en")
-  aligner, align_meta = whisperx.load_align_model(align_language, device, model_name=align_model)
   aligned: dict[str, Any]
-  if aligner is not None and len(result.get("segments") or []) > 0:
-    aligned = whisperx.align(
-      result["segments"],
-      aligner,
-      align_meta,
-      audio,
-      device,
-      return_char_alignments=False,
-      print_progress=False,
-    )
-  else:
+  if not align_enabled:
     aligned = {"segments": result.get("segments") or []}
-  aligned["language"] = str(align_meta.get("language") or align_language)
-  durations["align"] = time.monotonic() - t0
-  print(f"TIMING align {durations['align']:.6f}", flush=True)
-  print(f"INFO aligned_segments={len(aligned.get('segments') or [])}", flush=True)
+    aligned["language"] = align_language
+    durations["align"] = time.monotonic() - t0
+    print("INFO align_skipped align_enabled=false", flush=True)
+    print(f"TIMING align {durations['align']:.6f}", flush=True)
+    print(f"INFO aligned_segments={len(aligned.get('segments') or [])}", flush=True)
+  else:
+    aligner, align_meta = whisperx.load_align_model(align_language, device, model_name=align_model)
+    if aligner is not None and len(result.get("segments") or []) > 0:
+      aligned = whisperx.align(
+        result["segments"],
+        aligner,
+        align_meta,
+        audio,
+        device,
+        return_char_alignments=False,
+        print_progress=False,
+      )
+    else:
+      aligned = {"segments": result.get("segments") or []}
+    aligned["language"] = str(align_meta.get("language") or align_language)
+    durations["align"] = time.monotonic() - t0
+    print(f"TIMING align {durations['align']:.6f}", flush=True)
+    print(f"INFO aligned_segments={len(aligned.get('segments') or [])}", flush=True)
 
-  del aligner
-  _cleanup_torch(torch)
+    del aligner
+    _cleanup_torch(torch)
 
   if speaker_mode == "none":
     print("INFO diarize_skipped speaker_mode=none", flush=True)

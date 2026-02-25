@@ -1,13 +1,84 @@
 from __future__ import annotations
 
 import json
+import re
 import secrets
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+
+_DEDUP_WORD_RE = re.compile(r"[a-z0-9]+", re.IGNORECASE)
+
+
+def _word_tokens_with_spans(text: str) -> list[tuple[str, int, int]]:
+    raw = str(text or "")
+    if not raw:
+        return []
+    lowered = raw.lower()
+    out: list[tuple[str, int, int]] = []
+    for m in _DEDUP_WORD_RE.finditer(lowered):
+        word = m.group(0)
+        if not word:
+            continue
+        out.append((word, int(m.start()), int(m.end())))
+    return out
+
+
+def _dedup_trim_incoming_prefix_words(
+    existing_text: str,
+    incoming_text: str,
+    *,
+    min_overlap_words: int,
+    max_trim_words: int,
+) -> tuple[str, dict[str, int | bool]]:
+    incoming_raw = str(incoming_text or "")
+    existing_raw = str(existing_text or "")
+    meta: dict[str, int | bool] = {
+        "dedup_applied": False,
+        "merge_overlap_words": 0,
+        "dedup_words_trimmed": 0,
+    }
+    if not existing_raw.strip() or not incoming_raw.strip():
+        return incoming_raw, meta
+    max_words = int(max(0, max_trim_words))
+    min_words = int(max(1, min_overlap_words))
+    if max_words <= 0:
+        return incoming_raw, meta
+
+    existing_tokens = _word_tokens_with_spans(existing_raw)
+    incoming_tokens = _word_tokens_with_spans(incoming_raw)
+    if not existing_tokens or not incoming_tokens:
+        return incoming_raw, meta
+
+    suffix_words = [w for (w, _, _) in existing_tokens[-max_words:]]
+    prefix_tokens = incoming_tokens[:max_words]
+    prefix_words = [w for (w, _, _) in prefix_tokens]
+    limit = min(len(suffix_words), len(prefix_words), max_words)
+    if limit < min_words:
+        return incoming_raw, meta
+
+    overlap = 0
+    for k in range(limit, min_words - 1, -1):
+        if suffix_words[-k:] == prefix_words[:k]:
+            overlap = int(k)
+            break
+    if overlap < min_words:
+        return incoming_raw, meta
+
+    cutoff = int(prefix_tokens[overlap - 1][2])
+    # Skip separator run after the duplicated prefix.
+    while cutoff < len(incoming_raw) and not incoming_raw[cutoff].isalnum():
+        cutoff += 1
+    trimmed = incoming_raw[cutoff:].lstrip()
+
+    meta["dedup_applied"] = True
+    meta["merge_overlap_words"] = int(overlap)
+    meta["dedup_words_trimmed"] = int(overlap)
+    return trimmed, meta
 
 
 def _utc_iso(ts: float) -> str:
@@ -35,6 +106,23 @@ class LiveSession:
     bytes_received: int = 0
     frames_received: int = 0
     controls_received: int = 0
+    recording_state: str = "idle"
+    recording_path: str = ""
+    recording_bytes: int = 0
+    recording_duration_ms: int = 0
+    chunk_index_next: int = 0
+    chunks_total: int = 0
+    chunks_done: int = 0
+    chunks_failed: int = 0
+    finalization_state: str = "idle"
+    batch_job_id: str = ""
+    semilive_transcript_revision: int = 0
+    semilive_final_text: str = ""
+    semilive_final_segments: list[dict[str, Any]] = field(default_factory=list)
+    semilive_chunk_results: list[dict[str, Any]] = field(default_factory=list)
+    fixture_id: str = ""
+    fixture_version: str = ""
+    fixture_test_mode: str = ""
 
 
 @dataclass
@@ -46,6 +134,21 @@ class ClosedSessionArchive:
     final_text: str
     final_segments: list[dict[str, Any]]
     transcript_revision: int
+    recording_path: str = ""
+    recording_bytes: int = 0
+    recording_duration_ms: int = 0
+    chunks_total: int = 0
+    chunks_done: int = 0
+    chunks_failed: int = 0
+    finalization_state: str = ""
+    batch_job_id: str = ""
+    semilive_transcript_revision: int = 0
+    semilive_final_text: str = ""
+    semilive_final_segments: list[dict[str, Any]] = field(default_factory=list)
+    semilive_chunk_results: list[dict[str, Any]] = field(default_factory=list)
+    fixture_id: str = ""
+    fixture_version: str = ""
+    fixture_test_mode: str = ""
 
 
 class LiveSessionManager:
@@ -57,6 +160,9 @@ class LiveSessionManager:
         max_sessions: int = 64,
         archive_ttl_seconds: int = 3600,
         max_archives: int = 256,
+        semilive_text_dedup_enabled: bool = False,
+        semilive_text_dedup_min_words: int = 3,
+        semilive_text_dedup_max_trim_words: int = 24,
     ):
         self._default_ttl_seconds = int(max(10, default_ttl_seconds))
         self._preconnect_ttl_seconds = int(max(5, preconnect_ttl_seconds))
@@ -64,6 +170,11 @@ class LiveSessionManager:
         self._max_sessions = int(max(1, max_sessions))
         self._archive_ttl_seconds = int(max(60, archive_ttl_seconds))
         self._max_archives = int(max(1, max_archives))
+        self._semilive_text_dedup_enabled = bool(semilive_text_dedup_enabled)
+        self._semilive_text_dedup_min_words = int(max(1, semilive_text_dedup_min_words))
+        self._semilive_text_dedup_max_trim_words = int(
+            max(self._semilive_text_dedup_min_words, semilive_text_dedup_max_trim_words)
+        )
         self._sessions: dict[str, LiveSession] = {}
         self._archives: dict[str, ClosedSessionArchive] = {}
         self._lock = threading.Lock()
@@ -175,6 +286,243 @@ class LiveSessionManager:
             sess.controls_received += 1
             return self._snapshot_locked(sess)
 
+    def update_semilive(
+        self,
+        session_id: str,
+        *,
+        recording_state: str | None = None,
+        recording_path: str | Path | None = None,
+        recording_bytes: int | None = None,
+        recording_duration_ms: int | None = None,
+        chunk_index_next: int | None = None,
+        chunks_total: int | None = None,
+        chunks_done: int | None = None,
+        chunks_failed: int | None = None,
+        finalization_state: str | None = None,
+        batch_job_id: str | None = None,
+    ) -> dict[str, Any]:
+        now_unix = time.time()
+        with self._lock:
+            sess = self._sessions.get(session_id)
+            if not sess:
+                raise KeyError("session_not_found")
+            sess.last_seen_unix = now_unix
+            if recording_state is not None:
+                sess.recording_state = str(recording_state or "idle")
+            if recording_path is not None:
+                sess.recording_path = str(recording_path)
+            if recording_bytes is not None:
+                sess.recording_bytes = int(max(0, recording_bytes))
+            if recording_duration_ms is not None:
+                sess.recording_duration_ms = int(max(0, recording_duration_ms))
+            if chunk_index_next is not None:
+                sess.chunk_index_next = int(max(0, chunk_index_next))
+            if chunks_total is not None:
+                sess.chunks_total = int(max(0, chunks_total))
+            if chunks_done is not None:
+                sess.chunks_done = int(max(0, chunks_done))
+            if chunks_failed is not None:
+                sess.chunks_failed = int(max(0, chunks_failed))
+            if finalization_state is not None:
+                sess.finalization_state = str(finalization_state or "idle")
+            if batch_job_id is not None:
+                sess.batch_job_id = str(batch_job_id)
+        return self._snapshot_locked(sess)
+
+    def set_fixture_metadata(
+        self,
+        session_id: str,
+        *,
+        fixture_id: str | None = None,
+        fixture_version: str | None = None,
+        fixture_test_mode: str | None = None,
+    ) -> dict[str, Any]:
+        now_unix = time.time()
+        with self._lock:
+            sess = self._sessions.get(session_id)
+            if not sess:
+                raise KeyError("session_not_found")
+            sess.last_seen_unix = now_unix
+            if fixture_id is not None:
+                sess.fixture_id = str(fixture_id or "").strip()
+            if fixture_version is not None:
+                sess.fixture_version = str(fixture_version or "").strip()
+            if fixture_test_mode is not None:
+                sess.fixture_test_mode = str(fixture_test_mode or "").strip()
+            return self._snapshot_locked(sess)
+
+    def record_semilive_chunk_result(
+        self,
+        session_id: str,
+        *,
+        chunk_index: int,
+        t0_ms: int,
+        t1_ms: int,
+        text: str,
+        segments: list[dict[str, Any]] | None = None,
+        state: str = "ready",
+        error: str = "",
+    ) -> dict[str, Any]:
+        now_unix = time.time()
+        idx = int(max(0, chunk_index))
+        safe_t0 = int(max(0, t0_ms))
+        safe_t1 = int(max(safe_t0, t1_ms))
+        safe_text = str(text or "")
+        safe_state = str(state or "ready")
+        safe_error = str(error or "")
+        segs = [dict(seg) for seg in (segments or []) if isinstance(seg, dict)]
+        with self._lock:
+            sess = self._sessions.get(session_id)
+            if not sess:
+                raise KeyError("session_not_found")
+            sess.last_seen_unix = now_unix
+
+            row = {
+                "chunk_index": idx,
+                "t0_ms": safe_t0,
+                "t1_ms": safe_t1,
+                "text": safe_text,
+                "state": safe_state,
+                "error": safe_error,
+                "segments": segs,
+            }
+            replaced = False
+            for i, existing in enumerate(sess.semilive_chunk_results):
+                if int(existing.get("chunk_index") or -1) == idx:
+                    sess.semilive_chunk_results[i] = row
+                    replaced = True
+                    break
+            if not replaced:
+                sess.semilive_chunk_results.append(row)
+                sess.semilive_chunk_results.sort(key=lambda r: int(r.get("chunk_index") or 0))
+
+            sess.chunks_total = max(int(sess.chunks_total), idx + 1)
+            sess.chunk_index_next = max(int(sess.chunk_index_next), idx + 1)
+            if safe_state == "ready":
+                sess.chunks_done = max(
+                    0,
+                    sum(1 for r in sess.semilive_chunk_results if str(r.get("state") or "") == "ready"),
+                )
+                sess.chunks_failed = max(
+                    0,
+                    sum(1 for r in sess.semilive_chunk_results if str(r.get("state") or "") == "error"),
+                )
+            elif safe_state == "error":
+                sess.chunks_failed = max(
+                    0,
+                    sum(1 for r in sess.semilive_chunk_results if str(r.get("state") or "") == "error"),
+                )
+                sess.chunks_done = max(
+                    0,
+                    sum(1 for r in sess.semilive_chunk_results if str(r.get("state") or "") == "ready"),
+                )
+
+            merged_final_text = ""
+            for r in sess.semilive_chunk_results:
+                if not isinstance(r, dict):
+                    continue
+                r["dedup_applied"] = False
+                r["merge_overlap_words"] = 0
+                r["dedup_words_trimmed"] = 0
+
+            for r in sess.semilive_chunk_results:
+                if str(r.get("state") or "") != "ready":
+                    continue
+                raw_row_text = str(r.get("text") or "")
+                row_text = raw_row_text.strip()
+                if not row_text:
+                    continue
+
+                append_text = row_text
+                if self._semilive_text_dedup_enabled and merged_final_text:
+                    append_text, dedup_meta = _dedup_trim_incoming_prefix_words(
+                        merged_final_text,
+                        row_text,
+                        min_overlap_words=self._semilive_text_dedup_min_words,
+                        max_trim_words=self._semilive_text_dedup_max_trim_words,
+                    )
+                    r["dedup_applied"] = bool(dedup_meta.get("dedup_applied", False))
+                    r["merge_overlap_words"] = int(max(0, int(dedup_meta.get("merge_overlap_words") or 0)))
+                    r["dedup_words_trimmed"] = int(max(0, int(dedup_meta.get("dedup_words_trimmed") or 0)))
+                append_text = str(append_text or "").strip()
+                if not append_text:
+                    continue
+                merged_final_text = append_text if not merged_final_text else f"{merged_final_text}\n{append_text}"
+
+            sess.semilive_final_text = merged_final_text
+
+            merged_segments: list[dict[str, Any]] = []
+            if any(r.get("segments") for r in sess.semilive_chunk_results):
+                seg_counter = 0
+                for r in sess.semilive_chunk_results:
+                    if str(r.get("state") or "") != "ready":
+                        continue
+                    row_t0 = int(max(0, int(r.get("t0_ms") or 0)))
+                    row_t1 = int(max(row_t0, int(r.get("t1_ms") or row_t0)))
+                    row_segments = r.get("segments")
+                    if isinstance(row_segments, list) and row_segments:
+                        for seg in row_segments:
+                            if not isinstance(seg, dict):
+                                continue
+                            seg_text = str(seg.get("text") or "").strip()
+                            if not seg_text:
+                                continue
+                            seg_t0 = int(max(0, int(seg.get("t0_ms") or row_t0)))
+                            seg_t1 = int(max(seg_t0, int(seg.get("t1_ms") or row_t1)))
+                            seg_counter += 1
+                            merged_segments.append(
+                                {
+                                    "segment_id": str(seg.get("segment_id") or f"c{idx:04d}s{seg_counter:04d}"),
+                                    "text": seg_text,
+                                    "t0_ms": seg_t0,
+                                    "t1_ms": seg_t1,
+                                }
+                            )
+                    else:
+                        row_text = str(r.get("text") or "").strip()
+                        if row_text:
+                            seg_counter += 1
+                            merged_segments.append(
+                                {
+                                    "segment_id": f"c{idx:04d}",
+                                    "text": row_text,
+                                    "t0_ms": row_t0,
+                                    "t1_ms": row_t1,
+                                }
+                            )
+            else:
+                for r in sess.semilive_chunk_results:
+                    if str(r.get("state") or "") != "ready":
+                        continue
+                    row_text = str(r.get("text") or "").strip()
+                    if not row_text:
+                        continue
+                    idx2 = int(max(0, int(r.get("chunk_index") or 0)))
+                    row_t0 = int(max(0, int(r.get("t0_ms") or 0)))
+                    row_t1 = int(max(row_t0, int(r.get("t1_ms") or row_t0)))
+                    merged_segments.append(
+                        {
+                            "segment_id": f"c{idx2:04d}",
+                            "text": row_text,
+                            "t0_ms": row_t0,
+                            "t1_ms": row_t1,
+                        }
+                    )
+
+            sess.semilive_final_segments = merged_segments
+            sess.semilive_transcript_revision += 1
+            return self._semilive_result_snapshot_locked(sess)
+
+    def semilive_result_snapshot(self, session_id: str) -> dict[str, Any]:
+        with self._lock:
+            sess = self._sessions.get(session_id)
+            if sess is not None:
+                return self._semilive_result_snapshot_locked(sess)
+            arc = self._archives.get(session_id)
+            if arc is not None:
+                return self._semilive_archive_result_snapshot_locked(arc)
+        raise KeyError("session_or_archive_not_found")
+
     def next_seq(self, session_id: str) -> int:
         with self._lock:
             sess = self._sessions.get(session_id)
@@ -223,6 +571,14 @@ class LiveSessionManager:
         final_text: str,
         final_segments: list[dict[str, Any]],
         transcript_revision: int,
+        recording_path: str = "",
+        recording_bytes: int = 0,
+        recording_duration_ms: int = 0,
+        chunks_total: int = 0,
+        chunks_done: int = 0,
+        chunks_failed: int = 0,
+        finalization_state: str = "",
+        batch_job_id: str = "",
     ) -> dict[str, Any]:
         now = time.time()
         with self._lock:
@@ -235,7 +591,31 @@ class LiveSessionManager:
                 final_text=str(final_text or ""),
                 final_segments=[dict(seg) for seg in (final_segments or [])],
                 transcript_revision=int(max(0, transcript_revision)),
+                recording_path=str(recording_path or ""),
+                recording_bytes=int(max(0, recording_bytes)),
+                recording_duration_ms=int(max(0, recording_duration_ms)),
+                chunks_total=int(max(0, chunks_total)),
+                chunks_done=int(max(0, chunks_done)),
+                chunks_failed=int(max(0, chunks_failed)),
+                finalization_state=str(finalization_state or ""),
+                batch_job_id=str(batch_job_id or ""),
+                semilive_transcript_revision=0,
+                semilive_final_text="",
+                semilive_final_segments=[],
+                semilive_chunk_results=[],
+                fixture_id="",
+                fixture_version="",
+                fixture_test_mode="",
             )
+            src_sess = self._sessions.get(str(session_id))
+            if src_sess is not None:
+                arc.semilive_transcript_revision = int(max(0, src_sess.semilive_transcript_revision))
+                arc.semilive_final_text = str(src_sess.semilive_final_text or "")
+                arc.semilive_final_segments = [dict(seg) for seg in src_sess.semilive_final_segments]
+                arc.semilive_chunk_results = [dict(r) for r in src_sess.semilive_chunk_results]
+                arc.fixture_id = str(src_sess.fixture_id or "")
+                arc.fixture_version = str(src_sess.fixture_version or "")
+                arc.fixture_test_mode = str(src_sess.fixture_test_mode or "")
             self._archives[arc.session_id] = arc
             return self._archive_snapshot_locked(arc)
 
@@ -268,6 +648,24 @@ class LiveSessionManager:
             "bytes_received": int(sess.bytes_received),
             "frames_received": int(sess.frames_received),
             "controls_received": int(sess.controls_received),
+            "recording_state": str(sess.recording_state or "idle"),
+            "recording_path": str(sess.recording_path or ""),
+            "recording_bytes": int(max(0, sess.recording_bytes)),
+            "recording_duration_ms": int(max(0, sess.recording_duration_ms)),
+            "chunk_index_next": int(max(0, sess.chunk_index_next)),
+            "chunks_total": int(max(0, sess.chunks_total)),
+            "chunks_done": int(max(0, sess.chunks_done)),
+            "chunks_failed": int(max(0, sess.chunks_failed)),
+            "chunks_pending": int(max(0, sess.chunks_total - sess.chunks_done - sess.chunks_failed)),
+            "finalization_state": str(sess.finalization_state or "idle"),
+            "batch_job_id": str(sess.batch_job_id or ""),
+            "semilive_transcript_revision": int(max(0, sess.semilive_transcript_revision)),
+            "semilive_final_text_chars": len(str(sess.semilive_final_text or "")),
+            "semilive_final_segments_count": len(sess.semilive_final_segments),
+            "semilive_chunk_results_count": len(sess.semilive_chunk_results),
+            "fixture_id": str(sess.fixture_id or ""),
+            "fixture_version": str(sess.fixture_version or ""),
+            "fixture_test_mode": str(sess.fixture_test_mode or ""),
             "stats_log_path": str(self._stats_log_path(sess.session_id)),
         }
 
@@ -281,6 +679,82 @@ class LiveSessionManager:
             "final_text": str(arc.final_text),
             "final_segments": [dict(seg) for seg in arc.final_segments],
             "final_segments_count": len(arc.final_segments),
+            "recording_path": str(arc.recording_path or ""),
+            "recording_bytes": int(max(0, arc.recording_bytes)),
+            "recording_duration_ms": int(max(0, arc.recording_duration_ms)),
+            "chunks_total": int(max(0, arc.chunks_total)),
+            "chunks_done": int(max(0, arc.chunks_done)),
+            "chunks_failed": int(max(0, arc.chunks_failed)),
+            "finalization_state": str(arc.finalization_state or ""),
+            "batch_job_id": str(arc.batch_job_id or ""),
+            "semilive_transcript_revision": int(max(0, arc.semilive_transcript_revision)),
+            "semilive_final_text_chars": len(str(arc.semilive_final_text or "")),
+            "semilive_final_segments_count": len(arc.semilive_final_segments),
+            "semilive_chunk_results_count": len(arc.semilive_chunk_results),
+            "fixture_id": str(arc.fixture_id or ""),
+            "fixture_version": str(arc.fixture_version or ""),
+            "fixture_test_mode": str(arc.fixture_test_mode or ""),
+        }
+
+    def _semilive_result_snapshot_locked(self, sess: LiveSession) -> dict[str, Any]:
+        chunks = [dict(r) for r in sess.semilive_chunk_results]
+        dedup_chunks_applied = sum(1 for r in chunks if bool(r.get("dedup_applied")))
+        dedup_words_trimmed_total = sum(int(max(0, int(r.get("dedup_words_trimmed") or 0))) for r in chunks)
+        return {
+            "session_id": str(sess.session_id),
+            "source": "active",
+            "state": str(sess.state or ""),
+            "recording_state": str(sess.recording_state or ""),
+            "finalization_state": str(sess.finalization_state or ""),
+            "batch_job_id": str(sess.batch_job_id or ""),
+            "recording_path": str(sess.recording_path or ""),
+            "recording_bytes": int(max(0, sess.recording_bytes)),
+            "recording_duration_ms": int(max(0, sess.recording_duration_ms)),
+            "chunks_total": int(max(0, sess.chunks_total)),
+            "chunks_done": int(max(0, sess.chunks_done)),
+            "chunks_failed": int(max(0, sess.chunks_failed)),
+            "chunks_pending": int(max(0, sess.chunks_total - sess.chunks_done - sess.chunks_failed)),
+            "transcript_revision": int(max(0, sess.semilive_transcript_revision)),
+            "final_text": str(sess.semilive_final_text or ""),
+            "final_segments": [dict(seg) for seg in sess.semilive_final_segments],
+            "final_segments_count": len(sess.semilive_final_segments),
+            "chunk_results": chunks,
+            "chunk_results_count": len(chunks),
+            "dedup_chunks_applied": int(max(0, dedup_chunks_applied)),
+            "dedup_words_trimmed_total": int(max(0, dedup_words_trimmed_total)),
+            "fixture_id": str(sess.fixture_id or ""),
+            "fixture_version": str(sess.fixture_version or ""),
+            "fixture_test_mode": str(sess.fixture_test_mode or ""),
+        }
+
+    def _semilive_archive_result_snapshot_locked(self, arc: ClosedSessionArchive) -> dict[str, Any]:
+        chunks = [dict(r) for r in arc.semilive_chunk_results]
+        dedup_chunks_applied = sum(1 for r in chunks if bool(r.get("dedup_applied")))
+        dedup_words_trimmed_total = sum(int(max(0, int(r.get("dedup_words_trimmed") or 0))) for r in chunks)
+        return {
+            "session_id": str(arc.session_id),
+            "source": "archive",
+            "close_reason": str(arc.close_reason or ""),
+            "finalization_state": str(arc.finalization_state or ""),
+            "batch_job_id": str(arc.batch_job_id or ""),
+            "recording_path": str(arc.recording_path or ""),
+            "recording_bytes": int(max(0, arc.recording_bytes)),
+            "recording_duration_ms": int(max(0, arc.recording_duration_ms)),
+            "chunks_total": int(max(0, arc.chunks_total)),
+            "chunks_done": int(max(0, arc.chunks_done)),
+            "chunks_failed": int(max(0, arc.chunks_failed)),
+            "chunks_pending": int(max(0, arc.chunks_total - arc.chunks_done - arc.chunks_failed)),
+            "transcript_revision": int(max(0, arc.semilive_transcript_revision or arc.transcript_revision)),
+            "final_text": str(arc.semilive_final_text or arc.final_text or ""),
+            "final_segments": [dict(seg) for seg in (arc.semilive_final_segments or arc.final_segments)],
+            "final_segments_count": len(arc.semilive_final_segments or arc.final_segments),
+            "chunk_results": chunks,
+            "chunk_results_count": len(chunks),
+            "dedup_chunks_applied": int(max(0, dedup_chunks_applied)),
+            "dedup_words_trimmed_total": int(max(0, dedup_words_trimmed_total)),
+            "fixture_id": str(arc.fixture_id or ""),
+            "fixture_version": str(arc.fixture_version or ""),
+            "fixture_test_mode": str(arc.fixture_test_mode or ""),
         }
 
     def metrics_snapshot(self) -> dict[str, Any]:

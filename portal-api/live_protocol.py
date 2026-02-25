@@ -92,50 +92,6 @@ def stats_event(
     return payload
 
 
-def partial_event(
-    session_id: str,
-    *,
-    text: str,
-    t0_ms: int,
-    t1_ms: int,
-    seq: int | None = None,
-    **extra: Any,
-) -> dict[str, Any]:
-    payload = make_event(
-        "partial",
-        session_id,
-        seq=seq,
-        text=str(text),
-        t0_ms=int(max(0, t0_ms)),
-        t1_ms=int(max(0, t1_ms)),
-    )
-    for key, val in extra.items():
-        payload[str(key)] = val
-    return payload
-
-
-def final_event(
-    session_id: str,
-    *,
-    text: str,
-    t0_ms: int,
-    t1_ms: int,
-    seq: int | None = None,
-    **extra: Any,
-) -> dict[str, Any]:
-    payload = make_event(
-        "final",
-        session_id,
-        seq=seq,
-        text=str(text),
-        t0_ms=int(max(0, t0_ms)),
-        t1_ms=int(max(0, t1_ms)),
-    )
-    for key, val in extra.items():
-        payload[str(key)] = val
-    return payload
-
-
 def pong_event(session_id: str, *, seq: int | None = None) -> dict[str, Any]:
     return make_event("pong", session_id, seq=seq)
 

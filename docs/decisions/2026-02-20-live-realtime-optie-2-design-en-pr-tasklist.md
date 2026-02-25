@@ -1,7 +1,12 @@
 # Decision Note: Live Realtime Transcriptie (Optie 2)
 
 Date: 2026-02-20
-Status: In uitvoering
+Status: Superseded (semilive chunked approach)
+
+## Superseded By
+
+- `docs/decisions/2026-02-24-semilive-concurrency-and-spool-retention.md`
+- `docs/decisions/opus_4_6_semi_live_thoughts.md` (brainstorm / input)
 
 ## Implementatiestatus
 
