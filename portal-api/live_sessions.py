@@ -85,6 +85,38 @@ def _utc_iso(ts: float) -> str:
     return datetime.fromtimestamp(float(ts), tz=timezone.utc).isoformat()
 
 
+def _semilive_chunk_rows_debug_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    total_rows = 0
+    invalid_index_rows = 0
+    by_index: dict[int, dict[str, Any]] = {}
+    reason_counts: dict[str, int] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        total_rows += 1
+        try:
+            idx = int(row.get("chunk_index"))
+        except Exception:
+            invalid_index_rows += 1
+            continue
+        # Snapshot contract is one row per chunk_index. If duplicates exist, keep the last one.
+        by_index[idx] = row
+    for row in by_index.values():
+        reason = str(row.get("reason") or "").strip()
+        if not reason:
+            continue
+        reason_counts[reason] = int(reason_counts.get(reason, 0) + 1)
+    unique_rows = len(by_index)
+    duplicate_rows = max(0, total_rows - invalid_index_rows - unique_rows)
+    return {
+        "chunk_reason_counts": dict(sorted(reason_counts.items(), key=lambda kv: kv[0])),
+        "chunk_results_rows_count": int(max(0, total_rows)),
+        "chunk_results_unique_count": int(max(0, unique_rows)),
+        "chunk_results_duplicate_index_rows": int(max(0, duplicate_rows)),
+        "chunk_results_invalid_index_rows": int(max(0, invalid_index_rows)),
+    }
+
+
 def _repo_root() -> Path:
     # portal-api/live_sessions.py -> portal-api -> repo root
     return Path(__file__).resolve().parents[1]
@@ -362,6 +394,10 @@ class LiveSessionManager:
         segments: list[dict[str, Any]] | None = None,
         state: str = "ready",
         error: str = "",
+        reason: str = "",
+        speech_frames: int | None = None,
+        silence_frames_tail: int | None = None,
+        chunk_duration_ms: int | None = None,
     ) -> dict[str, Any]:
         now_unix = time.time()
         idx = int(max(0, chunk_index))
@@ -370,7 +406,11 @@ class LiveSessionManager:
         safe_text = str(text or "")
         safe_state = str(state or "ready")
         safe_error = str(error or "")
+        safe_reason = str(reason or "").strip()
         segs = [dict(seg) for seg in (segments or []) if isinstance(seg, dict)]
+        safe_speech_frames = None if speech_frames is None else int(max(0, int(speech_frames)))
+        safe_silence_frames_tail = None if silence_frames_tail is None else int(max(0, int(silence_frames_tail)))
+        safe_chunk_duration_ms = None if chunk_duration_ms is None else int(max(0, int(chunk_duration_ms)))
         with self._lock:
             sess = self._sessions.get(session_id)
             if not sess:
@@ -385,10 +425,26 @@ class LiveSessionManager:
                 "state": safe_state,
                 "error": safe_error,
                 "segments": segs,
+                "reason": safe_reason,
+                "speech_frames": safe_speech_frames,
+                "silence_frames_tail": safe_silence_frames_tail,
+                "chunk_duration_ms": safe_chunk_duration_ms,
             }
             replaced = False
             for i, existing in enumerate(sess.semilive_chunk_results):
-                if int(existing.get("chunk_index") or -1) == idx:
+                try:
+                    existing_idx = int(existing.get("chunk_index"))
+                except Exception:
+                    existing_idx = -1
+                if existing_idx == idx:
+                    if not row["reason"]:
+                        row["reason"] = str(existing.get("reason") or "")
+                    if row["speech_frames"] is None and existing.get("speech_frames") is not None:
+                        row["speech_frames"] = int(max(0, int(existing.get("speech_frames") or 0)))
+                    if row["silence_frames_tail"] is None and existing.get("silence_frames_tail") is not None:
+                        row["silence_frames_tail"] = int(max(0, int(existing.get("silence_frames_tail") or 0)))
+                    if row["chunk_duration_ms"] is None and existing.get("chunk_duration_ms") is not None:
+                        row["chunk_duration_ms"] = int(max(0, int(existing.get("chunk_duration_ms") or 0)))
                     sess.semilive_chunk_results[i] = row
                     replaced = True
                     break
@@ -700,6 +756,7 @@ class LiveSessionManager:
         chunks = [dict(r) for r in sess.semilive_chunk_results]
         dedup_chunks_applied = sum(1 for r in chunks if bool(r.get("dedup_applied")))
         dedup_words_trimmed_total = sum(int(max(0, int(r.get("dedup_words_trimmed") or 0))) for r in chunks)
+        chunk_debug = _semilive_chunk_rows_debug_metrics(chunks)
         return {
             "session_id": str(sess.session_id),
             "source": "active",
@@ -720,6 +777,13 @@ class LiveSessionManager:
             "final_segments_count": len(sess.semilive_final_segments),
             "chunk_results": chunks,
             "chunk_results_count": len(chunks),
+            "chunk_reason_counts": dict(chunk_debug.get("chunk_reason_counts") or {}),
+            "chunk_results_rows_count": int(max(0, int(chunk_debug.get("chunk_results_rows_count") or 0))),
+            "chunk_results_unique_count": int(max(0, int(chunk_debug.get("chunk_results_unique_count") or 0))),
+            "chunk_results_duplicate_index_rows": int(
+                max(0, int(chunk_debug.get("chunk_results_duplicate_index_rows") or 0))
+            ),
+            "chunk_results_invalid_index_rows": int(max(0, int(chunk_debug.get("chunk_results_invalid_index_rows") or 0))),
             "dedup_chunks_applied": int(max(0, dedup_chunks_applied)),
             "dedup_words_trimmed_total": int(max(0, dedup_words_trimmed_total)),
             "fixture_id": str(sess.fixture_id or ""),
@@ -731,6 +795,7 @@ class LiveSessionManager:
         chunks = [dict(r) for r in arc.semilive_chunk_results]
         dedup_chunks_applied = sum(1 for r in chunks if bool(r.get("dedup_applied")))
         dedup_words_trimmed_total = sum(int(max(0, int(r.get("dedup_words_trimmed") or 0))) for r in chunks)
+        chunk_debug = _semilive_chunk_rows_debug_metrics(chunks)
         return {
             "session_id": str(arc.session_id),
             "source": "archive",
@@ -750,6 +815,13 @@ class LiveSessionManager:
             "final_segments_count": len(arc.semilive_final_segments or arc.final_segments),
             "chunk_results": chunks,
             "chunk_results_count": len(chunks),
+            "chunk_reason_counts": dict(chunk_debug.get("chunk_reason_counts") or {}),
+            "chunk_results_rows_count": int(max(0, int(chunk_debug.get("chunk_results_rows_count") or 0))),
+            "chunk_results_unique_count": int(max(0, int(chunk_debug.get("chunk_results_unique_count") or 0))),
+            "chunk_results_duplicate_index_rows": int(
+                max(0, int(chunk_debug.get("chunk_results_duplicate_index_rows") or 0))
+            ),
+            "chunk_results_invalid_index_rows": int(max(0, int(chunk_debug.get("chunk_results_invalid_index_rows") or 0))),
             "dedup_chunks_applied": int(max(0, dedup_chunks_applied)),
             "dedup_words_trimmed_total": int(max(0, dedup_words_trimmed_total)),
             "fixture_id": str(arc.fixture_id or ""),

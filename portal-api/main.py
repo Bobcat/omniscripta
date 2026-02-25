@@ -563,7 +563,9 @@ async def live_session_ws(session_id: str, websocket: WebSocket) -> None:
         text: str = "",
         segments: list[dict[str, Any]] | None = None,
         error: str = "",
+        chunk_meta: dict[str, Any] | None = None,
     ) -> None:
+        meta = chunk_meta if isinstance(chunk_meta, dict) else {}
         try:
             result = LIVE_SESSIONS.record_semilive_chunk_result(
                 session_id,
@@ -574,6 +576,12 @@ async def live_session_ws(session_id: str, websocket: WebSocket) -> None:
                 segments=segments,
                 state=str(state or "ready"),
                 error=str(error or ""),
+                reason=str(meta.get("reason") or ""),
+                speech_frames=(int(meta.get("speech_frames")) if meta.get("speech_frames") is not None else None),
+                silence_frames_tail=(
+                    int(meta.get("silence_frames_tail")) if meta.get("silence_frames_tail") is not None else None
+                ),
+                chunk_duration_ms=(int(meta.get("duration_ms")) if meta.get("duration_ms") is not None else None),
             )
             _sync_semilive_counts_from_result(result)
             _update_semilive_session_state()
@@ -628,6 +636,7 @@ async def live_session_ws(session_id: str, websocket: WebSocket) -> None:
                     t0_ms=t0_ms,
                     t1_ms=t1_ms,
                     state="queued",
+                    chunk_meta=dict(chunk_meta) if isinstance(chunk_meta, dict) else None,
                 )
                 _append_semilive_log(
                     "semilive_chunk_enqueued",
@@ -644,6 +653,7 @@ async def live_session_ws(session_id: str, websocket: WebSocket) -> None:
                     t1_ms=t1_ms,
                     state="error",
                     error=f"{type(e).__name__}: {e}",
+                    chunk_meta=dict(chunk_meta) if isinstance(chunk_meta, dict) else None,
                 )
                 _append_semilive_log(
                     "semilive_chunk_enqueue_error",
@@ -672,6 +682,7 @@ async def live_session_ws(session_id: str, websocket: WebSocket) -> None:
             t0_ms = int(item.get("t0_ms") or 0)
             t1_ms = int(item.get("t1_ms") or t0_ms)
             job_id = str(item.get("job_id") or "")
+            chunk_meta = item.get("chunk_meta") if isinstance(item.get("chunk_meta"), dict) else None
             if not job_id:
                 continue
             try:
@@ -690,6 +701,7 @@ async def live_session_ws(session_id: str, websocket: WebSocket) -> None:
                     t1_ms=t1_ms,
                     state="error",
                     error=f"{type(e).__name__}: {e}",
+                    chunk_meta=chunk_meta,
                 )
                 semilive_chunk_jobs_pending.pop(chunk_index, None)
                 semilive_shadow_disabled_reason = f"chunk_poll_failed:{type(e).__name__}"
@@ -713,6 +725,7 @@ async def live_session_ws(session_id: str, websocket: WebSocket) -> None:
                         state="ready",
                         text=str(poll.text or ""),
                         segments=[dict(seg) for seg in (poll.segments or []) if isinstance(seg, dict)],
+                        chunk_meta=chunk_meta,
                     )
                     _append_semilive_log(
                         "semilive_chunk_ready",
@@ -729,6 +742,7 @@ async def live_session_ws(session_id: str, websocket: WebSocket) -> None:
                         t1_ms=t1_ms,
                         state="error",
                         error=str(poll.error or f"job_state:{poll.state}"),
+                        chunk_meta=chunk_meta,
                     )
                     _append_semilive_log(
                         "semilive_chunk_error",
@@ -743,6 +757,7 @@ async def live_session_ws(session_id: str, websocket: WebSocket) -> None:
                         t0_ms=t0_ms,
                         t1_ms=t1_ms,
                         state=poll_state,
+                        chunk_meta=chunk_meta,
                     )
             item["state"] = poll_state
             if poll.done:
