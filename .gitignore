@@ -28,3 +28,4 @@ data/
 # Local agent/worktree artifacts
 .snapshots/
 AGENTS.md
+docs/opus_4_6_reviews/

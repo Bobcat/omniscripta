@@ -11,6 +11,8 @@ Environment=TRANSCRIBE_FRONTEND_DIR=/home/gunnar/projects/transcribe-dev/static
 Environment=TRANSCRIBE_API_BASE=http://127.0.0.1:8001
 Environment=TRANSCRIBE_FRONTEND_HOST=127.0.0.1
 Environment=TRANSCRIBE_FRONTEND_PORT=8010
+Environment=TRANSCRIBE_FRONTEND_WS_BUFFER_BYTES=65536
+Environment=TRANSCRIBE_FRONTEND_WS_IDLE_TIMEOUT_S=1800
 Restart=always
 RestartSec=2
 

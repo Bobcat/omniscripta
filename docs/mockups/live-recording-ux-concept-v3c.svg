@@ -1,0 +1,198 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1180" viewBox="0 0 1600 1180" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1600" y2="1180" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F7F2EA"/>
+      <stop offset="1" stop-color="#EDE6DA"/>
+    </linearGradient>
+    <linearGradient id="card" x1="0" y1="0" x2="0" y2="1">
+      <stop stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#FBFAF7"/>
+    </linearGradient>
+    <linearGradient id="hero" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#1B1612"/>
+      <stop offset="1" stop-color="#2B231D"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="8" stdDeviation="16" flood-color="#312A20" flood-opacity="0.12"/>
+    </filter>
+    <style>
+      .title { font: 700 26px 'Segoe UI', 'Helvetica Neue', sans-serif; fill: #1F1A15; }
+      .subtitle { font: 500 14px 'Segoe UI', 'Helvetica Neue', sans-serif; fill: #6E6257; }
+      .h2 { font: 700 18px 'Segoe UI', 'Helvetica Neue', sans-serif; fill: #241E18; }
+      .body { font: 500 13px 'Segoe UI', 'Helvetica Neue', sans-serif; fill: #433A31; }
+      .muted { font: 500 12px 'Segoe UI', 'Helvetica Neue', sans-serif; fill: #7E746A; }
+      .small { font: 700 11px 'Segoe UI', 'Helvetica Neue', sans-serif; fill: #6B5E52; letter-spacing: .05em; text-transform: uppercase; }
+      .pill { font: 700 12px 'Segoe UI', 'Helvetica Neue', sans-serif; }
+      .btn { font: 700 13px 'Segoe UI', 'Helvetica Neue', sans-serif; }
+      .mono { font: 600 12px 'SFMono-Regular', Consolas, monospace; fill: #E2D8CC; }
+      .callout { font: 600 13px 'Segoe UI', 'Helvetica Neue', sans-serif; fill: #2E261F; }
+      .num { font: 700 12px 'Segoe UI', 'Helvetica Neue', sans-serif; fill: white; }
+    </style>
+  </defs>
+
+  <rect width="1600" height="1180" fill="url(#bg)"/>
+  <text x="64" y="64" class="title">Live Recording UX Concept C (A baseline + B strengths)</text>
+  <text x="64" y="90" class="subtitle">A: rustige 2-card layout + duidelijke controls. B: recorder-hero timer, stabiele meta-rij, debug als overlay (geen layout shift).</text>
+
+  <!-- Desktop board -->
+  <g transform="translate(60,130)">
+    <rect x="0" y="0" width="1480" height="680" rx="28" fill="#E9E0D2" opacity="0.65"/>
+    <rect x="18" y="18" width="1444" height="644" rx="24" fill="url(#card)" filter="url(#shadow)"/>
+
+    <text x="46" y="62" class="h2">Concept C · Calm dashboard + recorder hero (Desktop)</text>
+    <text x="46" y="86" class="subtitle">Links: vaste control card met hero timer en stabile statuscopy. Rechts: transcript canvas met partial ribbon.</text>
+
+    <!-- Left control card -->
+    <rect x="44" y="112" width="360" height="520" rx="20" fill="#FFF" stroke="#E5DACB"/>
+
+    <text x="68" y="146" class="small">Session</text>
+    <text x="68" y="174" class="h2">Interview met klant</text>
+    <text x="68" y="196" class="subtitle">Auto-save · markers · export na stop</text>
+
+    <!-- Recorder hero (B strength) -->
+    <rect x="64" y="214" width="320" height="116" rx="18" fill="url(#hero)"/>
+    <circle cx="92" cy="246" r="9" fill="#D84B3D"/>
+    <text x="108" y="251" class="pill" fill="#F3EDE7">LISTENING</text>
+    <rect x="260" y="232" width="104" height="28" rx="14" fill="#EEE2D1" opacity="0.95"/>
+    <text x="287" y="251" class="pill" fill="#5A4B3E">EN</text>
+    <text x="64" y="298" style="font:700 34px 'Segoe UI','Helvetica Neue',sans-serif; fill:#FFF1E6;">00:18:42</text>
+    <text x="250" y="298" class="muted" fill="#D7C8B8">live transcript</text>
+    <rect x="64" y="308" width="320" height="1" fill="#4B4036" opacity="0.7"/>
+    <text x="64" y="326" class="muted" fill="#CBB9A8">Hero heeft vaste hoogte; statuscopy staat hieronder vast (geen verspringing).</text>
+
+    <!-- Stable status copy block (A strength, fixed height) -->
+    <rect x="64" y="344" width="320" height="76" rx="16" fill="#F6F0E7" stroke="#E6DBCD"/>
+    <text x="80" y="370" class="body">Opname loopt. Spreek normaal door.</text>
+    <text x="80" y="392" class="body">Transcript wordt live opgebouwd.</text>
+    <text x="80" y="412" class="muted">(max 2 regels, ellipsis bij overflow)</text>
+
+    <!-- Primary controls (A baseline, simplified) -->
+    <text x="68" y="448" class="small">Controls</text>
+    <rect x="64" y="460" width="320" height="56" rx="14" fill="#B53A2D"/>
+    <text x="174" y="494" class="btn" fill="#fff">Finish</text>
+
+    <rect x="64" y="526" width="152" height="44" rx="12" fill="#F3EBDD" stroke="#D8C9B7"/>
+    <text x="118" y="553" class="btn" fill="#3E342B">Pause</text>
+    <rect x="232" y="526" width="152" height="44" rx="12" fill="#F3EBDD" stroke="#D8C9B7"/>
+    <text x="279" y="553" class="btn" fill="#3E342B">Marker</text>
+
+    <!-- Secondary actions -->
+    <rect x="64" y="580" width="320" height="44" rx="12" fill="#FBF8F2" stroke="#E6DBCD"/>
+    <text x="80" y="607" class="body">Developer tools</text>
+    <rect x="296" y="592" width="72" height="22" rx="11" fill="#EEE5D8"/>
+    <text x="318" y="607" class="muted">Show</text>
+
+    <!-- Right transcript card -->
+    <rect x="424" y="112" width="1018" height="520" rx="20" fill="#FFF" stroke="#E5DACB"/>
+
+    <!-- Stable meta row (B strength) -->
+    <rect x="444" y="130" width="978" height="56" rx="16" fill="#FFF" stroke="#E8DED1"/>
+    <text x="468" y="154" class="small">Session info (stable row)</text>
+    <text x="468" y="176" class="body">Mic: USB / Laptop</text>
+    <text x="650" y="176" class="body">Auto-scroll: On</text>
+    <text x="820" y="176" class="body">Markers: 2</text>
+    <rect x="1252" y="144" width="154" height="30" rx="12" fill="#EFE4D3"/>
+    <text x="1286" y="164" class="btn" fill="#4D4136">Settings</text>
+
+    <text x="448" y="214" class="h2">Live transcript</text>
+    <text x="448" y="236" class="subtitle">Final tekst groeit door. Partial staat los en blijft stabiel zichtbaar.</text>
+
+    <!-- Partial ribbon pinned -->
+    <rect x="444" y="252" width="978" height="70" rx="14" fill="#FFF7E8" stroke="#EAD9B7"/>
+    <text x="462" y="274" class="small">Active phrase (partial)</text>
+    <text x="462" y="300" class="body">"...and could you describe what happened after the handover meeting"</text>
+
+    <!-- Final transcript area with subtle timeline gutter -->
+    <rect x="444" y="334" width="86" height="278" rx="14" fill="#F6F1E8" stroke="#E6DBCD"/>
+    <text x="466" y="366" class="muted">00:00</text>
+    <text x="466" y="418" class="muted">00:30</text>
+    <text x="466" y="470" class="muted">01:00</text>
+    <text x="466" y="522" class="muted">01:30</text>
+    <text x="466" y="574" class="muted">02:00</text>
+
+    <rect x="538" y="334" width="884" height="278" rx="14" fill="#FBFAF7" stroke="#E8DED1"/>
+    <text x="560" y="368" class="body">[00:00] Thanks for joining. Could you start by introducing yourself and your role?</text>
+    <text x="560" y="404" class="body">[00:11] Sure, my name is Anna and I lead operations for the support team...</text>
+    <text x="560" y="440" class="body">[00:29] Great. What changed in your workflow after the migration?</text>
+    <text x="560" y="476" class="body">[00:35] The biggest change was that intake became centralized...</text>
+    <text x="560" y="512" class="body">[00:52] We also started using a shared dashboard for weekly follow-up.</text>
+    <text x="560" y="548" class="body">[01:12] That helped us spot bottlenecks earlier during the first weeks.</text>
+
+    <!-- Footer hint -->
+    <rect x="424" y="640" width="1018" height="24" rx="12" fill="#F7F1E8" opacity="0"/>
+  </g>
+
+  <!-- Debug overlay (B strength, non-layout-shifting) -->
+  <g transform="translate(1010,180)">
+    <rect x="0" y="0" width="530" height="300" rx="20" fill="#12100E" opacity="0.92" filter="url(#shadow)"/>
+    <text x="22" y="34" style="font:700 16px 'Segoe UI'; fill:#F3ECE4;">Developer tools overlay</text>
+    <text x="22" y="54" style="font:500 12px 'Segoe UI'; fill:#B8AA99;">Alleen zichtbaar na toggle. Beïnvloedt layout niet.</text>
+    <rect x="22" y="70" width="486" height="44" rx="12" fill="#1E1A17" stroke="#35302A"/>
+    <text x="40" y="98" class="mono">mode: mock/whisperlive • ws: connected • ready: 1</text>
+    <rect x="22" y="124" width="486" height="142" rx="12" fill="#0E0C0A" stroke="#2D2823"/>
+    <text x="40" y="152" class="mono">[12:44:18] ready</text>
+    <text x="40" y="176" class="mono">[12:44:20] partial</text>
+    <text x="40" y="200" class="mono">[12:44:21] final</text>
+    <text x="40" y="224" class="mono">[12:44:22] stats</text>
+    <text x="40" y="254" style="font:500 12px 'Segoe UI'; fill:#A89989;">ping · reconnect · copy logs</text>
+    <rect x="370" y="270" width="138" height="22" rx="11" fill="#B53A2D"/>
+    <text x="410" y="286" class="pill" fill="#FFF">Close</text>
+  </g>
+
+  <!-- Mobile concept C -->
+  <g transform="translate(60,840)">
+    <text x="0" y="0" class="h2">Concept C · Mobile (A structure + B timer)</text>
+    <text x="0" y="22" class="subtitle">Transcript eerst, partial ribbon, sticky transportbar. Timer/state hero in compacte header.</text>
+
+    <rect x="0" y="42" width="560" height="320" rx="28" fill="#E9E0D2" opacity="0.65"/>
+    <rect x="14" y="56" width="532" height="292" rx="24" fill="url(#card)" filter="url(#shadow)"/>
+
+    <!-- Phone -->
+    <rect x="300" y="74" width="220" height="260" rx="28" fill="#151210"/>
+    <rect x="310" y="84" width="200" height="240" rx="22" fill="#FBFAF7"/>
+    <rect x="378" y="92" width="64" height="5" rx="3" fill="#D9D1C6"/>
+
+    <!-- Header hero -->
+    <rect x="322" y="104" width="176" height="52" rx="14" fill="url(#hero)"/>
+    <circle cx="338" cy="130" r="6" fill="#D84B3D"/>
+    <text x="350" y="134" class="pill" fill="#F3EDE7">LISTENING</text>
+    <text x="322" y="150" style="font:700 18px 'Segoe UI'; fill:#FFF1E6;">00:18:42</text>
+
+    <!-- Transcript -->
+    <rect x="322" y="162" width="176" height="96" rx="12" fill="#FFF" stroke="#E7DCCF"/>
+    <text x="334" y="182" class="small">Transcript</text>
+    <text x="334" y="204" class="body">[00:00] Thanks for joining...</text>
+    <text x="334" y="226" class="body">[00:11] Sure, my name is...</text>
+    <text x="334" y="246" class="muted">Auto-scroll: On</text>
+
+    <!-- Partial -->
+    <rect x="322" y="264" width="176" height="24" rx="12" fill="#FFF6E7" stroke="#EAD8B3"/>
+    <text x="334" y="281" class="muted">...what changed in your workflow</text>
+
+    <!-- Sticky controls -->
+    <rect x="318" y="292" width="184" height="26" rx="13" fill="#EFE5D8" stroke="#D6C8B6"/>
+    <circle cx="334" cy="305" r="6" fill="#B53A2D"/>
+    <rect x="348" y="296" width="52" height="18" rx="9" fill="#FFF" stroke="#D7C9B6"/>
+    <text x="364" y="309" class="muted">Pause</text>
+    <rect x="404" y="296" width="46" height="18" rx="9" fill="#FFF" stroke="#D7C9B6"/>
+    <text x="418" y="309" class="muted">Mark</text>
+    <rect x="454" y="294" width="48" height="22" rx="11" fill="#1F1A15"/>
+    <text x="466" y="309" class="pill" fill="#FFF">Finish</text>
+
+    <!-- Text bullets left of phone -->
+    <circle cx="34" cy="116" r="14" fill="#1F1A15"/><text x="29" y="121" class="num">1</text>
+    <text x="58" y="121" class="callout">A-layout blijft: twee kaarten, rustige hiërarchie.</text>
+
+    <circle cx="34" cy="150" r="14" fill="#1F1A15"/><text x="29" y="155" class="num">2</text>
+    <text x="58" y="155" class="callout">B-hero timer maakt opname-state super duidelijk.</text>
+
+    <circle cx="34" cy="184" r="14" fill="#1F1A15"/><text x="29" y="189" class="num">3</text>
+    <text x="58" y="189" class="callout">Statuscopy gefixeerd (max 2 regels) voorkomt verspringing.</text>
+
+    <circle cx="34" cy="218" r="14" fill="#1F1A15"/><text x="29" y="223" class="num">4</text>
+    <text x="58" y="223" class="callout">Debug als overlay/bottom sheet, nooit als vaste log.</text>
+
+    <circle cx="34" cy="252" r="14" fill="#1F1A15"/><text x="29" y="257" class="num">5</text>
+    <text x="58" y="257" class="callout">Mobile: transcript eerst + sticky controls.</text>
+  </g>
+</svg>

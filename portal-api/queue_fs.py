@@ -58,6 +58,7 @@ def init_job_in_inbox(
     *,
     orig_filename: str,
     options: Dict[str, Any],
+    job_kind: str = "upload_audio",
 ) -> JobPaths:
     """
     Maakt een jobfolder in INBOX via:
@@ -91,6 +92,7 @@ def init_job_in_inbox(
     # Initial status
     status = {
         "job_id": job_id,
+        "job_kind": str(job_kind or "upload_audio"),
         "state": "queued",
         "phase": "upload",
         "progress": 0.0,
@@ -114,6 +116,7 @@ def init_job_in_inbox(
     # Job config (wat worker nodig heeft)
     job = {
         "job_id": job_id,
+        "job_kind": str(job_kind or "upload_audio"),
         "orig_filename": orig_filename,
         "options": options,
     }

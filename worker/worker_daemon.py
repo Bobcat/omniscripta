@@ -20,8 +20,12 @@ from phase_topics_llm import run_topics_llm
 from phase_topics_parse import parse_topics_raw_file
 from phase_topics_validate import validate_all_chunks
 from phase_topics_merge import merge_topics
-from phase_whisperx import _load_server_config, _run_whisperx_streaming
+from phase_whisperx import _load_server_config
+from pipeline_live_chunk import run_live_chunk_job
 from progress_predictor import build_prediction, phase_order_for_job
+from asr_client_local import maybe_shutdown_live_chunk_warm_runner_idle, shutdown_live_chunk_warm_runner
+from asr_backend import transcribe_with_oneshot_backend
+from asr_contract import AsrRequestError, prepare_request
 
 
 SLEEP_IDLE_SECONDS = 2.0
@@ -136,6 +140,16 @@ def _normalize_speaker_mode(value: object) -> str:
   if raw == "fixed":
     return "fixed"
   return "auto"
+
+
+def _resolve_job_kind(job_cfg: dict) -> str:
+  raw = str(job_cfg.get("job_kind") or "").strip().lower()
+  if raw:
+    return raw
+  opts = job_cfg.get("options", {}) or {}
+  if bool(opts.get("live_chunk_mode", False)):
+    return "live_chunk"
+  return "upload_audio"
 
 
 def _config_key(
@@ -431,6 +445,10 @@ def _start_progress_heartbeat_thread(callback, *, interval_s: float = 0.5):
 def main() -> int:
   print("worker_daemon started")
   while True:
+    try:
+      maybe_shutdown_live_chunk_warm_runner_idle()
+    except Exception:
+      pass
     job = claim_next_job()
     if not job:
       time.sleep(SLEEP_IDLE_SECONDS)
@@ -471,6 +489,21 @@ def main() -> int:
           f"[{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}] WORKER phase_timing name={name} seconds={max(0.0, float(elapsed_s)):.3f} timings_text={txt}",
         )
 
+      job_cfg = json.loads(job.job_path.read_text(encoding="utf-8"))
+      opts = job_cfg.get("options", {}) or {}
+      job_kind = _resolve_job_kind(job_cfg)
+      if job_kind == "live_chunk":
+        run_live_chunk_job(job=job, job_cfg=job_cfg)
+        finish_job(job, ok=True)
+        print(f"Done {job.job_id}")
+        continue
+      if job_kind != "upload_audio":
+        raise RuntimeError(f"Unsupported job_kind: {job_kind}")
+      try:
+        shutdown_live_chunk_warm_runner(reason="upload_audio_job")
+      except Exception:
+        pass
+
       _write_status(
         job.status_path,
         state="running",
@@ -480,8 +513,6 @@ def main() -> int:
         message="Starting job…",
       )
 
-      job_cfg = json.loads(job.job_path.read_text(encoding="utf-8"))
-      opts = job_cfg.get("options", {}) or {}
       orig_filename = job_cfg.get("orig_filename")
       service_cfg = _load_service_config()
       snip_cfg = (service_cfg.get("snip") or {}) if isinstance(service_cfg, dict) else {}
@@ -549,6 +580,7 @@ def main() -> int:
       progress_start_phase("whisperx_prepare", "Preparing WhisperX…", "whisperx_prepare")
 
       wx_t0 = time.monotonic()
+      wx_live_timing_keys: set[str] = set()
 
       def on_wx_stage(stage_name: str) -> None:
         stage = str(stage_name or "").strip().lower()
@@ -564,47 +596,113 @@ def main() -> int:
           progress_start_phase("whisperx_finalize", "Finalizing…", "finalizing")
 
       def on_wx_phase_timing(phase_name: str, elapsed_s: float) -> None:
+        wx_live_timing_keys.add(str(phase_name or ""))
         record_phase_timing(phase_name, elapsed_s)
         progress_finish_phase(phase_name, elapsed_s)
 
-      srt_path, wx_timings, wx_emitted_live = _run_whisperx_streaming(
+      raw_asr_request = {
+        "schema_version": "asr_v1",
+        "request_id": f"{job.job_id}:upload_whisperx",
+        "profile_id": "upload_full",
+        "audio": {
+          "local_path": str(snippet_path.resolve()),
+          "duration_ms": int(max(0, snippet_seconds) * 1000),
+        },
+        "options": {
+          "language": language,
+          "speaker_mode": speaker_mode,
+          "min_speakers": min_speakers,
+          "max_speakers": max_speakers,
+          "diarize_enabled": bool(speaker_mode != "none"),
+          "align_enabled": bool(cfg.get("align_enabled", True)),
+          "initial_prompt": opts.get("initial_prompt"),
+          "timestamps_mode": "segment",
+        },
+        "context": {
+          "source_kind": "upload_audio",
+          "job_id": str(job.job_id),
+          "orig_filename": str(orig_filename or ""),
+        },
+        "outputs": {
+          "text": False,
+          "segments": False,
+          "srt": True,
+          "srt_inline": False,
+          "word_timestamps": False,
+        },
+        "priority": "background",
+      }
+      try:
+        asr_request = prepare_request(raw_asr_request)
+      except AsrRequestError as e_req:
+        raise RuntimeError(f"{e_req.code}: {e_req}") from e_req
+      try:
+        _append_log(
+          job.log_path,
+          f"[{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}] WORKER asr_request profile={asr_request.get('profile_id')} resolved_options={json.dumps(asr_request.get('resolved_options') or {}, ensure_ascii=False, sort_keys=True)}",
+        )
+      except Exception:
+        pass
+
+      asr_response = transcribe_with_oneshot_backend(
         job=job,
-        snippet_path=snippet_path,
-        whisperx_out_dir=job.whisperx_dir,
-        snippet_seconds=snippet_seconds,
-        language=language,
-        speaker_mode=speaker_mode,
-        min_speakers=(int(min_speakers) if min_speakers is not None else None),
-        max_speakers=(int(max_speakers) if max_speakers is not None else None),
-        cfg=cfg,
+        request=asr_request,
         on_phase_timing=on_wx_phase_timing,
         on_stage_change=on_wx_stage,
         on_heartbeat=progress_heartbeat,
       )
+      if not bool(asr_response.get("ok", False)):
+        err = dict(asr_response.get("error") or {})
+        raise RuntimeError(f"{err.get('code') or 'ASR_ERROR'}: {err.get('message') or 'ASR request failed'}")
+      try:
+        _append_log(
+          job.log_path,
+          f"[{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}] WORKER asr_response runtime={json.dumps(asr_response.get('runtime') or {}, ensure_ascii=False, sort_keys=True)} timings={json.dumps(asr_response.get('timings') or {}, ensure_ascii=False, sort_keys=True)}",
+        )
+      except Exception:
+        pass
+
+      asr_result = dict(asr_response.get("result") or {})
+      asr_artifacts = dict(asr_result.get("artifacts") or {})
+      srt_path_str = str(asr_artifacts.get("srt_path") or "").strip()
+      if not srt_path_str:
+        raise RuntimeError("ASR backend response missing result.artifacts.srt_path")
+      srt_path = Path(srt_path_str)
+      if not srt_path.exists():
+        raise RuntimeError(f"ASR backend SRT path missing: {srt_path}")
+      wx_timings = dict(asr_response.get("timings") or {})
       wx_elapsed = time.monotonic() - wx_t0
       emitted = False
-      live_keys = set(wx_emitted_live or set())
       if isinstance(wx_timings, dict):
-        order = ("prepare", "transcribe", "align", "diarize", "finalize")
+        order = ("prepare_s", "transcribe_s", "align_s", "diarize_s", "finalize_s")
+        map_name = {
+          "prepare_s": "whisperx_prepare",
+          "transcribe_s": "whisperx_transcribe",
+          "align_s": "whisperx_align",
+          "diarize_s": "whisperx_diarize",
+          "finalize_s": "whisperx_finalize",
+        }
         seen: set[str] = set()
         for key in order:
           if key in wx_timings:
-            if key in live_keys:
+            out_key = map_name.get(key, "")
+            if out_key and out_key in wx_live_timing_keys:
               seen.add(key)
               emitted = True
               continue
             try:
-              on_wx_phase_timing(f"whisperx_{key}", float(wx_timings[key]))
+              on_wx_phase_timing(out_key or key, float(wx_timings[key]))
               emitted = True
               seen.add(key)
             except Exception:
               pass
-        for key in sorted(k for k in wx_timings.keys() if k not in seen):
-          if key in live_keys:
+        for key in sorted(k for k in wx_timings.keys() if k not in seen and k != "total_s"):
+          out_key = map_name.get(key, key)
+          if out_key in wx_live_timing_keys:
             emitted = True
             continue
           try:
-            on_wx_phase_timing(f"whisperx_{key}", float(wx_timings[key]))
+            on_wx_phase_timing(out_key, float(wx_timings[key]))
             emitted = True
           except Exception:
             pass

@@ -1,0 +1,247 @@
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import threading
+import time
+import uuid
+from pathlib import Path
+from typing import Any
+
+from phase_whisperx import _build_runner_env, _load_server_config, _resolve_whisperx_python
+
+
+def _env_bool(name: str, default: bool) -> bool:
+  raw = str(os.getenv(name, "") or "").strip().lower()
+  if not raw:
+    return bool(default)
+  if raw in {"1", "true", "yes", "on", "y"}:
+    return True
+  if raw in {"0", "false", "no", "off", "n"}:
+    return False
+  return bool(default)
+
+
+def _env_float(name: str, default: float) -> float:
+  try:
+    return float(os.getenv(name, "").strip() or default)
+  except Exception:
+    return float(default)
+
+
+def _fingerprint_cfg(cfg: dict[str, Any]) -> str:
+  keys = [
+    "model",
+    "device",
+    "compute_type",
+    "batch_size",
+    "chunk_size",
+    "beam_size",
+    "align_model",
+    "torch_num_threads",
+    "torch_num_interop_threads",
+    "whisperx_venv",
+  ]
+  payload = {k: cfg.get(k) for k in keys}
+  return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+class PersistentRunnerClientError(RuntimeError):
+  pass
+
+
+def _log(msg: str) -> None:
+  try:
+    print(f"warm_runner {msg}", flush=True)
+  except Exception:
+    pass
+
+
+class _LiveChunkWarmRunnerClient:
+  def __init__(self) -> None:
+    self._lock = threading.RLock()
+    self._proc: subprocess.Popen[str] | None = None
+    self._cfg_fingerprint: str | None = None
+    self._last_used_t = 0.0
+    self._server_init_path: Path | None = None
+
+  def _server_script(self) -> Path:
+    return Path(__file__).with_name("whisperx_persistent_server.py")
+
+  def _spawn_locked(self, cfg: dict[str, Any]) -> None:
+    self._shutdown_locked(reason="respawn")
+
+    env, _site_packages, _nvidia_lib_dirs = _build_runner_env(cfg)
+    runner_python = _resolve_whisperx_python(cfg)
+    server_script = self._server_script()
+    if not server_script.exists():
+      raise PersistentRunnerClientError(f"Missing persistent server script: {server_script}")
+
+    init_dir = Path("/tmp") / "transcribe_live_chunk_runner"
+    init_dir.mkdir(parents=True, exist_ok=True)
+    init_path = init_dir / f"init_{os.getpid()}_{uuid.uuid4().hex}.json"
+    init_path.write_text(json.dumps({"cfg": cfg}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    cmd = [str(runner_python), str(server_script), "--init-json", str(init_path)]
+    proc = subprocess.Popen(
+      cmd,
+      stdin=subprocess.PIPE,
+      stdout=subprocess.DEVNULL,
+      stderr=subprocess.DEVNULL,
+      text=True,
+      bufsize=1,
+      universal_newlines=True,
+      env=env,
+    )
+    if proc.stdin is None:
+      raise PersistentRunnerClientError("Failed to open stdin for persistent runner")
+
+    self._proc = proc
+    self._cfg_fingerprint = _fingerprint_cfg(cfg)
+    self._last_used_t = time.monotonic()
+    self._server_init_path = init_path
+    _log(
+      "spawned "
+      f"pid={proc.pid} model={cfg.get('model')} device={cfg.get('device')} "
+      f"compute_type={cfg.get('compute_type')} batch_size={cfg.get('batch_size')} chunk_size={cfg.get('chunk_size')}"
+    )
+
+  def _ensure_runner_locked(self) -> None:
+    cfg = dict(_load_server_config() or {})
+    fp = _fingerprint_cfg(cfg)
+    if self._proc is not None and self._proc.poll() is None and self._cfg_fingerprint == fp:
+      self._last_used_t = time.monotonic()
+      return
+    self._spawn_locked(cfg)
+
+  def _shutdown_locked(self, *, reason: str) -> None:
+    proc = self._proc
+    self._proc = None
+    self._cfg_fingerprint = None
+    self._last_used_t = 0.0
+    init_path = self._server_init_path
+    self._server_init_path = None
+    if proc is not None:
+      pid = proc.pid
+      try:
+        if proc.poll() is None and proc.stdin is not None:
+          try:
+            proc.stdin.write(json.dumps({"cmd": "shutdown", "reason": reason}) + "\n")
+            proc.stdin.flush()
+          except Exception:
+            pass
+      except Exception:
+        pass
+      try:
+        proc.wait(timeout=1.0)
+      except Exception:
+        try:
+          proc.terminate()
+        except Exception:
+          pass
+        try:
+          proc.wait(timeout=2.0)
+        except Exception:
+          try:
+            proc.kill()
+          except Exception:
+            pass
+      _log(f"stopped pid={pid} reason={reason}")
+    if init_path is not None:
+      try:
+        init_path.unlink(missing_ok=True)
+      except Exception:
+        pass
+
+  def shutdown(self, *, reason: str = "manual") -> None:
+    with self._lock:
+      self._shutdown_locked(reason=reason)
+
+  def maybe_shutdown_idle(self) -> None:
+    idle_s = max(0.0, _env_float("TRANSCRIBE_LIVE_CHUNK_WARM_IDLE_S", 120.0))
+    if idle_s <= 0:
+      return
+    with self._lock:
+      if self._proc is None or self._proc.poll() is not None:
+        return
+      if self._last_used_t <= 0:
+        return
+      if (time.monotonic() - self._last_used_t) >= idle_s:
+        self._shutdown_locked(reason="idle_timeout")
+
+  def transcribe(self, *, job: Any, request: dict[str, Any]) -> dict[str, Any]:
+    request_timeout_s = max(1.0, _env_float("TRANSCRIBE_LIVE_CHUNK_WARM_REQUEST_TIMEOUT_S", 120.0))
+    poll_s = max(0.02, _env_float("TRANSCRIBE_LIVE_CHUNK_WARM_RESPONSE_POLL_S", 0.05))
+    with self._lock:
+      self._ensure_runner_locked()
+      proc = self._proc
+      if proc is None or proc.poll() is not None or proc.stdin is None:
+        raise PersistentRunnerClientError("Persistent runner is not available")
+
+      ipc_dir = (Path(job.whisperx_dir) / "_ipc").resolve()
+      ipc_dir.mkdir(parents=True, exist_ok=True)
+      token = uuid.uuid4().hex
+      payload_path = ipc_dir / f"{token}.request.json"
+      response_path = ipc_dir / f"{token}.response.json"
+
+      envelope = {
+        "request": dict(request or {}),
+        "work": {
+          "whisperx_out_dir": str(Path(job.whisperx_dir).resolve()),
+        },
+      }
+      payload_path.write_text(json.dumps(envelope, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+      try:
+        proc.stdin.write(json.dumps({"cmd": "transcribe", "payload_path": str(payload_path), "response_path": str(response_path)}) + "\n")
+        proc.stdin.flush()
+      except Exception as e:
+        self._shutdown_locked(reason="stdin_write_failed")
+        raise PersistentRunnerClientError(f"Failed to send request to persistent runner: {e!r}") from e
+
+      deadline = time.monotonic() + request_timeout_s
+      while time.monotonic() < deadline:
+        if response_path.exists():
+          try:
+            data = json.loads(response_path.read_text(encoding="utf-8"))
+            self._last_used_t = time.monotonic()
+            return data
+          except Exception as e:
+            raise PersistentRunnerClientError(f"Failed to parse persistent runner response: {e!r}") from e
+          finally:
+            try:
+              payload_path.unlink(missing_ok=True)
+            except Exception:
+              pass
+            try:
+              response_path.unlink(missing_ok=True)
+            except Exception:
+              pass
+        if proc.poll() is not None:
+          code = proc.returncode
+          self._shutdown_locked(reason="runner_exited")
+          raise PersistentRunnerClientError(f"Persistent runner exited unexpectedly (code={code})")
+        time.sleep(poll_s)
+
+      self._shutdown_locked(reason="response_timeout")
+      raise PersistentRunnerClientError(f"Persistent runner timed out after {request_timeout_s:.1f}s")
+
+
+_CLIENT = _LiveChunkWarmRunnerClient()
+
+
+def live_chunk_warm_enabled() -> bool:
+  return _env_bool("TRANSCRIBE_LIVE_CHUNK_WARM_ENABLED", True)
+
+
+def transcribe_with_persistent_local_runner(*, job: Any, request: dict[str, Any]) -> dict[str, Any]:
+  _CLIENT.maybe_shutdown_idle()
+  return _CLIENT.transcribe(job=job, request=request)
+
+
+def shutdown_live_chunk_warm_runner(*, reason: str = "manual") -> None:
+  _CLIENT.shutdown(reason=reason)
+
+
+def maybe_shutdown_live_chunk_warm_runner_idle() -> None:
+  _CLIENT.maybe_shutdown_idle()
