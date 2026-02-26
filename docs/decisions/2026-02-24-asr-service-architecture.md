@@ -105,6 +105,19 @@ This avoids duplicating model loads in GPU memory per user/session.
 2. `upload_audio` can stay on the current one-shot path initially.
 3. Once stable, `upload_audio` can migrate to the same ASR service contract/backend.
 
+## Current Implementation Note (Important)
+
+The current "persistent warm runner" is **per worker process**, not a shared machine-wide ASR service yet.
+
+- `worker` process -> local IPC -> **that worker's own** warm runner child process
+- multiple workers do **not** automatically share one warm runner/model instance
+- therefore, multiple workers can still multiply VRAM usage until a shared ASR service/pool is introduced
+
+This is an intentional intermediate step:
+
+- it solves per-chunk cold-start overhead in the current single-worker path
+- it does not yet solve multi-worker model sharing/scheduling
+
 ## Related Notes
 
 - `docs/decisions/2026-02-24-semilive-concurrency-and-spool-retention.md`

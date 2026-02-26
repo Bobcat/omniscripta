@@ -152,6 +152,15 @@ class LiveSession:
     semilive_final_text: str = ""
     semilive_final_segments: list[dict[str, Any]] = field(default_factory=list)
     semilive_chunk_results: list[dict[str, Any]] = field(default_factory=list)
+    semilive_speculative_text: str = ""
+    semilive_speculative_seq: int = -1
+    semilive_speculative_audio_end_ms: int = 0
+    semilive_speculative_updated_unix: float = 0.0
+    semilive_speculative_enqueued: int = 0
+    semilive_speculative_shown: int = 0
+    semilive_speculative_dropped_busy: int = 0
+    semilive_speculative_dropped_stale: int = 0
+    semilive_time_to_first_speculative_ms: int | None = None
     fixture_id: str = ""
     fixture_version: str = ""
     fixture_test_mode: str = ""
@@ -383,6 +392,74 @@ class LiveSessionManager:
                 sess.fixture_test_mode = str(fixture_test_mode or "").strip()
             return self._snapshot_locked(sess)
 
+    def update_semilive_speculative_preview(
+        self,
+        session_id: str,
+        *,
+        text: str,
+        speculative_seq: int,
+        audio_end_ms: int,
+    ) -> dict[str, Any]:
+        now_unix = time.time()
+        with self._lock:
+            sess = self._sessions.get(session_id)
+            if not sess:
+                raise KeyError("session_not_found")
+            sess.last_seen_unix = now_unix
+            sess.semilive_speculative_text = str(text or "")
+            sess.semilive_speculative_seq = int(speculative_seq)
+            sess.semilive_speculative_audio_end_ms = int(max(0, int(audio_end_ms)))
+            sess.semilive_speculative_updated_unix = now_unix
+            return self._snapshot_locked(sess)
+
+    def clear_semilive_speculative_preview(
+        self,
+        session_id: str,
+        *,
+        max_seq: int | None = None,
+    ) -> dict[str, Any]:
+        now_unix = time.time()
+        with self._lock:
+            sess = self._sessions.get(session_id)
+            if not sess:
+                raise KeyError("session_not_found")
+            sess.last_seen_unix = now_unix
+            current_seq = int(getattr(sess, "semilive_speculative_seq", -1) or -1)
+            if max_seq is None or current_seq <= int(max_seq):
+                sess.semilive_speculative_text = ""
+                sess.semilive_speculative_seq = -1
+                sess.semilive_speculative_audio_end_ms = 0
+                sess.semilive_speculative_updated_unix = 0.0
+            return self._snapshot_locked(sess)
+
+    def update_semilive_speculative_metrics(
+        self,
+        session_id: str,
+        *,
+        enqueued: int | None = None,
+        shown: int | None = None,
+        dropped_busy: int | None = None,
+        dropped_stale: int | None = None,
+        time_to_first_speculative_ms: int | None = None,
+    ) -> dict[str, Any]:
+        now_unix = time.time()
+        with self._lock:
+            sess = self._sessions.get(session_id)
+            if not sess:
+                raise KeyError("session_not_found")
+            sess.last_seen_unix = now_unix
+            if enqueued is not None:
+                sess.semilive_speculative_enqueued = int(max(0, int(enqueued)))
+            if shown is not None:
+                sess.semilive_speculative_shown = int(max(0, int(shown)))
+            if dropped_busy is not None:
+                sess.semilive_speculative_dropped_busy = int(max(0, int(dropped_busy)))
+            if dropped_stale is not None:
+                sess.semilive_speculative_dropped_stale = int(max(0, int(dropped_stale)))
+            if time_to_first_speculative_ms is not None:
+                sess.semilive_time_to_first_speculative_ms = int(max(0, int(time_to_first_speculative_ms)))
+            return self._snapshot_locked(sess)
+
     def record_semilive_chunk_result(
         self,
         session_id: str,
@@ -398,6 +475,8 @@ class LiveSessionManager:
         speech_frames: int | None = None,
         silence_frames_tail: int | None = None,
         chunk_duration_ms: int | None = None,
+        asr_pipeline_time_s: float | None = None,
+        asr_transcribe_time_s: float | None = None,
     ) -> dict[str, Any]:
         now_unix = time.time()
         idx = int(max(0, chunk_index))
@@ -411,6 +490,10 @@ class LiveSessionManager:
         safe_speech_frames = None if speech_frames is None else int(max(0, int(speech_frames)))
         safe_silence_frames_tail = None if silence_frames_tail is None else int(max(0, int(silence_frames_tail)))
         safe_chunk_duration_ms = None if chunk_duration_ms is None else int(max(0, int(chunk_duration_ms)))
+        safe_asr_pipeline_time_s = None if asr_pipeline_time_s is None else max(0.0, float(asr_pipeline_time_s))
+        safe_asr_transcribe_time_s = (
+            None if asr_transcribe_time_s is None else max(0.0, float(asr_transcribe_time_s))
+        )
         with self._lock:
             sess = self._sessions.get(session_id)
             if not sess:
@@ -429,6 +512,8 @@ class LiveSessionManager:
                 "speech_frames": safe_speech_frames,
                 "silence_frames_tail": safe_silence_frames_tail,
                 "chunk_duration_ms": safe_chunk_duration_ms,
+                "asr_pipeline_time_s": safe_asr_pipeline_time_s,
+                "asr_transcribe_time_s": safe_asr_transcribe_time_s,
             }
             replaced = False
             for i, existing in enumerate(sess.semilive_chunk_results):
@@ -445,6 +530,16 @@ class LiveSessionManager:
                         row["silence_frames_tail"] = int(max(0, int(existing.get("silence_frames_tail") or 0)))
                     if row["chunk_duration_ms"] is None and existing.get("chunk_duration_ms") is not None:
                         row["chunk_duration_ms"] = int(max(0, int(existing.get("chunk_duration_ms") or 0)))
+                    if row["asr_pipeline_time_s"] is None and existing.get("asr_pipeline_time_s") is not None:
+                        try:
+                            row["asr_pipeline_time_s"] = max(0.0, float(existing.get("asr_pipeline_time_s")))
+                        except Exception:
+                            row["asr_pipeline_time_s"] = None
+                    if row["asr_transcribe_time_s"] is None and existing.get("asr_transcribe_time_s") is not None:
+                        try:
+                            row["asr_transcribe_time_s"] = max(0.0, float(existing.get("asr_transcribe_time_s")))
+                        except Exception:
+                            row["asr_transcribe_time_s"] = None
                     sess.semilive_chunk_results[i] = row
                     replaced = True
                     break
@@ -463,6 +558,11 @@ class LiveSessionManager:
                     0,
                     sum(1 for r in sess.semilive_chunk_results if str(r.get("state") or "") == "error"),
                 )
+                # A new final chunk supersedes any speculative suffix that was shown before it.
+                sess.semilive_speculative_text = ""
+                sess.semilive_speculative_seq = -1
+                sess.semilive_speculative_audio_end_ms = 0
+                sess.semilive_speculative_updated_unix = 0.0
             elif safe_state == "error":
                 sess.chunks_failed = max(
                     0,
@@ -757,6 +857,26 @@ class LiveSessionManager:
         dedup_chunks_applied = sum(1 for r in chunks if bool(r.get("dedup_applied")))
         dedup_words_trimmed_total = sum(int(max(0, int(r.get("dedup_words_trimmed") or 0))) for r in chunks)
         chunk_debug = _semilive_chunk_rows_debug_metrics(chunks)
+        final_covered_ms = 0
+        for seg in sess.semilive_final_segments:
+            if not isinstance(seg, dict):
+                continue
+            try:
+                t1 = int(seg.get("t1_ms") or 0)
+            except Exception:
+                t1 = 0
+            if t1 > final_covered_ms:
+                final_covered_ms = t1
+        if final_covered_ms <= 0:
+            for r in chunks:
+                if str(r.get("state") or "") != "ready":
+                    continue
+                try:
+                    t1 = int(r.get("t1_ms") or 0)
+                except Exception:
+                    t1 = 0
+                if t1 > final_covered_ms:
+                    final_covered_ms = t1
         return {
             "session_id": str(sess.session_id),
             "source": "active",
@@ -775,6 +895,7 @@ class LiveSessionManager:
             "final_text": str(sess.semilive_final_text or ""),
             "final_segments": [dict(seg) for seg in sess.semilive_final_segments],
             "final_segments_count": len(sess.semilive_final_segments),
+            "final_covered_ms": int(max(0, final_covered_ms)),
             "chunk_results": chunks,
             "chunk_results_count": len(chunks),
             "chunk_reason_counts": dict(chunk_debug.get("chunk_reason_counts") or {}),
@@ -786,6 +907,27 @@ class LiveSessionManager:
             "chunk_results_invalid_index_rows": int(max(0, int(chunk_debug.get("chunk_results_invalid_index_rows") or 0))),
             "dedup_chunks_applied": int(max(0, dedup_chunks_applied)),
             "dedup_words_trimmed_total": int(max(0, dedup_words_trimmed_total)),
+            "speculative_preview": {
+                "text": str(sess.semilive_speculative_text or ""),
+                "speculative_seq": int(max(-1, int(sess.semilive_speculative_seq))),
+                "audio_end_ms": int(max(0, int(sess.semilive_speculative_audio_end_ms or 0))),
+                "updated_at_utc": (
+                    _utc_iso(sess.semilive_speculative_updated_unix)
+                    if float(sess.semilive_speculative_updated_unix or 0.0) > 0
+                    else ""
+                ),
+            },
+            "speculative_metrics": {
+                "enqueued": int(max(0, int(sess.semilive_speculative_enqueued or 0))),
+                "shown": int(max(0, int(sess.semilive_speculative_shown or 0))),
+                "dropped_busy": int(max(0, int(sess.semilive_speculative_dropped_busy or 0))),
+                "dropped_stale": int(max(0, int(sess.semilive_speculative_dropped_stale or 0))),
+                "time_to_first_speculative_ms": (
+                    int(sess.semilive_time_to_first_speculative_ms)
+                    if sess.semilive_time_to_first_speculative_ms is not None
+                    else None
+                ),
+            },
             "fixture_id": str(sess.fixture_id or ""),
             "fixture_version": str(sess.fixture_version or ""),
             "fixture_test_mode": str(sess.fixture_test_mode or ""),
@@ -796,6 +938,27 @@ class LiveSessionManager:
         dedup_chunks_applied = sum(1 for r in chunks if bool(r.get("dedup_applied")))
         dedup_words_trimmed_total = sum(int(max(0, int(r.get("dedup_words_trimmed") or 0))) for r in chunks)
         chunk_debug = _semilive_chunk_rows_debug_metrics(chunks)
+        final_segments_src = arc.semilive_final_segments or arc.final_segments
+        final_covered_ms = 0
+        for seg in final_segments_src:
+            if not isinstance(seg, dict):
+                continue
+            try:
+                t1 = int(seg.get("t1_ms") or 0)
+            except Exception:
+                t1 = 0
+            if t1 > final_covered_ms:
+                final_covered_ms = t1
+        if final_covered_ms <= 0:
+            for r in chunks:
+                if str(r.get("state") or "") != "ready":
+                    continue
+                try:
+                    t1 = int(r.get("t1_ms") or 0)
+                except Exception:
+                    t1 = 0
+                if t1 > final_covered_ms:
+                    final_covered_ms = t1
         return {
             "session_id": str(arc.session_id),
             "source": "archive",
@@ -811,8 +974,9 @@ class LiveSessionManager:
             "chunks_pending": int(max(0, arc.chunks_total - arc.chunks_done - arc.chunks_failed)),
             "transcript_revision": int(max(0, arc.semilive_transcript_revision or arc.transcript_revision)),
             "final_text": str(arc.semilive_final_text or arc.final_text or ""),
-            "final_segments": [dict(seg) for seg in (arc.semilive_final_segments or arc.final_segments)],
-            "final_segments_count": len(arc.semilive_final_segments or arc.final_segments),
+            "final_segments": [dict(seg) for seg in final_segments_src],
+            "final_segments_count": len(final_segments_src),
+            "final_covered_ms": int(max(0, final_covered_ms)),
             "chunk_results": chunks,
             "chunk_results_count": len(chunks),
             "chunk_reason_counts": dict(chunk_debug.get("chunk_reason_counts") or {}),
@@ -824,6 +988,19 @@ class LiveSessionManager:
             "chunk_results_invalid_index_rows": int(max(0, int(chunk_debug.get("chunk_results_invalid_index_rows") or 0))),
             "dedup_chunks_applied": int(max(0, dedup_chunks_applied)),
             "dedup_words_trimmed_total": int(max(0, dedup_words_trimmed_total)),
+            "speculative_preview": {
+                "text": "",
+                "speculative_seq": -1,
+                "audio_end_ms": 0,
+                "updated_at_utc": "",
+            },
+            "speculative_metrics": {
+                "enqueued": 0,
+                "shown": 0,
+                "dropped_busy": 0,
+                "dropped_stale": 0,
+                "time_to_first_speculative_ms": None,
+            },
             "fixture_id": str(arc.fixture_id or ""),
             "fixture_version": str(arc.fixture_version or ""),
             "fixture_test_mode": str(arc.fixture_test_mode or ""),

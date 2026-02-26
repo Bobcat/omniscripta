@@ -189,6 +189,13 @@ def run_live_chunk_job(*, job: Any, job_cfg: dict[str, Any]) -> None:
 
   total_elapsed = max(0.0, float(time.monotonic() - job_t0))
   timings_text = " | ".join([f"{name}={sec:.2f}s" for name, sec in timing_rows] + [f"total={total_elapsed:.2f}s"])
+  def _timing_value(key: str) -> float | None:
+    if key not in timings:
+      return None
+    try:
+      return max(0.0, float(timings[key]))
+    except Exception:
+      return None
   _write_status(
     job.status_path,
     state="done",
@@ -213,4 +220,10 @@ def run_live_chunk_job(*, job: Any, job_cfg: dict[str, Any]) -> None:
     asr_model=str(runtime_meta.get("model") or ""),
     asr_initial_prompt_chars=len(resolved_initial_prompt),
     asr_initial_prompt_words=int(max(0, resolved_initial_prompt_words)),
+    asr_timing_whisperx_total_s=_timing_value("total_s"),
+    asr_timing_whisperx_prepare_s=_timing_value("prepare_s"),
+    asr_timing_whisperx_transcribe_s=_timing_value("transcribe_s"),
+    asr_timing_whisperx_align_s=_timing_value("align_s"),
+    asr_timing_whisperx_diarize_s=_timing_value("diarize_s"),
+    asr_timing_whisperx_finalize_s=_timing_value("finalize_s"),
   )

@@ -202,9 +202,36 @@ def score_semilive_text_against_fixture(
         word_count_ratio = round(float(len(live_words)) / float(len(ref_words)), 4)
 
     result = semilive_result if isinstance(semilive_result, dict) else {}
+    chunk_rows = result.get("chunk_results") if isinstance(result.get("chunk_results"), list) else []
+    asr_transcribe_time_total_s = 0.0
+    asr_pipeline_time_total_s = 0.0
+    for row in chunk_rows:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("state") or "") != "ready":
+            continue
+        try:
+            if row.get("asr_transcribe_time_s") is not None:
+                asr_transcribe_time_total_s += max(0.0, float(row.get("asr_transcribe_time_s")))
+        except Exception:
+            pass
+        try:
+            if row.get("asr_pipeline_time_s") is not None:
+                asr_pipeline_time_total_s += max(0.0, float(row.get("asr_pipeline_time_s")))
+        except Exception:
+            pass
+
+    recording_duration_ms = int(max(0, int(result.get("recording_duration_ms") or 0)))
+    recording_s = float(recording_duration_ms) / 1000.0 if recording_duration_ms > 0 else 0.0
+    asr_transcribe_pct_of_recording: float | None = None
+    asr_pipeline_pct_of_recording: float | None = None
+    if recording_s > 0:
+        asr_transcribe_pct_of_recording = round((asr_transcribe_time_total_s / recording_s) * 100.0, 1)
+        asr_pipeline_pct_of_recording = round((asr_pipeline_time_total_s / recording_s) * 100.0, 1)
+
     run_metrics: dict[str, Any] = {
         "finalization_state": str(result.get("finalization_state") or ""),
-        "recording_duration_ms": int(max(0, int(result.get("recording_duration_ms") or 0))),
+        "recording_duration_ms": recording_duration_ms,
         "chunks_total": int(max(0, int(result.get("chunks_total") or 0))),
         "chunks_done": int(max(0, int(result.get("chunks_done") or 0))),
         "chunks_failed": int(max(0, int(result.get("chunks_failed") or 0))),
@@ -214,6 +241,10 @@ def score_semilive_text_against_fixture(
         "final_segments_count": int(max(0, int(result.get("final_segments_count") or 0))),
         "dedup_chunks_applied": int(max(0, int(result.get("dedup_chunks_applied") or 0))),
         "dedup_words_trimmed_total": int(max(0, int(result.get("dedup_words_trimmed_total") or 0))),
+        "asr_transcribe_time_total_s": round(asr_transcribe_time_total_s, 3),
+        "asr_pipeline_time_total_s": round(asr_pipeline_time_total_s, 3),
+        "asr_transcribe_pct_of_recording": asr_transcribe_pct_of_recording,
+        "asr_pipeline_pct_of_recording": asr_pipeline_pct_of_recording,
     }
     if stats_log_path:
         run_metrics.update(_stats_log_metrics(stats_log_path))
