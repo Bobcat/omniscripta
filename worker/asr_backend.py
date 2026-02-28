@@ -123,6 +123,11 @@ class WhisperxOneShotBackend:
     cfg = dict(_load_server_config() or {})
     if "align_enabled" in resolved:
       cfg["align_enabled"] = bool(resolved.get("align_enabled"))
+    if "beam_size" in resolved and resolved.get("beam_size") is not None:
+      try:
+        cfg["beam_size"] = max(1, int(resolved.get("beam_size")))
+      except Exception:
+        pass
 
     language = str(resolved.get("language") or "en")
     initial_prompt = resolved.get("initial_prompt")

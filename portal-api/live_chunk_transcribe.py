@@ -193,6 +193,7 @@ class LiveChunkBatchBridge:
         t1_ms: int,
         pcm16le: bytes,
         language: str | None = None,
+        asr_beam_size: int | None = None,
         initial_prompt: str | None = None,
         live_lane: str | None = None,
         speculative_seq: int | None = None,
@@ -219,6 +220,7 @@ class LiveChunkBatchBridge:
             orig_filename=chunk_wav.name,
             options={
                 "language": str(language or self.language),
+                "beam_size": (int(max(1, asr_beam_size)) if asr_beam_size is not None else None),
                 "speaker_mode": "none",
                 "expected_speakers": None,
                 "min_speakers": None,

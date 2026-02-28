@@ -1,0 +1,762 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Omniscripta - Live Recording Mockup</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-body: #f8fafc;
+            --bg-sidebar: #ffffff;
+            --bg-canvas: #ffffff;
+            --text-main: #1e293b;
+            --text-muted: #64748b;
+            --accent-blue: #3b82f6;
+            --accent-blue-hover: #2563eb;
+            --accent-red: #ef4444;
+            --border-color: #e2e8f0;
+            --font-family: 'Inter', sans-serif;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: var(--font-family);
+            background-color: var(--bg-body);
+            color: var(--text-main);
+            display: flex;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        /* Sidebar Mockup */
+        .sidebar {
+            width: 260px;
+            background-color: var(--bg-sidebar);
+            border-right: 1px solid var(--border-color);
+            display: flex;
+            flex-direction: column;
+            padding: 24px 16px;
+        }
+
+        .sidebar-brand {
+            font-size: 1.25rem;
+            font-weight: 600;
+            margin-bottom: 32px;
+            padding: 0 12px;
+            color: var(--text-main);
+        }
+
+        .nav-item {
+            display: flex;
+            align-items: center;
+            padding: 12px;
+            margin-bottom: 8px;
+            border-radius: 8px;
+            color: var(--text-muted);
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .nav-item.active {
+            background-color: #eff6ff;
+            color: var(--accent-blue);
+        }
+
+        .nav-icon {
+            width: 20px;
+            height: 20px;
+            border-radius: 4px;
+            margin-right: 12px;
+            background-color: currentColor;
+            opacity: 0.8;
+        }
+
+        /* Main Workspace */
+        .workspace {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            padding: 32px;
+            position: relative;
+        }
+
+        /* The Canvas */
+        .canvas {
+            flex: 1;
+            background-color: var(--bg-canvas);
+            border-radius: 12px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .canvas-header {
+            padding: 24px 32px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid transparent;
+            /* Keeps spacing consistent */
+        }
+
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 0.875rem;
+            font-weight: 500;
+            transition: all 0.3s ease;
+        }
+
+        .status-idle {
+            background-color: #f1f5f9;
+            color: var(--text-muted);
+        }
+
+        .status-listening {
+            background-color: #dcfce7;
+            color: #166534;
+        }
+
+        .status-listening::before {
+            content: '';
+            display: block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background-color: #22c55e;
+            margin-right: 8px;
+            animation: pulse-green 2s infinite;
+        }
+
+        .status-finished {
+            background-color: #e0e7ff;
+            color: #3730a3;
+        }
+
+        @keyframes pulse-green {
+            0% {
+                box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.4);
+            }
+
+            70% {
+                box-shadow: 0 0 0 6px rgba(34, 197, 94, 0);
+            }
+
+            100% {
+                box-shadow: 0 0 0 0 rgba(34, 197, 94, 0);
+            }
+        }
+
+        /* Transcript Area */
+        .transcript-area {
+            flex: 1;
+            padding: 0 32px 100px 32px;
+            /* Bottom padding for controls */
+            overflow-y: auto;
+            font-size: 1.125rem;
+            line-height: 1.7;
+            color: var(--text-main);
+        }
+
+        .placeholder-text {
+            display: flex;
+            height: 100%;
+            align-items: center;
+            justify-content: center;
+            color: #94a3b8;
+            font-size: 1.25rem;
+            text-align: center;
+        }
+
+        /* The active chunk being transcribed */
+        .live-chunk {
+            color: var(--text-muted);
+            font-style: italic;
+            transition: color 0.3s;
+        }
+
+        /* Controls Area (Floating at bottom of canvas) */
+        .controls-container {
+            position: absolute;
+            bottom: 32px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 12px;
+            background: white;
+            padding: 16px 24px;
+            border-radius: 24px;
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+            border: 1px solid var(--border-color);
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        .timer {
+            font-variant-numeric: tabular-nums;
+            font-size: 1.5rem;
+            font-weight: 600;
+            color: var(--text-main);
+            display: none;
+            /* Hidden in IDLE */
+        }
+
+        .button-group {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+        }
+
+        button {
+            border: none;
+            background: none;
+            cursor: pointer;
+            font-family: inherit;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s;
+        }
+
+        /* The Big Start Button */
+        .btn-primary-start {
+            background-color: var(--accent-blue);
+            color: white;
+            width: 64px;
+            height: 64px;
+            border-radius: 50%;
+            box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
+            display: flex;
+            /* Shown in IDLE */
+        }
+
+        .btn-primary-start:hover {
+            background-color: var(--accent-blue-hover);
+            transform: scale(1.05);
+        }
+
+        /* Circle indicating record inside start button */
+        .btn-primary-start::after {
+            content: '';
+            width: 24px;
+            height: 24px;
+            background-color: white;
+            border-radius: 50%;
+        }
+
+        .btn-secondary {
+            padding: 10px 20px;
+            border-radius: 8px;
+            font-weight: 500;
+            font-size: 0.95rem;
+            background-color: #f1f5f9;
+            color: var(--text-main);
+            display: none;
+            /* Hidden in IDLE */
+        }
+
+        .btn-secondary:hover {
+            background-color: #e2e8f0;
+        }
+
+        .btn-danger {
+            padding: 10px 20px;
+            border-radius: 8px;
+            font-weight: 500;
+            font-size: 0.95rem;
+            background-color: #fef2f2;
+            color: var(--accent-red);
+            display: none;
+            /* Hidden in IDLE */
+        }
+
+        .btn-danger:hover {
+            background-color: #fee2e2;
+        }
+
+        /* Export block */
+        .export-actions {
+            display: none;
+            /* Hidden in IDLE/LISTENING */
+            gap: 12px;
+            margin-top: 16px;
+        }
+
+        .btn-outline {
+            padding: 10px 16px;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            font-weight: 500;
+            color: var(--text-main);
+            background: white;
+        }
+
+        .btn-outline:hover {
+            background-color: #f8fafc;
+        }
+
+
+        /* --- MOCKUP DEV CONTROLS (Only for this preview to switch UI states) --- */
+        .mockup-controls {
+            position: fixed;
+            top: 16px;
+            right: 16px;
+            background: #1e293b;
+            color: white;
+            padding: 12px;
+            border-radius: 8px;
+            z-index: 100;
+            font-size: 14px;
+        }
+
+        .mockup-controls button {
+            background: #334155;
+            color: white;
+            padding: 6px 12px;
+            border-radius: 4px;
+            margin-right: 4px;
+            font-size: 13px;
+        }
+
+        .mockup-controls button:hover {
+            background: #475569;
+        }
+
+        .mockup-controls button.active-state {
+            background: var(--accent-blue);
+        }
+
+        /* Dev Panel (Bottom Drawer) */
+        .dev-container {
+            display: none;
+            background-color: var(--bg-body);
+            color: var(--text-main);
+            border-top: 1px solid var(--border-color);
+            flex-shrink: 0;
+            flex-direction: column;
+            font-size: 0.85rem;
+        }
+
+        .dev-container.open {
+            display: flex;
+        }
+
+        .dev-header {
+            padding: 12px 24px;
+            background-color: var(--bg-canvas);
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-weight: 600;
+            color: var(--text-main);
+            letter-spacing: 0.5px;
+        }
+
+        .dev-close-btn {
+            background: none;
+            border: none;
+            color: var(--text-muted);
+            font-size: 1.25rem;
+            cursor: pointer;
+            padding: 4px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .dev-close-btn:hover {
+            color: var(--text-main);
+        }
+
+        .dev-layout {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+            background-color: var(--bg-canvas);
+        }
+
+        .dev-col {
+            flex: 1;
+            padding: 16px 24px;
+            overflow-y: auto;
+            border-right: 1px solid var(--border-color);
+            display: flex;
+            flex-direction: column;
+        }
+
+        .dev-col:last-child {
+            border-right: none;
+        }
+
+        .dev-label {
+            color: var(--text-muted);
+            margin-bottom: 4px;
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+        }
+
+        .dev-value-box {
+            background-color: var(--bg-body);
+            border: 1px solid var(--border-color);
+            padding: 6px 10px;
+            border-radius: 6px;
+            font-family: inherit;
+            margin-bottom: 12px;
+            word-break: break-all;
+            color: var(--text-main);
+            font-size: 0.8rem;
+        }
+
+        .dev-btn {
+            background-color: white;
+            color: var(--text-main);
+            border: 1px solid var(--border-color);
+            padding: 6px 16px;
+            border-radius: 6px;
+            font-size: 0.85rem;
+            font-weight: 500;
+            cursor: pointer;
+            margin-right: 8px;
+            transition: all 0.2s;
+        }
+
+        .dev-btn:hover {
+            background-color: var(--bg-body);
+        }
+
+        .dev-btn.primary {
+            background-color: var(--accent-blue);
+            color: white;
+            border-color: var(--accent-blue);
+        }
+
+        .dev-btn.primary:hover {
+            background-color: var(--accent-blue-hover);
+        }
+
+        /* The Terminal Log Box */
+        .dev-log {
+            font-family: monospace;
+            line-height: 1.4;
+            color: #cbd5e1;
+            background-color: #0f172a;
+            padding: 12px;
+            border-radius: 8px;
+            flex: 1;
+            /* Take remaining space */
+            overflow: auto;
+            /* Allow both scrollbars if really needed, but try to fit */
+            white-space: pre-wrap;
+            word-break: break-word;
+            /* Prevent horizontal scroll for long single words */
+            box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.1);
+            font-size: 0.8rem;
+        }
+
+        .dev-log .time {
+            color: #64748b;
+        }
+
+        .dev-log .error {
+            color: #f87171;
+        }
+
+        .dev-log .success {
+            color: #34d399;
+        }
+    </style>
+</head>
+
+<body data-state="idle">
+
+    <!-- ONLY FOR PREVIEWING DIFFERENT STATES -->
+    <div class="mockup-controls">
+        <div style="margin-bottom: 8px; font-weight: 600;">Mockup UI State:</div>
+        <button onclick="setState('idle')" id="btn-state-idle" class="active-state">1. IDLE</button>
+        <button onclick="setState('listening')" id="btn-state-listening">2. LISTENING</button>
+        <button onclick="setState('finished')" id="btn-state-finished">3. FINISHED</button>
+    </div>
+
+    <!-- Sidebar -->
+    <aside class="sidebar">
+        <div class="sidebar-brand">Omniscripta</div>
+        <nav>
+            <div class="nav-item">
+                <div class="nav-icon"
+                    style="mask: url('data:image/svg+xml;utf8,<svg xmlns=\'http://www.w3.org/2000/svg\' viewBox=\'0 0 24 24\'><path d=\'M9 16h6v-6h4l-7-7-7 7h4zm-4 2h14v2H5z\'/></svg>') center/cover; background-color: currentColor;">
+                </div>
+                Upload audio
+            </div>
+            <div class="nav-item active">
+                <div class="nav-icon"
+                    style="mask: url('data:image/svg+xml;utf8,<svg xmlns=\'http://www.w3.org/2000/svg\' viewBox=\'0 0 24 24\'><path d=\'M12 14c1.66 0 2.99-1.34 2.99-3L15 5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.3-3c0 3-2.54 5.1-5.3 5.1S6.7 14 6.7 11H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c3.28-.48 6-3.3 6-6.72h-1.7z\'/></svg>') center/cover; background-color: currentColor;">
+                </div>
+                Live recording
+            </div>
+            <div class="nav-item">
+                <div class="nav-icon"
+                    style="mask: url('data:image/svg+xml;utf8,<svg xmlns=\'http://www.w3.org/2000/svg\' viewBox=\'0 0 24 24\'><path d=\'M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z\'/></svg>') center/cover; background-color: currentColor;">
+                </div>
+                Open local project
+            </div>
+        </nav>
+    </aside>
+
+    <!-- Main Workspace -->
+    <main class="workspace">
+        <div class="canvas">
+
+            <div class="canvas-header">
+                <!-- Status Badge -->
+                <div class="status-badge status-idle" id="ui-status">Ready</div>
+            </div>
+
+            <!-- Transcript Content -->
+            <div class="transcript-area" id="ui-transcript">
+                <div class="placeholder-text" id="ui-placeholder">
+                    <div>
+                        <div style="margin-bottom: 16px; opacity: 0.5;">
+                            <!-- Mic icon outline -->
+                            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"></path>
+                                <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                                <line x1="12" y1="19" x2="12" y2="22"></line>
+                            </svg>
+                        </div>
+                        Click start to begin recording...
+                    </div>
+                </div>
+
+                <div id="ui-text-content" style="display: none;">
+                    <p>Andrew, I know you do a lot of vibe coding. How do you feel about how it has evolved? And
+                        particularly now, in some ways, I see a spirit of we can start with ideas instead of starting
+                        necessarily with code or technical specs.</p>
+                    <p style="margin-top: 16px;">I have very mixed feelings about the term vibe coding. I know it's
+                        taken off. Maybe it is determined...</p>
+
+                    <span class="live-chunk" id="ui-live-chunk" style="display: none;">
+                        Actually, it's quite fascinating how fast...
+                    </span>
+                </div>
+            </div>
+
+            <!-- Floating Controls -->
+            <div class="controls-container" id="ui-controls">
+
+                <div class="timer" id="ui-timer">00:00</div>
+
+                <div class="button-group">
+                    <button class="btn-primary-start" id="btn-start" title="Start Recording"></button>
+                    <button class="btn-secondary" id="btn-pause">Pause</button>
+                    <button class="btn-danger" id="btn-finish">Finish</button>
+                </div>
+
+                <div class="export-actions" id="ui-exports">
+                    <button class="btn-outline">Download WAV</button>
+                    <button class="btn-outline">Download SRT</button>
+                    <button class="btn-outline"
+                        style="color: var(--accent-red); margin-left: auto; border-color: transparent;">Clear
+                        transcript</button>
+                </div>
+
+            </div>
+
+            <!-- Bottom Right Dev Toggle -->
+            <button onclick="toggleDevPanel()" id="dev-toggle-btn"
+                style="position: absolute; bottom: 16px; right: 24px; color: var(--text-muted); font-size: 0.75rem; padding: 6px 10px; border-radius: 20px; background: #f1f5f9; display: flex; align-items: center; gap: 6px; border: 1px solid var(--border-color); box-shadow: 0 1px 2px rgba(0,0,0,0.05); z-index: 50; transition: all 0.2s;">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path
+                        d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z">
+                    </path>
+                    <polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline>
+                    <line x1="12" y1="22.08" x2="12" y2="12"></line>
+                </svg>
+                Dev Tools
+            </button>
+
+        </div>
+
+        <!-- Developer Tools Panel (Hidden by default) -->
+        <div class="dev-container" id="ui-dev-panel"
+            style="padding: 24px; background-color: var(--bg-canvas); border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03); margin-top: 24px; margin-bottom: 32px;">
+
+            <div
+                style="font-size: 0.85rem; font-weight: 700; color: #475569; letter-spacing: 0.5px; margin-bottom: 16px; display: flex; justify-content: space-between;">
+                DEV / FIXTURE TOOLS
+            </div>
+
+            <div style="display: flex; gap: 24px; align-items: flex-start;">
+
+                <!-- Left Column Controls -->
+                <div style="flex: 1; max-width: 300px;">
+                    <div style="font-size: 0.75rem; font-weight: 600; color: #64748b; margin-bottom: 8px;">SESSION ID
+                    </div>
+                    <div
+                        style="border: 1px solid #cbd5e1; border-radius: 6px; padding: 10px; font-family: monospace; font-size: 0.85rem; margin-bottom: 24px;">
+                        live_20260225T221853Z_3d6e53cb
+                    </div>
+
+                    <div style="font-size: 0.75rem; font-weight: 600; color: #64748b; margin-bottom: 8px;">FIXTURE (DEV)
+                    </div>
+                    <div
+                        style="border: 1px solid #cbd5e1; border-radius: 6px; padding: 0; margin-bottom: 16px; position: relative;">
+                        <select
+                            style="width: 100%; border: none; background: transparent; padding: 10px; font-family: inherit; font-size: 0.9rem; appearance: none; cursor: pointer;">
+                            <option>Panel discussion (120s) - v1</option>
+                        </select>
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                            style="position: absolute; right: 12px; top: 12px; width: 16px; height: 16px; pointer-events: none;">
+                            <path d="M6 9l6 6 6-6" />
+                        </svg>
+                    </div>
+
+                    <div style="display: flex; gap: 12px;">
+                        <button
+                            style="flex: 1; padding: 8px; border: 1px solid #cbd5e1; background: white; border-radius: 6px; font-weight: 500; cursor: pointer;">Play
+                            fixture</button>
+                        <button
+                            style="flex: 1; padding: 8px; border: 1px solid #cbd5e1; background: white; border-radius: 6px; font-weight: 500; cursor: pointer;">Inject
+                            fixture</button>
+                    </div>
+                </div>
+
+                <!-- Right Column Status Cards -->
+                <div style="flex: 2; display: flex; flex-direction: column; gap: 16px;">
+
+                    <div
+                        style="background-color: #f8f6f2; border: 1px solid #e5e3de; border-radius: 8px; padding: 16px;">
+                        <div style="font-size: 0.75rem; font-weight: 600; color: #64748b; margin-bottom: 8px;">STATUS /
+                            PROCESSING</div>
+                        <div style="font-size: 0.9rem; line-height: 1.5; color: #334155;">
+                            Processing state: Ready Chunks 10/10 (pending 0, failed 0) Transcript rev 32 Recording
+                            120.0s 2108 chars Chunk triggers: max_duration=10
+                        </div>
+                    </div>
+
+                    <div
+                        style="background-color: #f8f6f2; border: 1px solid #e5e3de; border-radius: 8px; padding: 16px;">
+                        <div style="font-size: 0.75rem; font-weight: 600; color: #64748b; margin-bottom: 8px;">FIXTURE
+                            QUALITY</div>
+                        <div style="font-size: 0.9rem; line-height: 1.5; color: #334155;">
+                            Upload Similarity Score: 92/100 (panel_120s_v1) Words: live 423 / ref 441 (0.959x), edit
+                            distance 34 Run: 10/10 chunks ready (failed 0, pending 0) | recording 120.0s | stop->ready
+                            0.01s Chunk reasons: max_duration=10 Dedup: chunks_applied=0 words_trimmed_total=0 ASR
+                            transcribe time: 4.88s (4.1% of recording) ASR pipeline time: 8.78s (7.3% of recording)
+                            Health: poll_errors=0 chunk_errors=0 finalization=ready
+                        </div>
+                    </div>
+
+                </div>
+
+            </div>
+        </div>
+    </main>
+
+    <script>
+        let devPanelOpen = true; // start open to match screenshot
+
+        function toggleDevPanel() {
+            devPanelOpen = !devPanelOpen;
+            const panel = document.getElementById('ui-dev-panel');
+
+            if (devPanelOpen) {
+                panel.style.display = 'block';
+            } else {
+                panel.style.display = 'none';
+            }
+        }
+
+        // Simple script to toggle states for the mockup presentation
+        function setState(state) {
+            // Update mockup control buttons
+            document.querySelectorAll('.mockup-controls button').forEach(b => b.classList.remove('active-state'));
+            document.getElementById('btn-state-' + state).classList.add('active-state');
+
+            const status = document.getElementById('ui-status');
+            const placeholder = document.getElementById('ui-placeholder');
+            const textContent = document.getElementById('ui-text-content');
+            const liveChunk = document.getElementById('ui-live-chunk');
+
+            const timer = document.getElementById('ui-timer');
+            const btnStart = document.getElementById('btn-start');
+            const btnPause = document.getElementById('btn-pause');
+            const btnFinish = document.getElementById('btn-finish');
+            const exports = document.getElementById('ui-exports');
+            const controls = document.getElementById('ui-controls');
+
+            // Reset classes
+            status.className = 'status-badge';
+
+            if (state === 'idle') {
+                status.classList.add('status-idle');
+                status.textContent = 'Ready';
+
+                placeholder.style.display = 'flex';
+                textContent.style.display = 'none';
+
+                timer.style.display = 'none';
+                btnStart.style.display = 'flex';
+                btnPause.style.display = 'none';
+                btnFinish.style.display = 'none';
+                exports.style.display = 'none';
+
+                controls.style.padding = '16px 24px';
+                timer.textContent = '00:00';
+            }
+            else if (state === 'listening') {
+                status.classList.add('status-listening');
+                status.textContent = 'Listening...';
+
+                placeholder.style.display = 'none';
+                textContent.style.display = 'block';
+                liveChunk.style.display = 'inline'; // Show pulsing text
+
+                timer.style.display = 'block';
+                btnStart.style.display = 'none';
+                btnPause.style.display = 'inline-flex';
+                btnFinish.style.display = 'inline-flex';
+                exports.style.display = 'none';
+
+                controls.style.padding = '16px 24px';
+
+                // Simulate time passing
+                timer.textContent = '00:31';
+            }
+            else if (state === 'finished') {
+                status.classList.add('status-finished');
+                status.textContent = 'Recording Saved';
+
+                placeholder.style.display = 'none';
+                textContent.style.display = 'block';
+                liveChunk.style.display = 'none'; // text is final
+
+                timer.style.display = 'none';
+                btnStart.style.display = 'none';
+                btnPause.style.display = 'none';
+                btnFinish.style.display = 'none';
+                exports.style.display = 'flex';
+
+                controls.style.padding = '24px 32px'; // Wider for exports
+            }
+        }
+    </script>
+</body>
+
+</html>

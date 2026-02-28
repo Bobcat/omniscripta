@@ -272,6 +272,12 @@ class PersistentWhisperxRunner:
     align_enabled = bool(resolved.get("align_enabled", True))
     diarize_enabled = bool(resolved.get("diarize_enabled", False))
     initial_prompt = str(resolved.get("initial_prompt") or "").strip() or None
+    beam_size_override: int | None = None
+    try:
+      if resolved.get("beam_size") is not None:
+        beam_size_override = max(1, int(resolved.get("beam_size")))
+    except Exception:
+      beam_size_override = None
     if diarize_enabled:
       return {
         "schema_version": "asr_v1",
@@ -303,18 +309,26 @@ class PersistentWhisperxRunner:
     t0 = time.monotonic()
     initial_prompt_applied = False
     initial_prompt_unsupported = False
+    beam_override_applied = False
+    beam_override_unsupported = False
     with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
       audio_arr = whisperx.load_audio(str(local_path))
       try:
         current_opts = getattr(self.asr_model, "options", None)  # type: ignore[union-attr]
         if current_opts is not None:
-          self.asr_model.options = dataclass_replace(current_opts, initial_prompt=initial_prompt)  # type: ignore[union-attr]
+          replace_kwargs: dict[str, Any] = {"initial_prompt": initial_prompt}
+          if beam_size_override is not None:
+            replace_kwargs["beam_size"] = int(beam_size_override)
+          self.asr_model.options = dataclass_replace(current_opts, **replace_kwargs)  # type: ignore[union-attr]
           initial_prompt_applied = bool(initial_prompt is not None)
+          beam_override_applied = bool(beam_size_override is not None)
         elif initial_prompt is not None:
           initial_prompt_unsupported = True
       except Exception:
         if initial_prompt is not None:
           initial_prompt_unsupported = True
+        if beam_size_override is not None:
+          beam_override_unsupported = True
       transcribe_kwargs: dict[str, Any] = {
         "batch_size": int(self.cfg.get("batch_size", 3) or 3),
         "chunk_size": int(self.cfg.get("chunk_size", 30) or 30),
@@ -403,6 +417,8 @@ class PersistentWhisperxRunner:
       "device": str(self.cfg.get("device") or ""),
       "model": str(self.cfg.get("model") or ""),
       "initial_prompt_applied": bool(initial_prompt_applied),
+      "beam_size_override_applied": bool(beam_override_applied),
+      "beam_size_override": (int(beam_size_override) if beam_size_override is not None else None),
     }
     if aligner_reused is not None:
       runtime["aligner_reused"] = bool(aligner_reused)
@@ -416,7 +432,10 @@ class PersistentWhisperxRunner:
       "result": result_obj,
       "timings": timings,
       "runtime": runtime,
-      "warnings": (["initial_prompt_unsupported_by_asr_pipeline"] if initial_prompt_unsupported else []),
+      "warnings": (
+        (["initial_prompt_unsupported_by_asr_pipeline"] if initial_prompt_unsupported else [])
+        + (["beam_size_override_unsupported_by_asr_pipeline"] if beam_override_unsupported else [])
+      ),
     }
 
   def shutdown(self) -> None:

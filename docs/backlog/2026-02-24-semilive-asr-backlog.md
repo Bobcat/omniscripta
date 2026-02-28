@@ -4,6 +4,11 @@
 
 Working backlog (ordered draft)
 
+## Gerelateerde uitwerking
+
+- Concrete uitvoering voor schaalbare centrale ASR pool:
+  - `docs/backlog/2026-02-28-asr-runtime-pool-v1-implementation-plan.md`
+
 ## Doel
 
 Compact overzicht van wat we al weten dat we willen, maar nog niet hebben, voor:

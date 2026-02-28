@@ -1,0 +1,368 @@
+openapi: 3.0.3
+info:
+  title: ASR Runtime Pool API
+  version: "1.0.0"
+  description: |
+    HTTP/JSON binding for ASR runtime pool lifecycle around the existing `asr_v1` contract payload.
+    Request content remains compatible with `docs/contracts/asr_service_v1.md`.
+servers:
+  - url: http://127.0.0.1:8090
+    description: Local/internal example
+security:
+  - AsrToken: []
+tags:
+  - name: requests
+  - name: pool
+paths:
+  /asr/v1/requests:
+    post:
+      tags: [requests]
+      operationId: submitAsrRequest
+      summary: Submit an ASR request
+      description: |
+        Creates (or reuses) a request by `request_id`.
+        Idempotency rules:
+        - Same `request_id` + same payload: returns existing request lifecycle.
+        - Same `request_id` + different payload: returns `409`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AsrRequestV1"
+      responses:
+        "202":
+          description: Accepted and queued (new request)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AsrLifecycleResponse"
+        "200":
+          description: Existing lifecycle returned (idempotent replay)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AsrLifecycleResponse"
+        "409":
+          description: Conflicting payload for same `request_id`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "429":
+          description: Queue/backpressure rejection
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+              examples:
+                queue_full:
+                  summary: Priority queue full
+                  value:
+                    code: ASR_QUEUE_FULL
+                    message: interactive queue depth limit reached
+                    retryable: true
+                    details:
+                      priority: interactive
+                      queue_depth: 8
+                      queue_limit: 8
+  /asr/v1/requests/{request_id}:
+    get:
+      tags: [requests]
+      operationId: getAsrRequest
+      summary: Get request status/result
+      parameters:
+        - in: path
+          name: request_id
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Request lifecycle and optional final response payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AsrLifecycleResponse"
+        "404":
+          description: Unknown request id
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+  /asr/v1/requests/{request_id}/cancel:
+    post:
+      tags: [requests]
+      operationId: cancelAsrRequest
+      summary: Cancel request
+      description: |
+        Cancel semantics:
+        - queued -> `cancelled`
+        - running -> `cancel_requested` (soft cancel, no hard kill in v1)
+        - completed/failed/cancelled -> no-op success
+      parameters:
+        - in: path
+          name: request_id
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Cancel accepted or no-op
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CancelResponse"
+        "404":
+          description: Unknown request id
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+  /asr/v1/pool:
+    get:
+      tags: [pool]
+      operationId: getPoolStatus
+      summary: Get runtime pool status and queue metrics
+      responses:
+        "200":
+          description: Pool status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PoolStatusResponse"
+components:
+  securitySchemes:
+    AsrToken:
+      type: apiKey
+      in: header
+      name: X-ASR-Token
+  schemas:
+    AsrRequestV1:
+      type: object
+      required:
+        - schema_version
+        - request_id
+        - profile_id
+        - audio
+      properties:
+        schema_version:
+          type: string
+          enum: ["asr_v1"]
+        request_id:
+          type: string
+        profile_id:
+          type: string
+        priority:
+          type: string
+          enum: [interactive, normal, background]
+          default: normal
+        audio:
+          $ref: "#/components/schemas/AudioInput"
+        options:
+          type: object
+          additionalProperties: true
+        context:
+          type: object
+          additionalProperties: true
+        outputs:
+          $ref: "#/components/schemas/OutputsRequest"
+    AudioInput:
+      type: object
+      properties:
+        local_path:
+          type: string
+        inline_base64:
+          type: string
+        blob_ref:
+          type: string
+        sample_rate_hz:
+          type: integer
+        channels:
+          type: integer
+        format:
+          type: string
+        duration_ms:
+          type: integer
+    OutputsRequest:
+      type: object
+      properties:
+        text:
+          type: boolean
+          default: true
+        segments:
+          type: boolean
+          default: true
+        srt:
+          type: boolean
+          default: true
+        srt_inline:
+          type: boolean
+          default: false
+        word_timestamps:
+          type: boolean
+          default: false
+    AsrLifecycleResponse:
+      type: object
+      required:
+        - request_id
+        - state
+      properties:
+        request_id:
+          type: string
+        state:
+          type: string
+          enum:
+            - queued
+            - running
+            - cancel_requested
+            - cancelled
+            - completed
+            - failed
+        profile_id:
+          type: string
+        priority:
+          type: string
+          enum: [interactive, normal, background]
+        queue_position:
+          type: integer
+          nullable: true
+        submitted_at_utc:
+          type: string
+        started_at_utc:
+          type: string
+          nullable: true
+        finished_at_utc:
+          type: string
+          nullable: true
+        retryable:
+          type: boolean
+          nullable: true
+        response:
+          description: Final `asr_v1` response payload when state is completed/failed.
+          oneOf:
+            - $ref: "#/components/schemas/AsrResponseV1"
+            - type: "null"
+        error:
+          oneOf:
+            - $ref: "#/components/schemas/ApiError"
+            - type: "null"
+    AsrResponseV1:
+      type: object
+      required:
+        - schema_version
+        - request_id
+        - ok
+        - profile_id
+      properties:
+        schema_version:
+          type: string
+          enum: ["asr_v1"]
+        request_id:
+          type: string
+        ok:
+          type: boolean
+        profile_id:
+          type: string
+        resolved_options:
+          type: object
+          additionalProperties: true
+        result:
+          type: object
+          nullable: true
+          additionalProperties: true
+        error:
+          type: object
+          nullable: true
+          additionalProperties: true
+        warnings:
+          type: array
+          items:
+            type: string
+        timings:
+          type: object
+          additionalProperties: true
+        runtime:
+          type: object
+          additionalProperties: true
+    CancelResponse:
+      type: object
+      required:
+        - request_id
+        - state
+      properties:
+        request_id:
+          type: string
+        state:
+          type: string
+          enum:
+            - cancel_requested
+            - cancelled
+            - completed
+            - failed
+        message:
+          type: string
+    PoolStatusResponse:
+      type: object
+      properties:
+        service:
+          type: string
+          example: asr-runtime-pool
+        version:
+          type: string
+        now_utc:
+          type: string
+        slots_total:
+          type: integer
+        slots_busy:
+          type: integer
+        slots_available:
+          type: integer
+        slots_by_priority:
+          type: object
+          additionalProperties:
+            type: integer
+        queue_limits:
+          type: object
+          additionalProperties:
+            type: integer
+        queue_depth:
+          type: object
+          additionalProperties:
+            type: integer
+        request_timeouts_s:
+          type: object
+          additionalProperties:
+            type: integer
+        queue_wait_ms_p95:
+          type: object
+          additionalProperties:
+            type: number
+        blob_fetch_ms_p95:
+          type: number
+          nullable: true
+        scheduling_policy:
+          type: object
+          properties:
+            interactive_final_first:
+              type: boolean
+            speculative_mode:
+              type: string
+              description: |
+                v1 uses metadata-based distinction (`live_lane=final|speculative`)
+                within interactive priority.
+    ApiError:
+      type: object
+      required:
+        - code
+        - message
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        retryable:
+          type: boolean
+        details:
+          type: object
+          additionalProperties: true

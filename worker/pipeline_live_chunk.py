@@ -65,6 +65,7 @@ def run_live_chunk_job(*, job: Any, job_cfg: dict[str, Any]) -> None:
   initial_prompt = str(opts.get("initial_prompt") or "")
   if not initial_prompt.strip():
     initial_prompt = ""
+  beam_size = opts.get("beam_size")
 
   _write_status(
     job.status_path,
@@ -116,6 +117,11 @@ def run_live_chunk_job(*, job: Any, job_cfg: dict[str, Any]) -> None:
   }
   if initial_prompt:
     raw_request["options"]["initial_prompt"] = initial_prompt
+  if beam_size is not None:
+    try:
+      raw_request["options"]["beam_size"] = max(1, int(beam_size))
+    except Exception:
+      pass
 
   try:
     request = prepare_request(raw_request)

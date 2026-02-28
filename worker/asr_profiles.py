@@ -17,6 +17,7 @@ _KNOWN_OPTION_KEYS = {
   "speaker_mode",
   "min_speakers",
   "max_speakers",
+  "beam_size",
   "initial_prompt",
   "timestamps_mode",
 }
@@ -33,6 +34,7 @@ _PROFILES: dict[str, dict[str, Any]] = {
     "allowed_overrides": {
       "language",
       "align_enabled",
+      "beam_size",
       "initial_prompt",
     },
   },
@@ -48,6 +50,7 @@ _PROFILES: dict[str, dict[str, Any]] = {
       "max_speakers",
       "diarize_enabled",
       "align_enabled",
+      "beam_size",
       "initial_prompt",
       "timestamps_mode",
     },
@@ -83,6 +86,11 @@ def _normalize_resolved_options(obj: dict[str, Any]) -> dict[str, Any]:
         out[k] = int(out[k])
       except Exception:
         out[k] = None
+  if "beam_size" in out and out["beam_size"] is not None:
+    try:
+      out["beam_size"] = max(1, int(out["beam_size"]))
+    except Exception:
+      out["beam_size"] = 5
   if "timestamps_mode" in out and out["timestamps_mode"] is not None:
     tm = str(out["timestamps_mode"]).strip().lower()
     if tm not in {"segment", "word", "none"}:
