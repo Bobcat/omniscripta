@@ -206,6 +206,17 @@ class LiveSessionManager:
             for arc in ordered[:overflow]:
                 self._archives.pop(arc.session_id, None)
 
+    def get_max_sessions(self) -> int:
+        with self._lock:
+            return int(max(1, int(self._max_sessions)))
+
+    def set_max_sessions(self, max_sessions: int) -> int:
+        safe = int(max(1, int(max_sessions)))
+        with self._lock:
+            prev = int(max(1, int(self._max_sessions)))
+            self._max_sessions = safe
+            return prev
+
     def create_session(self, *, ttl_seconds: int | None = None) -> dict[str, Any]:
         now_unix = time.time()
         now_mono = time.monotonic()

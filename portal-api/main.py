@@ -8,6 +8,7 @@ import mimetypes
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any, Dict
 from urllib.parse import urlparse, parse_qs
 
@@ -26,13 +27,17 @@ from live_protocol import (
 from live_chunker import LiveAudioChunker, LiveChunkerConfig
 from live_chunk_transcribe import LiveChunkBatchBridge
 from live_recordings import LiveWavRecorder
-from live_quality import score_semilive_text_against_fixture
+from live_quality import score_semilive_text_against_fixture, load_fixture_reference
 from live_sessions import LiveSessionManager
+from speculative_quality import score_speculative_history_against_final, score_speculative_history_against_reference
+import speculative_tuning_runner
+import asr_loadtest_runner
 from queue_fs import init_job_in_inbox, JobPaths, BASE as BASE_JOBS
 
 ROOT_PATH = os.getenv("TRANSCRIBE_ROOT_PATH", "/api")
 app = FastAPI(root_path=ROOT_PATH)
 LIVE_RECORDINGS_ROOT = (Path(__file__).resolve().parents[1] / "data" / "live_recordings").resolve()
+LIVE_BENCHMARK_EXPORT_ROOT = (Path(__file__).resolve().parents[1] / "data" / "live_benchmark_exports").resolve()
 
 
 DEFAULT_CALIBRATION_SNIPPET_SECONDS = [60, 180, 300, 480, 600, 1200, 1800, 2700, 3600]
@@ -43,6 +48,8 @@ LIVE_ARCHIVE_TTL_S = int(os.getenv("TRANSCRIBE_LIVE_ARCHIVE_TTL_S", "3600"))
 LIVE_MAX_ARCHIVES = int(os.getenv("TRANSCRIBE_LIVE_MAX_ARCHIVES", "256"))
 LIVE_AUDIO_SAMPLE_RATE_HZ = int(os.getenv("TRANSCRIBE_LIVE_SAMPLE_RATE_HZ", "16000"))
 LIVE_AUDIO_CHANNELS = int(os.getenv("TRANSCRIBE_LIVE_CHANNELS", "1"))
+LIVE_AUDIO_SAMPLE_WIDTH_BYTES = 2
+LIVE_AUDIO_BYTES_PER_SECOND = int(max(1, LIVE_AUDIO_SAMPLE_RATE_HZ * LIVE_AUDIO_CHANNELS * LIVE_AUDIO_SAMPLE_WIDTH_BYTES))
 LIVE_SEMILIVE_CHUNK_BATCH_SHADOW = str(os.getenv("TRANSCRIBE_LIVE_SEMILIVE_CHUNK_BATCH_SHADOW", "1")).strip().lower() in {
     "1",
     "true",
@@ -113,6 +120,14 @@ LIVE_SEMILIVE_INITIAL_PROMPT_ENABLED = str(
     "yes",
     "on",
 }
+LIVE_SEMILIVE_SPECULATIVE_INITIAL_PROMPT_ENABLED = str(
+    os.getenv("TRANSCRIBE_LIVE_SEMILIVE_SPECULATIVE_INITIAL_PROMPT_ENABLED", "1")
+).strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 LIVE_SEMILIVE_INITIAL_PROMPT_TAIL_WORDS = max(
     1,
     int(str(os.getenv("TRANSCRIBE_LIVE_SEMILIVE_INITIAL_PROMPT_TAIL_WORDS", "30")).strip() or "30"),
@@ -125,6 +140,45 @@ LIVE_SEMILIVE_INITIAL_PROMPT_MAX_CHARS = max(
     0,
     int(str(os.getenv("TRANSCRIBE_LIVE_SEMILIVE_INITIAL_PROMPT_MAX_CHARS", "400")).strip() or "400"),
 )
+LIVE_SEMILIVE_SPECULATIVE_ENABLED = str(
+    os.getenv("TRANSCRIBE_LIVE_SEMILIVE_SPECULATIVE_ENABLED", "0")
+).strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+LIVE_SEMILIVE_SPECULATIVE_INTERVAL_MS = max(
+    200,
+    int(str(os.getenv("TRANSCRIBE_LIVE_SEMILIVE_SPECULATIVE_INTERVAL_MS", "1800")).strip() or "1800"),
+)
+LIVE_SEMILIVE_SPECULATIVE_WINDOW_MS = max(
+    LIVE_SEMILIVE_SPECULATIVE_INTERVAL_MS,
+    int(str(os.getenv("TRANSCRIBE_LIVE_SEMILIVE_SPECULATIVE_WINDOW_MS", "3000")).strip() or "3000"),
+)
+LIVE_SEMILIVE_SPECULATIVE_OVERLAP_MS = max(
+    0,
+    int(str(os.getenv("TRANSCRIBE_LIVE_SEMILIVE_SPECULATIVE_OVERLAP_MS", "800")).strip() or "800"),
+)
+LIVE_SEMILIVE_SPECULATIVE_MAX_STALENESS_MS = max(
+    0,
+    int(str(os.getenv("TRANSCRIBE_LIVE_SEMILIVE_SPECULATIVE_MAX_STALENESS_MS", "1200")).strip() or "1200"),
+)
+LIVE_SEMILIVE_SPECULATIVE_REQUIRE_NO_FINAL_PENDING = str(
+    os.getenv("TRANSCRIBE_LIVE_SEMILIVE_SPECULATIVE_REQUIRE_NO_FINAL_PENDING", "1")
+).strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+LIVE_SEMILIVE_FINAL_BEAM_SIZE_OVERRIDE = max(
+    0,
+    int(str(os.getenv("TRANSCRIBE_LIVE_SEMILIVE_FINAL_BEAM_SIZE_OVERRIDE", "0")).strip() or "0"),
+)
+LIVE_SWEEP_WS_BASE_URL = (str(os.getenv("TRANSCRIBE_LIVE_SWEEP_WS_BASE_URL", "ws://127.0.0.1:8001")) or "").strip()
+ASR_POOL_STATUS_URL = (str(os.getenv("TRANSCRIBE_ASR_POOL_STATUS_URL", "http://127.0.0.1:8090/asr/v1/pool")) or "").strip()
+ASR_POOL_TOKEN = (str(os.getenv("TRANSCRIBE_ASR_POOL_TOKEN", "")) or "").strip()
 LIVE_SESSIONS = LiveSessionManager(
     default_ttl_seconds=LIVE_SESSION_TTL_S,
     preconnect_ttl_seconds=LIVE_SESSION_PRECONNECT_TTL_S,
@@ -269,7 +323,9 @@ def get_live_session_quality(session_id: str, fixture_id: str | None = None) -> 
         raise HTTPException(status_code=404, detail="Live session result not found")
 
     finalization_state = str(result.get("finalization_state") or "").strip().lower()
-    if finalization_state not in {"ready", "finalized", "recording_finalized"}:
+    # `recording_finalized` means mic stopped; chunk processing may still be in flight.
+    # Only score once the transcript is fully ready/finalized.
+    if finalization_state not in {"ready", "finalized"}:
         raise HTTPException(status_code=409, detail="Transcript result not ready")
 
     resolved_fixture_id = str(fixture_id or result.get("fixture_id") or "").strip()
@@ -292,13 +348,102 @@ def get_live_session_quality(session_id: str, fixture_id: str | None = None) -> 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"quality_score_failed:{type(e).__name__}")
 
-    return {
+    envelope = {
         "protocol_version": PROTOCOL_VERSION,
         "session_id": str(session_id),
         "fixture_id": resolved_fixture_id,
         "ready": True,
         "quality": quality,
     }
+    _try_autosave_live_benchmark_snapshot(
+        session_id=str(session_id),
+        artifact_name="final-quality",
+        envelope=envelope,
+    )
+    _try_autosave_speculative_lane_trace(str(session_id))
+    return envelope
+
+
+@app.get("/demo/live/sessions/{session_id}/speculative-quality")
+def get_live_session_speculative_quality(
+    session_id: str,
+    verbose: bool = False,
+    fixture_id: str | None = None,
+) -> Dict[str, Any]:
+    try:
+        history = LIVE_SESSIONS.semilive_speculative_history_snapshot(session_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Live session speculative history not found")
+
+    quality = score_speculative_history_against_final(
+        speculative_history=history,
+        verbose=bool(verbose),
+    )
+    envelope = {
+        "protocol_version": PROTOCOL_VERSION,
+        "session_id": str(session_id),
+        "ready": True,
+        "speculative_quality": quality,
+    }
+    resolved_fixture_id = str(fixture_id or "").strip()
+    if not resolved_fixture_id:
+        try:
+            semilive_result = LIVE_SESSIONS.semilive_result_snapshot(session_id)
+            resolved_fixture_id = str((semilive_result or {}).get("fixture_id") or "").strip()
+        except Exception:
+            resolved_fixture_id = ""
+    if resolved_fixture_id:
+        try:
+            fixture = load_fixture_reference(resolved_fixture_id)
+            ref_text = str(fixture.get("reference_text") or "")
+            vs_ref = score_speculative_history_against_reference(
+                speculative_history=history,
+                reference_text=ref_text,
+                verbose=bool(verbose),
+            )
+            envelope["speculative_quality_vs_reference"] = vs_ref
+            envelope["fixture_id"] = str(resolved_fixture_id)
+        except Exception:
+            pass
+    _try_autosave_live_benchmark_snapshot(
+        session_id=str(session_id),
+        artifact_name="speculative-quality",
+        envelope=envelope,
+        request_meta={"verbose": bool(verbose), "fixture_id": str(resolved_fixture_id or "")},
+    )
+    return envelope
+
+
+@app.post("/demo/live/speculative-tuning/run")
+async def start_live_speculative_tuning_run(request: Request) -> Dict[str, Any]:
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    _configure_speculative_tuning_runner()
+    return await speculative_tuning_runner.start_run(payload if isinstance(payload, dict) else {})
+
+
+@app.get("/demo/live/speculative-tuning/report/{run_id}")
+def get_live_speculative_tuning_report(run_id: str) -> Dict[str, Any]:
+    _configure_speculative_tuning_runner()
+    return speculative_tuning_runner.get_report(run_id)
+
+
+@app.post("/demo/live/asr-loadtest/run")
+async def start_live_asr_loadtest_run(request: Request) -> Dict[str, Any]:
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    _configure_asr_loadtest_runner()
+    return await asr_loadtest_runner.start_run(payload if isinstance(payload, dict) else {})
+
+
+@app.get("/demo/live/asr-loadtest/report/{run_id}")
+def get_live_asr_loadtest_report(run_id: str) -> Dict[str, Any]:
+    _configure_asr_loadtest_runner()
+    return asr_loadtest_runner.get_report(run_id)
 
 
 @app.get("/demo/live/sessions/{session_id}/transcript.txt")
@@ -390,6 +535,35 @@ async def live_session_ws(session_id: str, websocket: WebSocket) -> None:
     semilive_shadow_disabled_reason = ""
     semilive_recording_finalized = False
     semilive_chunker_snapshot: dict[str, Any] = {}
+    semilive_speculative_enabled = bool(LIVE_SEMILIVE_SPECULATIVE_ENABLED and semilive_chunk_jobs_enabled)
+    semilive_speculative_jobs_pending: dict[int, dict[str, Any]] = {}
+    semilive_speculative_last_emit_mono = 0.0
+    semilive_speculative_last_poll_mono = 0.0
+    semilive_speculative_seq_next = 0
+    semilive_speculative_recent_pcm = bytearray()
+    semilive_speculative_effective_window_ms = int(
+        max(
+            LIVE_SEMILIVE_SPECULATIVE_WINDOW_MS,
+            LIVE_SEMILIVE_SPECULATIVE_INTERVAL_MS + LIVE_SEMILIVE_SPECULATIVE_OVERLAP_MS,
+        )
+    )
+    semilive_speculative_recent_pcm_max_bytes = int(
+        max(
+            LIVE_AUDIO_SAMPLE_WIDTH_BYTES,
+            round(((semilive_speculative_effective_window_ms + 1000) / 1000.0) * LIVE_AUDIO_BYTES_PER_SECOND),
+        )
+    )
+    if (semilive_speculative_recent_pcm_max_bytes % LIVE_AUDIO_SAMPLE_WIDTH_BYTES) != 0:
+        semilive_speculative_recent_pcm_max_bytes += (
+            LIVE_AUDIO_SAMPLE_WIDTH_BYTES - (semilive_speculative_recent_pcm_max_bytes % LIVE_AUDIO_SAMPLE_WIDTH_BYTES)
+        )
+    semilive_speculative_metrics: dict[str, Any] = {
+        "enqueued": 0,
+        "shown": 0,
+        "dropped_busy": 0,
+        "dropped_stale": 0,
+        "time_to_first_speculative_ms": None,
+    }
 
     async def send_event(payload: Dict[str, Any]) -> None:
         payload = dict(payload)
@@ -465,6 +639,27 @@ async def live_session_ws(session_id: str, websocket: WebSocket) -> None:
             )
         except Exception:
             pass
+        if semilive_speculative_enabled:
+            try:
+                LIVE_SESSIONS.update_semilive_speculative_metrics(
+                    session_id,
+                    enqueued=int(max(0, int(semilive_speculative_metrics.get("enqueued") or 0))),
+                    shown=int(max(0, int(semilive_speculative_metrics.get("shown") or 0))),
+                    dropped_busy=int(max(0, int(semilive_speculative_metrics.get("dropped_busy") or 0))),
+                    dropped_stale=int(max(0, int(semilive_speculative_metrics.get("dropped_stale") or 0))),
+                    time_to_first_speculative_ms=(
+                        int(semilive_speculative_metrics.get("time_to_first_speculative_ms"))
+                        if semilive_speculative_metrics.get("time_to_first_speculative_ms") is not None
+                        else None
+                    ),
+                )
+            except Exception:
+                pass
+            if str(semilive_finalization_state or "").strip().lower() in {"ready", "error", "finalized"}:
+                try:
+                    LIVE_SESSIONS.clear_semilive_speculative_preview(session_id)
+                except Exception:
+                    pass
 
     def _build_semilive_initial_prompt() -> tuple[str, dict[str, Any]]:
         if not LIVE_SEMILIVE_INITIAL_PROMPT_ENABLED:
@@ -512,6 +707,278 @@ async def live_session_ws(session_id: str, websocket: WebSocket) -> None:
             "source_words": int(source_words),
             "transcript_revision": int(max(0, int(result.get("transcript_revision") or 0))),
         }
+
+    def _append_speculative_pcm(raw_bytes: bytes) -> None:
+        nonlocal semilive_speculative_recent_pcm
+        if not semilive_speculative_enabled:
+            return
+        raw = bytes(raw_bytes or b"")
+        if not raw:
+            return
+        if (len(raw) % LIVE_AUDIO_SAMPLE_WIDTH_BYTES) != 0:
+            raw = raw[: len(raw) - (len(raw) % LIVE_AUDIO_SAMPLE_WIDTH_BYTES)]
+        if not raw:
+            return
+        semilive_speculative_recent_pcm.extend(raw)
+        overflow = len(semilive_speculative_recent_pcm) - int(max(0, semilive_speculative_recent_pcm_max_bytes))
+        if overflow > 0:
+            if (overflow % LIVE_AUDIO_SAMPLE_WIDTH_BYTES) != 0:
+                overflow += LIVE_AUDIO_SAMPLE_WIDTH_BYTES - (overflow % LIVE_AUDIO_SAMPLE_WIDTH_BYTES)
+            del semilive_speculative_recent_pcm[:overflow]
+
+    async def _maybe_enqueue_speculative_job() -> None:
+        nonlocal semilive_speculative_last_emit_mono, semilive_speculative_seq_next
+        if not semilive_speculative_enabled or chunk_bridge is None:
+            return
+        if semilive_recording_finalized or str(semilive_recording_state or "") != "recording":
+            return
+        now_mono = time.monotonic()
+        interval_s = max(0.2, float(LIVE_SEMILIVE_SPECULATIVE_INTERVAL_MS) / 1000.0)
+        if (now_mono - semilive_speculative_last_emit_mono) < interval_s:
+            return
+        if semilive_speculative_jobs_pending:
+            semilive_speculative_last_emit_mono = now_mono
+            semilive_speculative_metrics["dropped_busy"] = int(
+                max(0, int(semilive_speculative_metrics.get("dropped_busy") or 0)) + 1
+            )
+            return
+        if LIVE_SEMILIVE_SPECULATIVE_REQUIRE_NO_FINAL_PENDING and (
+            semilive_chunk_jobs_pending or semilive_chunk_jobs_to_enqueue
+        ):
+            semilive_speculative_last_emit_mono = now_mono
+            semilive_speculative_metrics["dropped_busy"] = int(
+                max(0, int(semilive_speculative_metrics.get("dropped_busy") or 0)) + 1
+            )
+            return
+        end_ms = int(max(0, semilive_recording_duration_ms))
+        if end_ms <= 0 or not semilive_speculative_recent_pcm:
+            return
+        want_bytes = int(
+            max(
+                LIVE_AUDIO_SAMPLE_WIDTH_BYTES,
+                round((float(semilive_speculative_effective_window_ms) / 1000.0) * LIVE_AUDIO_BYTES_PER_SECOND),
+            )
+        )
+        if (want_bytes % LIVE_AUDIO_SAMPLE_WIDTH_BYTES) != 0:
+            want_bytes += LIVE_AUDIO_SAMPLE_WIDTH_BYTES - (want_bytes % LIVE_AUDIO_SAMPLE_WIDTH_BYTES)
+        use_bytes = min(len(semilive_speculative_recent_pcm), want_bytes)
+        if (use_bytes % LIVE_AUDIO_SAMPLE_WIDTH_BYTES) != 0:
+            use_bytes -= use_bytes % LIVE_AUDIO_SAMPLE_WIDTH_BYTES
+        min_bytes = int(max(LIVE_AUDIO_SAMPLE_WIDTH_BYTES, LIVE_AUDIO_BYTES_PER_SECOND * 0.5))
+        if use_bytes < min_bytes:
+            return
+        pcm = bytes(semilive_speculative_recent_pcm[-use_bytes:])
+        actual_ms = int(round((float(use_bytes) / float(LIVE_AUDIO_BYTES_PER_SECOND)) * 1000.0))
+        t1_ms = int(end_ms)
+        t0_ms = int(max(0, t1_ms - max(1, actual_ms)))
+        spec_seq = int(max(0, semilive_speculative_seq_next))
+        if LIVE_SEMILIVE_SPECULATIVE_INITIAL_PROMPT_ENABLED:
+            initial_prompt, initial_prompt_meta = _build_semilive_initial_prompt()
+        else:
+            initial_prompt = ""
+            initial_prompt_meta = {
+                "enabled": False,
+                "used": False,
+                "reason": "disabled_for_speculative_lane",
+            }
+        try:
+            enq = await asyncio.to_thread(
+                chunk_bridge.enqueue_chunk_pcm16,
+                session_id=session_id,
+                chunk_index=spec_seq,
+                t0_ms=t0_ms,
+                t1_ms=t1_ms,
+                pcm16le=pcm,
+                language=LIVE_SEMILIVE_CHUNK_LANGUAGE,
+                initial_prompt=initial_prompt,
+                live_lane="speculative",
+                speculative_seq=spec_seq,
+                speculative_audio_end_ms=t1_ms,
+            )
+        except Exception as e:
+            _append_semilive_log(
+                "semilive_speculative_enqueue_error",
+                speculative_seq=spec_seq,
+                error=f"{type(e).__name__}: {e}",
+            )
+            return
+        semilive_speculative_seq_next = spec_seq + 1
+        semilive_speculative_last_emit_mono = now_mono
+        semilive_speculative_jobs_pending[spec_seq] = {
+            "speculative_seq": spec_seq,
+            "job_id": str(enq.job_id),
+            "t0_ms": int(t0_ms),
+            "t1_ms": int(t1_ms),
+            "audio_end_ms": int(t1_ms),
+            "reported_state": "",
+            "enqueued_mono": now_mono,
+        }
+        semilive_speculative_metrics["enqueued"] = int(max(0, int(semilive_speculative_metrics.get("enqueued") or 0)) + 1)
+        _append_semilive_log(
+            "semilive_speculative_enqueued",
+            speculative_seq=spec_seq,
+            job_id=str(enq.job_id),
+            t0_ms=int(t0_ms),
+            t1_ms=int(t1_ms),
+            audio_bytes=int(len(pcm)),
+            window_ms=int(max(0, t1_ms - t0_ms)),
+            initial_prompt_meta=dict(initial_prompt_meta) if isinstance(initial_prompt_meta, dict) else {},
+        )
+
+    async def _poll_speculative_jobs(*, force: bool = False) -> None:
+        nonlocal semilive_speculative_last_poll_mono
+        if not semilive_speculative_enabled or chunk_bridge is None:
+            return
+        now_mono = time.monotonic()
+        if not force and (now_mono - semilive_speculative_last_poll_mono) < LIVE_SEMILIVE_CHUNK_POLL_INTERVAL_S:
+            return
+        semilive_speculative_last_poll_mono = now_mono
+        for spec_seq in sorted(list(semilive_speculative_jobs_pending.keys())):
+            item = semilive_speculative_jobs_pending.get(spec_seq)
+            if not item:
+                continue
+            job_id = str(item.get("job_id") or "")
+            t0_ms = int(item.get("t0_ms") or 0)
+            enqueued_mono = float(item.get("enqueued_mono") or 0.0)
+            if not job_id:
+                continue
+            try:
+                poll = await asyncio.to_thread(
+                    chunk_bridge.poll_job,
+                    job_id,
+                    t0_offset_ms=t0_ms,
+                )
+            except FileNotFoundError:
+                continue
+            except Exception as e:
+                _append_semilive_log(
+                    "semilive_speculative_poll_error",
+                    speculative_seq=int(spec_seq),
+                    job_id=job_id,
+                    error=f"{type(e).__name__}: {e}",
+                )
+                semilive_speculative_jobs_pending.pop(spec_seq, None)
+                continue
+
+            poll_state = "ready" if poll.ok else ("error" if poll.done else str(poll.state or "queued"))
+            if str(item.get("reported_state") or "") != poll_state:
+                item["reported_state"] = poll_state
+                if poll_state == "ready":
+                    status_obj = dict(poll.status) if isinstance(poll.status, dict) else {}
+                    def _status_int(name: str) -> int | None:
+                        if name not in status_obj or status_obj.get(name) is None:
+                            return None
+                        try:
+                            return int(max(0, int(status_obj.get(name))))
+                        except Exception:
+                            return None
+                    def _status_float(name: str) -> float | None:
+                        if name not in status_obj or status_obj.get(name) is None:
+                            return None
+                        try:
+                            return max(0.0, float(status_obj.get(name)))
+                        except Exception:
+                            return None
+                    wait_ms = None
+                    if enqueued_mono > 0.0:
+                        try:
+                            wait_ms = int(max(0, round((time.monotonic() - enqueued_mono) * 1000.0)))
+                        except Exception:
+                            wait_ms = None
+                    audio_end_ms = int(max(0, int(item.get("audio_end_ms") or 0)))
+                    final_covered_ms = 0
+                    try:
+                        final_snapshot = LIVE_SESSIONS.semilive_result_snapshot(session_id)
+                        final_covered_ms = int(max(0, int((final_snapshot or {}).get("final_covered_ms") or 0)))
+                    except Exception:
+                        final_covered_ms = 0
+                    staleness_ms = int(
+                        max(0, int(semilive_recording_duration_ms) - audio_end_ms)
+                    )
+                    stale_by_final = bool(audio_end_ms > 0 and final_covered_ms >= audio_end_ms)
+                    stale_by_cursor = bool(
+                        (LIVE_SEMILIVE_SPECULATIVE_MAX_STALENESS_MS > 0)
+                        and (staleness_ms > int(LIVE_SEMILIVE_SPECULATIVE_MAX_STALENESS_MS))
+                        and not semilive_recording_finalized
+                        and final_covered_ms <= 0
+                    )
+                    stale = bool(stale_by_final or stale_by_cursor)
+                    if stale:
+                        semilive_speculative_metrics["dropped_stale"] = int(
+                            max(0, int(semilive_speculative_metrics.get("dropped_stale") or 0)) + 1
+                        )
+                        _append_semilive_log(
+                            "semilive_speculative_dropped_stale",
+                            speculative_seq=int(spec_seq),
+                            job_id=job_id,
+                            staleness_ms=int(max(0, staleness_ms)),
+                            final_covered_ms=int(max(0, final_covered_ms)),
+                            stale_reason=("final_covered" if stale_by_final else "live_cursor"),
+                            text_chars=len(str(poll.text or "")),
+                        )
+                    else:
+                        semilive_speculative_metrics["shown"] = int(
+                            max(0, int(semilive_speculative_metrics.get("shown") or 0)) + 1
+                        )
+                        if semilive_speculative_metrics.get("time_to_first_speculative_ms") is None:
+                            semilive_speculative_metrics["time_to_first_speculative_ms"] = int(
+                                max(0, int(item.get("audio_end_ms") or 0))
+                            )
+                        try:
+                            LIVE_SESSIONS.update_semilive_speculative_preview(
+                                session_id,
+                                text=str(poll.text or ""),
+                                speculative_seq=int(spec_seq),
+                                audio_end_ms=int(max(0, int(item.get("audio_end_ms") or 0))),
+                            )
+                        except Exception:
+                            pass
+                        try:
+                            LIVE_SESSIONS.update_semilive_speculative_metrics(
+                                session_id,
+                                enqueued=int(max(0, int(semilive_speculative_metrics.get("enqueued") or 0))),
+                                shown=int(max(0, int(semilive_speculative_metrics.get("shown") or 0))),
+                                dropped_busy=int(max(0, int(semilive_speculative_metrics.get("dropped_busy") or 0))),
+                                dropped_stale=int(max(0, int(semilive_speculative_metrics.get("dropped_stale") or 0))),
+                                time_to_first_speculative_ms=(
+                                    int(semilive_speculative_metrics.get("time_to_first_speculative_ms"))
+                                    if semilive_speculative_metrics.get("time_to_first_speculative_ms") is not None
+                                    else None
+                                ),
+                            )
+                        except Exception:
+                            pass
+                        _append_semilive_log(
+                            "semilive_speculative_ready",
+                            speculative_seq=int(spec_seq),
+                            job_id=job_id,
+                            staleness_ms=int(max(0, staleness_ms)),
+                            final_covered_ms=int(max(0, final_covered_ms)),
+                            text_chars=len(str(poll.text or "")),
+                            segments_count=len(poll.segments or []),
+                            wait_ms=(int(wait_ms) if wait_ms is not None else None),
+                            remote_submit_attempts=_status_int("asr_remote_submit_attempts"),
+                            remote_status_attempts_total=_status_int("asr_remote_status_attempts_total"),
+                            remote_status_http_calls=_status_int("asr_remote_status_http_calls"),
+                            remote_cancel_attempts=_status_int("asr_remote_cancel_attempts"),
+                            blob_fetch_ms=_status_float("asr_blob_fetch_ms"),
+                        )
+                elif poll_state == "error":
+                    _append_semilive_log(
+                        "semilive_speculative_error",
+                        speculative_seq=int(spec_seq),
+                        job_id=job_id,
+                        error=str(poll.error or ""),
+                        status={"state": poll.state, "ok": poll.ok, "done": poll.done},
+                    )
+            if poll.done:
+                semilive_speculative_jobs_pending.pop(spec_seq, None)
+
+    async def _process_semilive_speculative_jobs(*, force_poll: bool = False) -> None:
+        if not semilive_speculative_enabled:
+            return
+        await _maybe_enqueue_speculative_job()
+        await _poll_speculative_jobs(force=force_poll)
 
     def _ingest_closed_chunks(chunks: list[Any]) -> None:
         nonlocal semilive_chunks_total, semilive_chunk_index_next, semilive_chunker_snapshot
@@ -563,7 +1030,20 @@ async def live_session_ws(session_id: str, websocket: WebSocket) -> None:
         text: str = "",
         segments: list[dict[str, Any]] | None = None,
         error: str = "",
+        chunk_meta: dict[str, Any] | None = None,
+        job_status: dict[str, Any] | None = None,
     ) -> None:
+        meta = chunk_meta if isinstance(chunk_meta, dict) else {}
+        status_obj = job_status if isinstance(job_status, dict) else {}
+
+        def _parse_status_float(name: str) -> float | None:
+            if name not in status_obj or status_obj.get(name) is None:
+                return None
+            try:
+                return max(0.0, float(status_obj.get(name)))
+            except Exception:
+                return None
+
         try:
             result = LIVE_SESSIONS.record_semilive_chunk_result(
                 session_id,
@@ -574,6 +1054,14 @@ async def live_session_ws(session_id: str, websocket: WebSocket) -> None:
                 segments=segments,
                 state=str(state or "ready"),
                 error=str(error or ""),
+                reason=str(meta.get("reason") or ""),
+                speech_frames=(int(meta.get("speech_frames")) if meta.get("speech_frames") is not None else None),
+                silence_frames_tail=(
+                    int(meta.get("silence_frames_tail")) if meta.get("silence_frames_tail") is not None else None
+                ),
+                chunk_duration_ms=(int(meta.get("duration_ms")) if meta.get("duration_ms") is not None else None),
+                asr_pipeline_time_s=_parse_status_float("asr_timing_whisperx_total_s"),
+                asr_transcribe_time_s=_parse_status_float("asr_timing_whisperx_transcribe_s"),
             )
             _sync_semilive_counts_from_result(result)
             _update_semilive_session_state()
@@ -599,6 +1087,11 @@ async def live_session_ws(session_id: str, websocket: WebSocket) -> None:
             initial_prompt, initial_prompt_meta = _build_semilive_initial_prompt()
             if semilive_finalization_state not in {"error"}:
                 semilive_finalization_state = "processing_chunks"
+            final_beam_override = (
+                int(max(1, int(LIVE_SEMILIVE_FINAL_BEAM_SIZE_OVERRIDE)))
+                if int(max(0, int(LIVE_SEMILIVE_FINAL_BEAM_SIZE_OVERRIDE or 0))) > 0
+                else None
+            )
             try:
                 enq = await asyncio.to_thread(
                     chunk_bridge.enqueue_chunk_pcm16,
@@ -608,6 +1101,7 @@ async def live_session_ws(session_id: str, websocket: WebSocket) -> None:
                     t1_ms=t1_ms,
                     pcm16le=bytes(getattr(chunk, "pcm16le", b"") or b""),
                     language=LIVE_SEMILIVE_CHUNK_LANGUAGE,
+                    asr_beam_size=final_beam_override,
                     initial_prompt=initial_prompt,
                 )
                 semilive_chunk_jobs_pending[chunk_index] = {
@@ -628,11 +1122,15 @@ async def live_session_ws(session_id: str, websocket: WebSocket) -> None:
                     t0_ms=t0_ms,
                     t1_ms=t1_ms,
                     state="queued",
+                    chunk_meta=dict(chunk_meta) if isinstance(chunk_meta, dict) else None,
                 )
                 _append_semilive_log(
                     "semilive_chunk_enqueued",
                     chunk=dict(chunk_meta) if isinstance(chunk_meta, dict) else {"chunk_index": chunk_index},
                     job=enq.to_dict(),
+                    final_beam_size_override=(
+                        int(final_beam_override) if final_beam_override is not None else None
+                    ),
                     initial_prompt_meta=dict(initial_prompt_meta) if isinstance(initial_prompt_meta, dict) else {},
                 )
             except Exception as e:
@@ -644,6 +1142,7 @@ async def live_session_ws(session_id: str, websocket: WebSocket) -> None:
                     t1_ms=t1_ms,
                     state="error",
                     error=f"{type(e).__name__}: {e}",
+                    chunk_meta=dict(chunk_meta) if isinstance(chunk_meta, dict) else None,
                 )
                 _append_semilive_log(
                     "semilive_chunk_enqueue_error",
@@ -672,6 +1171,8 @@ async def live_session_ws(session_id: str, websocket: WebSocket) -> None:
             t0_ms = int(item.get("t0_ms") or 0)
             t1_ms = int(item.get("t1_ms") or t0_ms)
             job_id = str(item.get("job_id") or "")
+            enqueued_mono = float(item.get("enqueued_mono") or 0.0)
+            chunk_meta = item.get("chunk_meta") if isinstance(item.get("chunk_meta"), dict) else None
             if not job_id:
                 continue
             try:
@@ -690,6 +1191,7 @@ async def live_session_ws(session_id: str, websocket: WebSocket) -> None:
                     t1_ms=t1_ms,
                     state="error",
                     error=f"{type(e).__name__}: {e}",
+                    chunk_meta=chunk_meta,
                 )
                 semilive_chunk_jobs_pending.pop(chunk_index, None)
                 semilive_shadow_disabled_reason = f"chunk_poll_failed:{type(e).__name__}"
@@ -706,6 +1208,27 @@ async def live_session_ws(session_id: str, websocket: WebSocket) -> None:
             if str(item.get("reported_state") or "") != poll_state:
                 item["reported_state"] = poll_state
                 if poll_state == "ready":
+                    status_obj = dict(poll.status) if isinstance(poll.status, dict) else {}
+                    def _status_int(name: str) -> int | None:
+                        if name not in status_obj or status_obj.get(name) is None:
+                            return None
+                        try:
+                            return int(max(0, int(status_obj.get(name))))
+                        except Exception:
+                            return None
+                    def _status_float(name: str) -> float | None:
+                        if name not in status_obj or status_obj.get(name) is None:
+                            return None
+                        try:
+                            return max(0.0, float(status_obj.get(name)))
+                        except Exception:
+                            return None
+                    wait_ms = None
+                    if enqueued_mono > 0.0:
+                        try:
+                            wait_ms = int(max(0, round((time.monotonic() - enqueued_mono) * 1000.0)))
+                        except Exception:
+                            wait_ms = None
                     await _record_semilive_chunk_job_state(
                         chunk_index=chunk_index,
                         t0_ms=t0_ms,
@@ -713,6 +1236,8 @@ async def live_session_ws(session_id: str, websocket: WebSocket) -> None:
                         state="ready",
                         text=str(poll.text or ""),
                         segments=[dict(seg) for seg in (poll.segments or []) if isinstance(seg, dict)],
+                        chunk_meta=chunk_meta,
+                        job_status=dict(poll.status) if isinstance(poll.status, dict) else None,
                     )
                     _append_semilive_log(
                         "semilive_chunk_ready",
@@ -721,6 +1246,12 @@ async def live_session_ws(session_id: str, websocket: WebSocket) -> None:
                         status={"state": poll.state, "ok": poll.ok, "done": poll.done},
                         text_chars=len(str(poll.text or "")),
                         segments_count=len(poll.segments or []),
+                        wait_ms=(int(wait_ms) if wait_ms is not None else None),
+                        remote_submit_attempts=_status_int("asr_remote_submit_attempts"),
+                        remote_status_attempts_total=_status_int("asr_remote_status_attempts_total"),
+                        remote_status_http_calls=_status_int("asr_remote_status_http_calls"),
+                        remote_cancel_attempts=_status_int("asr_remote_cancel_attempts"),
+                        blob_fetch_ms=_status_float("asr_blob_fetch_ms"),
                     )
                 elif poll_state == "error":
                     await _record_semilive_chunk_job_state(
@@ -729,6 +1260,8 @@ async def live_session_ws(session_id: str, websocket: WebSocket) -> None:
                         t1_ms=t1_ms,
                         state="error",
                         error=str(poll.error or f"job_state:{poll.state}"),
+                        chunk_meta=chunk_meta,
+                        job_status=dict(poll.status) if isinstance(poll.status, dict) else None,
                     )
                     _append_semilive_log(
                         "semilive_chunk_error",
@@ -743,6 +1276,8 @@ async def live_session_ws(session_id: str, websocket: WebSocket) -> None:
                         t0_ms=t0_ms,
                         t1_ms=t1_ms,
                         state=poll_state,
+                        chunk_meta=chunk_meta,
+                        job_status=dict(poll.status) if isinstance(poll.status, dict) else None,
                     )
             item["state"] = poll_state
             if poll.done:
@@ -877,6 +1412,20 @@ async def live_session_ws(session_id: str, websocket: WebSocket) -> None:
                 "semilive_shadow_started",
                 recording=rec_snap.to_dict(),
                 chunk_jobs_enabled=bool(semilive_chunk_jobs_enabled),
+                speculative_enabled=bool(semilive_speculative_enabled),
+                speculative_config={
+                    "interval_ms": int(LIVE_SEMILIVE_SPECULATIVE_INTERVAL_MS),
+                    "window_ms": int(LIVE_SEMILIVE_SPECULATIVE_WINDOW_MS),
+                    "overlap_ms": int(LIVE_SEMILIVE_SPECULATIVE_OVERLAP_MS),
+                    "effective_window_ms": int(semilive_speculative_effective_window_ms),
+                    "max_staleness_ms": int(LIVE_SEMILIVE_SPECULATIVE_MAX_STALENESS_MS),
+                    "require_no_final_pending": bool(LIVE_SEMILIVE_SPECULATIVE_REQUIRE_NO_FINAL_PENDING),
+                    "final_beam_size_override": (
+                        int(max(1, int(LIVE_SEMILIVE_FINAL_BEAM_SIZE_OVERRIDE)))
+                        if int(max(0, int(LIVE_SEMILIVE_FINAL_BEAM_SIZE_OVERRIDE or 0))) > 0
+                        else None
+                    ),
+                },
                 chunker_config=chunker.config.__dict__,
                 chunker_snapshot=dict(semilive_chunker_snapshot),
             )
@@ -939,7 +1488,9 @@ async def live_session_ws(session_id: str, websocket: WebSocket) -> None:
                         )
                         chunker = None
                         _update_semilive_session_state()
+                _append_speculative_pcm(raw_bytes)
                 await _process_semilive_chunk_jobs(force_poll=False)
+                await _process_semilive_speculative_jobs(force_poll=False)
                 # Emit transport + semilive stats at startup and periodically.
                 should_emit_stats = (
                     snapshot["frames_received"] == 1
@@ -964,6 +1515,23 @@ async def live_session_ws(session_id: str, websocket: WebSocket) -> None:
                         semilive_chunk_jobs_enabled=bool(semilive_chunk_jobs_enabled),
                         semilive_chunk_jobs_pending=int(max(0, len(semilive_chunk_jobs_pending))),
                         semilive_chunk_jobs_to_enqueue=int(max(0, len(semilive_chunk_jobs_to_enqueue))),
+                        semilive_speculative_enabled=bool(semilive_speculative_enabled),
+                        semilive_speculative_pending=int(max(0, len(semilive_speculative_jobs_pending))),
+                        semilive_speculative_enqueued=int(
+                            max(0, int(semilive_speculative_metrics.get("enqueued") or 0))
+                        ),
+                        semilive_speculative_shown=int(max(0, int(semilive_speculative_metrics.get("shown") or 0))),
+                        semilive_speculative_dropped_busy=int(
+                            max(0, int(semilive_speculative_metrics.get("dropped_busy") or 0))
+                        ),
+                        semilive_speculative_dropped_stale=int(
+                            max(0, int(semilive_speculative_metrics.get("dropped_stale") or 0))
+                        ),
+                        semilive_time_to_first_speculative_ms=(
+                            int(semilive_speculative_metrics.get("time_to_first_speculative_ms"))
+                            if semilive_speculative_metrics.get("time_to_first_speculative_ms") is not None
+                            else None
+                        ),
                         semilive_shadow_disabled_reason=str(semilive_shadow_disabled_reason or ""),
                         semilive_chunker_chunk_open=bool(semilive_chunker_snapshot.get("chunk_open")),
                         semilive_chunker_active_chunk_duration_ms=int(
@@ -1112,6 +1680,73 @@ async def live_session_ws(session_id: str, websocket: WebSocket) -> None:
                 recorder.abort()
             except Exception:
                 pass
+
+
+def _get_speculative_timing_runtime() -> dict[str, int]:
+    return {
+        "interval_ms": int(max(200, int(LIVE_SEMILIVE_SPECULATIVE_INTERVAL_MS))),
+        "window_ms": int(max(200, int(LIVE_SEMILIVE_SPECULATIVE_WINDOW_MS))),
+        "overlap_ms": int(max(0, int(LIVE_SEMILIVE_SPECULATIVE_OVERLAP_MS))),
+    }
+
+
+def _set_speculative_timing_runtime(*, interval_ms: int, window_ms: int, overlap_ms: int) -> dict[str, int]:
+    global LIVE_SEMILIVE_SPECULATIVE_INTERVAL_MS
+    global LIVE_SEMILIVE_SPECULATIVE_WINDOW_MS
+    global LIVE_SEMILIVE_SPECULATIVE_OVERLAP_MS
+    prev = _get_speculative_timing_runtime()
+    LIVE_SEMILIVE_SPECULATIVE_INTERVAL_MS = int(max(200, int(interval_ms)))
+    LIVE_SEMILIVE_SPECULATIVE_WINDOW_MS = int(max(LIVE_SEMILIVE_SPECULATIVE_INTERVAL_MS, int(window_ms)))
+    LIVE_SEMILIVE_SPECULATIVE_OVERLAP_MS = int(max(0, int(overlap_ms)))
+    return prev
+
+
+def _set_final_beam_override_runtime(*, final_beam_size: int | None) -> int:
+    global LIVE_SEMILIVE_FINAL_BEAM_SIZE_OVERRIDE
+    prev = int(max(0, int(LIVE_SEMILIVE_FINAL_BEAM_SIZE_OVERRIDE or 0)))
+    if final_beam_size is None:
+        LIVE_SEMILIVE_FINAL_BEAM_SIZE_OVERRIDE = 0
+    else:
+        LIVE_SEMILIVE_FINAL_BEAM_SIZE_OVERRIDE = int(max(1, int(final_beam_size)))
+    return prev
+
+
+def _configure_speculative_tuning_runner() -> None:
+    speculative_tuning_runner.configure(
+        protocol_version=PROTOCOL_VERSION,
+        repo_root=_repo_root(),
+        live_benchmark_export_root=LIVE_BENCHMARK_EXPORT_ROOT,
+        live_sessions=LIVE_SESSIONS,
+        rooted_path_cb=_rooted_path,
+        autosave_snapshot_cb=_try_autosave_live_benchmark_snapshot,
+        autosave_spec_trace_cb=_try_autosave_speculative_lane_trace,
+        get_spec_timing_cb=_get_speculative_timing_runtime,
+        set_spec_timing_cb=_set_speculative_timing_runtime,
+        set_final_beam_override_cb=_set_final_beam_override_runtime,
+        live_audio_sample_width_bytes=LIVE_AUDIO_SAMPLE_WIDTH_BYTES,
+        live_audio_bytes_per_second=LIVE_AUDIO_BYTES_PER_SECOND,
+        semilive_chunk_stop_wait_s=LIVE_SEMILIVE_CHUNK_STOP_WAIT_S,
+        semilive_chunk_post_close_wait_s=LIVE_SEMILIVE_CHUNK_POST_CLOSE_WAIT_S,
+        ws_base_url=LIVE_SWEEP_WS_BASE_URL,
+    )
+
+
+def _configure_asr_loadtest_runner() -> None:
+    asr_loadtest_runner.configure(
+        protocol_version=PROTOCOL_VERSION,
+        repo_root=_repo_root(),
+        live_benchmark_export_root=LIVE_BENCHMARK_EXPORT_ROOT,
+        live_sessions=LIVE_SESSIONS,
+        rooted_path_cb=_rooted_path,
+        autosave_snapshot_cb=_try_autosave_live_benchmark_snapshot,
+        ws_base_url=LIVE_SWEEP_WS_BASE_URL,
+        live_audio_sample_width_bytes=LIVE_AUDIO_SAMPLE_WIDTH_BYTES,
+        live_audio_bytes_per_second=LIVE_AUDIO_BYTES_PER_SECOND,
+        semilive_chunk_stop_wait_s=LIVE_SEMILIVE_CHUNK_STOP_WAIT_S,
+        semilive_chunk_post_close_wait_s=LIVE_SEMILIVE_CHUNK_POST_CLOSE_WAIT_S,
+        asr_pool_status_url=ASR_POOL_STATUS_URL,
+        asr_pool_token=ASR_POOL_TOKEN,
+    )
 
 
 def _repo_root() -> Path:
@@ -1307,6 +1942,236 @@ def _safe_filename(name: str) -> str:
     return Path(name).name or "upload.bin"
 
 
+def _write_json_atomic(path: Path, obj: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _append_jsonl(path: Path, obj: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(obj, ensure_ascii=False) + "\n"
+    with path.open("a", encoding="utf-8") as f:
+        f.write(line)
+
+
+def _autosave_live_benchmark_snapshot(
+    *,
+    session_id: str,
+    artifact_name: str,
+    envelope: Dict[str, Any],
+    request_meta: Dict[str, Any] | None = None,
+) -> None:
+    safe_session_id = _safe_filename(str(session_id or "session"))
+    artifact = _safe_filename(str(artifact_name or "benchmark"))
+    now_ts = time.time()
+    now_iso = _iso_utc(now_ts)
+    root = LIVE_BENCHMARK_EXPORT_ROOT
+
+    record: Dict[str, Any] = {
+        "saved_at_utc": now_iso,
+        "saved_at_unix": round(float(now_ts), 6),
+        "session_id": str(session_id or ""),
+        "artifact_name": artifact_name,
+        "request_meta": dict(request_meta or {}),
+        "payload": envelope,
+    }
+
+    latest_path = (root / f"{safe_session_id}.{artifact}.latest.json").resolve()
+    history_path = (root / f"{safe_session_id}.{artifact}.history.jsonl").resolve()
+
+    _write_json_atomic(latest_path, record)
+    _append_jsonl(history_path, record)
+
+
+def _try_autosave_live_benchmark_snapshot(
+    *,
+    session_id: str,
+    artifact_name: str,
+    envelope: Dict[str, Any],
+    request_meta: Dict[str, Any] | None = None,
+) -> None:
+    try:
+        _autosave_live_benchmark_snapshot(
+            session_id=session_id,
+            artifact_name=artifact_name,
+            envelope=envelope,
+            request_meta=request_meta,
+        )
+    except Exception as e:
+        print(f"[live-benchmark-autosave] failed {artifact_name} session={session_id}: {type(e).__name__}: {e}")
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return int(default)
+
+
+def _build_speculative_lane_trace(
+    *,
+    session_id: str,
+    speculative_history: Dict[str, Any],
+) -> Dict[str, Any]:
+    history = speculative_history if isinstance(speculative_history, dict) else {}
+    windows_src = history.get("speculative_windows")
+    windows = [dict(w) for w in windows_src] if isinstance(windows_src, list) else []
+    open_window_src = history.get("speculative_open_window")
+    open_window = [dict(x) for x in open_window_src] if isinstance(open_window_src, list) else []
+
+    trace_windows: list[Dict[str, Any]] = []
+    timeline_rows: list[Dict[str, Any]] = []
+
+    for w in windows:
+        window_index = int(max(0, _safe_int(w.get("window_index"), 0)))
+        final_chunk_raw = str(w.get("target_final_chunk_text_raw") or "")
+        final_chunk_effective = str(w.get("target_final_chunk_text_effective") or "")
+        final_chunk_rendered = final_chunk_effective or final_chunk_raw
+        final_row = {
+            "row_type": "final_chunk",
+            "window_index": int(window_index),
+            "text": final_chunk_rendered,
+            "raw_text": final_chunk_raw,
+            "effective_text": final_chunk_effective,
+            "ended_by_final_chunk_index": (
+                int(max(0, _safe_int(w.get("ended_by_final_chunk_index"), 0)))
+                if w.get("ended_by_final_chunk_index") is not None
+                else None
+            ),
+            "ended_by_final_t1_ms": (
+                int(max(0, _safe_int(w.get("ended_by_final_t1_ms"), 0)))
+                if w.get("ended_by_final_t1_ms") is not None
+                else None
+            ),
+        }
+
+        timeline_rows.append(dict(final_row))
+        item_rows: list[Dict[str, Any]] = []
+        items_src = w.get("items")
+        items = [dict(item) for item in items_src] if isinstance(items_src, list) else []
+        for item_index, item in enumerate(items, start=1):
+            seq = int(max(-1, _safe_int(item.get("speculative_seq"), -1)))
+            audio_end_ms = int(max(0, _safe_int(item.get("audio_end_ms"), 0)))
+            raw_text = str(item.get("raw_text") or "")
+            suffix_text = str(item.get("suffix_text_after_final_dedup") or "")
+            merged_text = str(item.get("merged_text_after_seam_dedup") or "")
+            raw_row = {
+                "row_type": "raw_speculative",
+                "window_index": int(window_index),
+                "item_index": int(item_index),
+                "speculative_seq": int(seq),
+                "audio_end_ms": int(audio_end_ms),
+                "text": raw_text,
+            }
+            suffix_row = {
+                "row_type": "suffix_speculative",
+                "window_index": int(window_index),
+                "item_index": int(item_index),
+                "speculative_seq": int(seq),
+                "audio_end_ms": int(audio_end_ms),
+                "text": suffix_text,
+            }
+            timeline_rows.append(dict(raw_row))
+            timeline_rows.append(dict(suffix_row))
+            item_rows.append(
+                {
+                    "item_index": int(item_index),
+                    "speculative_seq": int(seq),
+                    "audio_end_ms": int(audio_end_ms),
+                    "raw_text": raw_text,
+                    "suffix_text": suffix_text,
+                    "merged_text": merged_text,
+                    "seam_dedup_applied": bool(item.get("seam_dedup_applied")),
+                    "seam_dedup_words_trimmed": int(max(0, _safe_int(item.get("seam_dedup_words_trimmed"), 0))),
+                    "final_dedup_applied": bool(item.get("final_dedup_applied")),
+                    "final_dedup_words_trimmed": int(max(0, _safe_int(item.get("final_dedup_words_trimmed"), 0))),
+                    "received_at_utc": str(item.get("received_at_utc") or ""),
+                }
+            )
+
+        trace_windows.append(
+            {
+                "window_index": int(window_index),
+                "started_at_revision": int(max(0, _safe_int(w.get("started_at_revision"), 0))),
+                "ended_by_final_revision": (
+                    int(max(0, _safe_int(w.get("ended_by_final_revision"), 0)))
+                    if w.get("ended_by_final_revision") is not None
+                    else None
+                ),
+                "close_reason": str(w.get("close_reason") or ""),
+                "items_count": int(len(item_rows)),
+                "final_chunk": final_row,
+                "speculative_items": item_rows,
+            }
+        )
+
+    open_window_rows: list[Dict[str, Any]] = []
+    for item_index, item in enumerate(open_window, start=1):
+        seq = int(max(-1, _safe_int(item.get("speculative_seq"), -1)))
+        audio_end_ms = int(max(0, _safe_int(item.get("audio_end_ms"), 0)))
+        raw_text = str(item.get("raw_text") or "")
+        suffix_text = str(item.get("suffix_text_after_final_dedup") or "")
+        open_window_rows.append(
+            {
+                "item_index": int(item_index),
+                "speculative_seq": int(seq),
+                "audio_end_ms": int(audio_end_ms),
+                "raw_text": raw_text,
+                "suffix_text": suffix_text,
+                "merged_text": str(item.get("merged_text_after_seam_dedup") or ""),
+            }
+        )
+
+    return {
+        "metric_version": "speculative_lane_trace_v1",
+        "session_id": str(session_id or ""),
+        "history_source": str(history.get("source") or ""),
+        "finalization_state": str(history.get("finalization_state") or ""),
+        "transcript_revision": int(max(0, _safe_int(history.get("transcript_revision"), 0))),
+        "windows_count": int(len(trace_windows)),
+        "timeline_rows_count": int(len(timeline_rows)),
+        "windows": trace_windows,
+        "timeline_rows": timeline_rows,
+        "open_window": {
+            "window_index": int(max(0, _safe_int(history.get("speculative_open_window_index"), 0))),
+            "started_at_revision": int(max(0, _safe_int(history.get("speculative_open_window_started_revision"), 0))),
+            "items_count": int(len(open_window_rows)),
+            "items": open_window_rows,
+        },
+    }
+
+
+def _try_autosave_speculative_lane_trace(session_id: str) -> None:
+    sid = str(session_id or "").strip()
+    if not sid:
+        return
+    try:
+        history = LIVE_SESSIONS.semilive_speculative_history_snapshot(sid)
+    except Exception:
+        return
+    try:
+        trace = _build_speculative_lane_trace(
+            session_id=sid,
+            speculative_history=history,
+        )
+        trace_envelope = {
+            "protocol_version": PROTOCOL_VERSION,
+            "session_id": sid,
+            "ready": True,
+            "speculative_lane_trace": trace,
+        }
+        _try_autosave_live_benchmark_snapshot(
+            session_id=sid,
+            artifact_name="speculative-lane-trace",
+            envelope=trace_envelope,
+            request_meta={"source": "final-quality"},
+        )
+    except Exception as e:
+        print(f"[speculative-lane-trace-autosave] failed session={sid}: {type(e).__name__}: {e}")
+
+
 def _find_job_dir(job_id: str) -> Path | None:
     for state in ("inbox", "running", "done", "error"):
         d = BASE_JOBS / state / job_id
@@ -1425,46 +2290,62 @@ def create_demo_job(
     calibration_enabled = _calibration_requested(request)
     calibration_seconds = _parse_calibration_seconds_env() if calibration_enabled else []
 
-    # Primary job (the one returned to frontend)
-    jp: JobPaths = init_job_in_inbox(
-        orig_filename=orig_name,
-        options=dict(base_options),
-        job_kind="upload_audio",
-    )
-
-    # Schrijf upload naar job upload/
-    dst_primary = jp.upload_dir / orig_name
+    staging_dir = (BASE_JOBS / "_staging_uploads").resolve()
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    staged_upload_path: Path | None = None
     try:
-        with dst_primary.open("wb") as f:
-            shutil.copyfileobj(file.file, f)
+        with NamedTemporaryFile(prefix="upload_", suffix=".bin", dir=str(staging_dir), delete=False) as tmp_f:
+            shutil.copyfileobj(file.file, tmp_f)
+            staged_upload_path = Path(tmp_f.name).resolve()
     finally:
         file.file.close()
 
-    extra_job_ids: list[str] = []
-    extra_failed: list[str] = []
-    if calibration_enabled:
-        sec_list = list(calibration_seconds)
-        if snippet_seconds_override is not None:
-            sec_list = [s for s in sec_list if int(s) != int(snippet_seconds_override)]
-        for sec in sec_list:
-            try:
-                opts = dict(base_options)
-                opts["snippet_seconds"] = int(sec)
-                extra = init_job_in_inbox(orig_filename=orig_name, options=opts, job_kind="upload_audio")
-                dst_extra = extra.upload_dir / orig_name
-                shutil.copy2(dst_primary, dst_extra)
-                extra_job_ids.append(extra.job_id)
-            except Exception as e:
-                extra_failed.append(f"{sec}s:{type(e).__name__}")
+    if staged_upload_path is None or not staged_upload_path.exists():
+        raise HTTPException(status_code=500, detail="Failed to stage upload file")
 
-    return {
-        "job_id": jp.job_id,
-        "state": "queued",
-        "calibration_enqueued": len(extra_job_ids),
-        "calibration_seconds": calibration_seconds if calibration_enabled else [],
-        "calibration_failed": extra_failed,
-        "snippet_seconds": base_options.get("snippet_seconds"),
-    }
+    try:
+        # Primary job (the one returned to frontend)
+        jp: JobPaths = init_job_in_inbox(
+            orig_filename=orig_name,
+            options=dict(base_options),
+            job_kind="upload_audio",
+            upload_src_path=staged_upload_path,
+        )
+        dst_primary = jp.upload_dir / orig_name
+
+        extra_job_ids: list[str] = []
+        extra_failed: list[str] = []
+        if calibration_enabled:
+            sec_list = list(calibration_seconds)
+            if snippet_seconds_override is not None:
+                sec_list = [s for s in sec_list if int(s) != int(snippet_seconds_override)]
+            for sec in sec_list:
+                try:
+                    opts = dict(base_options)
+                    opts["snippet_seconds"] = int(sec)
+                    extra = init_job_in_inbox(
+                        orig_filename=orig_name,
+                        options=opts,
+                        job_kind="upload_audio",
+                        upload_src_path=dst_primary,
+                    )
+                    extra_job_ids.append(extra.job_id)
+                except Exception as e:
+                    extra_failed.append(f"{sec}s:{type(e).__name__}")
+
+        return {
+            "job_id": jp.job_id,
+            "state": "queued",
+            "calibration_enqueued": len(extra_job_ids),
+            "calibration_seconds": calibration_seconds if calibration_enabled else [],
+            "calibration_failed": extra_failed,
+            "snippet_seconds": base_options.get("snippet_seconds"),
+        }
+    finally:
+        try:
+            staged_upload_path.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 @app.get("/demo/jobs/{job_id}")

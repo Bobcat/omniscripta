@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import shutil
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -59,6 +60,7 @@ def init_job_in_inbox(
     orig_filename: str,
     options: Dict[str, Any],
     job_kind: str = "upload_audio",
+    upload_src_path: str | Path | None = None,
 ) -> JobPaths:
     """
     Maakt een jobfolder in INBOX via:
@@ -124,6 +126,15 @@ def init_job_in_inbox(
 
     # Maak lege log
     log_path.write_text("", encoding="utf-8")
+
+    # Optional: stage upload into tmp job dir before publish.
+    # This prevents worker race conditions where a claimed job has no upload file yet.
+    if upload_src_path is not None:
+        src = Path(str(upload_src_path)).resolve()
+        if not src.exists():
+            raise FileNotFoundError(f"Upload source missing: {src}")
+        dst = (upload_dir / str(orig_filename)).resolve()
+        shutil.copy2(src, dst)
 
     # Atomic publish: tmp -> final
     os.replace(tmp_dir, final_dir)

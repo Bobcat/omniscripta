@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import socket
 import threading
 import time
@@ -20,12 +21,9 @@ from phase_topics_llm import run_topics_llm
 from phase_topics_parse import parse_topics_raw_file
 from phase_topics_validate import validate_all_chunks
 from phase_topics_merge import merge_topics
-from phase_whisperx import _load_server_config
 from pipeline_live_chunk import run_live_chunk_job
 from progress_predictor import build_prediction, phase_order_for_job
-from asr_client_local import maybe_shutdown_live_chunk_warm_runner_idle, shutdown_live_chunk_warm_runner
-from asr_backend import transcribe_with_oneshot_backend
-from asr_contract import AsrRequestError, prepare_request
+from phase_whisperx import run_whisperx_phase_remote
 
 
 SLEEP_IDLE_SECONDS = 2.0
@@ -262,6 +260,7 @@ def _build_progress_tracker(
   current_chunk_started_t = 0.0
   last_progress = 0.0
   last_write_t = 0.0
+  phase_overrun_active = False
   total_expected_all = max(0.1, sum(max(0.0, float(phase_expected_s.get(p, 0.0))) for p in phase_order))
   hints = eta_hints
   cleaned: list[str] = []
@@ -289,6 +288,17 @@ def _build_progress_tracker(
         total += max(0.0, float(phase_expected_s.get(p, 0.0)))
     return total
 
+  def _set_phase_overrun_hint(active: bool) -> None:
+    nonlocal phase_overrun_active
+    if active:
+      if "phase_overrun" not in hints:
+        hints.append("phase_overrun")
+      phase_overrun_active = True
+      return
+    if "phase_overrun" in hints:
+      hints[:] = [h for h in hints if h != "phase_overrun"]
+    phase_overrun_active = False
+
   def _write_eta(*, force: bool = False) -> None:
     nonlocal last_progress, last_write_t
     now = time.monotonic()
@@ -298,12 +308,31 @@ def _build_progress_tracker(
     done_actual = _sum_completed()
     elapsed_current = max(0.0, now - current_phase_started_t) if current_phase_key else 0.0
     expected_current = max(0.1, float(phase_expected_s.get(current_phase_key or "", 0.0)))
-    if current_phase_key and expected_current > 0 and elapsed_current > (expected_current * 1.1):
-      if "phase_overrun" not in hints:
-        hints.append("phase_overrun")
+    remaining_keys = _after_current(current_phase_key)
+    remaining_after = sum(max(0.0, float(phase_expected_s.get(p, 0.0))) for p in remaining_keys)
+
+    # Upload path runs one remote ASR call that internally includes align/diarize/finalize.
+    # Treat this as one combined budget while the worker-visible phase is whisperx_transcribe.
+    if current_phase_key == "whisperx_transcribe":
+      proxied_keys = {"whisperx_align", "whisperx_diarize", "whisperx_finalize"}
+      proxy_extra = sum(max(0.0, float(phase_expected_s.get(p, 0.0))) for p in remaining_keys if p in proxied_keys)
+      if proxy_extra > 0.0:
+        expected_current = max(expected_current, expected_current + proxy_extra)
+        remaining_after = sum(max(0.0, float(phase_expected_s.get(p, 0.0))) for p in remaining_keys if p not in proxied_keys)
+    overrun_factor = 1.1
+    if current_phase_key == "whisperx_transcribe":
+      # Remote ASR can include hidden sub-stages; avoid noisy overrun hints for this phase.
+      overrun_factor = 3.0
+    overrun_now = bool(
+      current_phase_key
+      and expected_current > 0
+      and elapsed_current > (expected_current * overrun_factor)
+    )
+    if current_phase_key == "whisperx_transcribe":
+      overrun_now = False
+    _set_phase_overrun_hint(overrun_now)
 
     current_projected_total = max(expected_current, elapsed_current)
-    remaining_after = sum(max(0.0, float(phase_expected_s.get(p, 0.0))) for p in _after_current(current_phase_key))
 
     if current_phase_key:
       est_total = done_actual + current_projected_total + remaining_after
@@ -314,6 +343,13 @@ def _build_progress_tracker(
       est_total = max(0.1, done_actual + remaining_after)
       est_elapsed = done_actual
       est_remaining = max(0.0, est_total - est_elapsed)
+
+    if current_phase_key and current_phase_key != "whisperx_transcribe" and elapsed_current > (expected_current * 1.05):
+      # Prevent frozen ETA on long overruns by carrying a small dynamic tail for
+      # the active phase itself (in addition to remaining planned phases).
+      overrun_tail = min(120.0, max(3.0, elapsed_current * 0.25))
+      est_remaining = max(est_remaining, overrun_tail + remaining_after)
+      est_total = max(est_total, est_elapsed + est_remaining)
 
     # For chunked llm_topics, keep ETA chunk-aware so it does not collapse to
     # zero too early while there are clearly chunks left.
@@ -349,7 +385,12 @@ def _build_progress_tracker(
     # phases do not collapse visibility for remaining phases (notably llm_topics).
     completed_expected = _sum_completed_expected()
     if current_phase_key:
-      phase_frac = min(0.995, max(0.0, elapsed_current / expected_current))
+      # Let long-running current phases consume remaining expected budget so
+      # progress does not appear frozen when remote ASR bundles multiple
+      # sub-stages behind one worker-visible phase.
+      max_phase_budget = max(expected_current, expected_current + remaining_after)
+      phase_frac_cap = max(0.995, max_phase_budget / expected_current)
+      phase_frac = min(phase_frac_cap, max(0.0, elapsed_current / expected_current))
       if current_phase_key == "llm_topics" and current_chunk_total > 1 and 1 <= current_chunk_idx <= current_chunk_total:
         chunk_base = max(0.0, float(current_chunk_idx - 1) / float(current_chunk_total))
         chunk_ceiling = min(0.995, float(current_chunk_idx) / float(current_chunk_total))
@@ -362,7 +403,11 @@ def _build_progress_tracker(
     else:
       raw_progress = completed_expected / total_expected_all
 
-    progress = min(0.99, max(last_progress, float(raw_progress)))
+    progress_cap = 0.99
+    if current_phase_key == "whisperx_transcribe":
+      # Keep visible headroom for downstream upload phases (align/diarize/postprocess).
+      progress_cap = 0.90
+    progress = min(progress_cap, max(last_progress, float(raw_progress)))
     last_progress = progress
     last_write_t = now
 
@@ -398,6 +443,7 @@ def _build_progress_tracker(
     if current_phase_key == phase_key:
       current_phase_key = None
       current_phase_started_t = 0.0
+      _set_phase_overrun_hint(False)
     _write_eta(force=True)
 
   def heartbeat() -> None:
@@ -445,10 +491,6 @@ def _start_progress_heartbeat_thread(callback, *, interval_s: float = 0.5):
 def main() -> int:
   print("worker_daemon started")
   while True:
-    try:
-      maybe_shutdown_live_chunk_warm_runner_idle()
-    except Exception:
-      pass
     job = claim_next_job()
     if not job:
       time.sleep(SLEEP_IDLE_SECONDS)
@@ -499,10 +541,6 @@ def main() -> int:
         continue
       if job_kind != "upload_audio":
         raise RuntimeError(f"Unsupported job_kind: {job_kind}")
-      try:
-        shutdown_live_chunk_warm_runner(reason="upload_audio_job")
-      except Exception:
-        pass
 
       _write_status(
         job.status_path,
@@ -573,27 +611,14 @@ def main() -> int:
         message=f"Snippet created: {snippet_path.name}",
       )
 
-      cfg = _load_server_config()
+      # Keep config_key schema stable even though ASR now runs remotely via pool.
+      cfg: dict[str, object] = {}
       _append_log(job.log_path, f"[{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}] WORKER service_cfg={json.dumps(service_cfg, ensure_ascii=False)}")
-      _append_log(job.log_path, f"[{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}] WORKER whisperx_cfg={json.dumps(cfg, ensure_ascii=False)}")
 
       progress_start_phase("whisperx_prepare", "Preparing WhisperX…", "whisperx_prepare")
 
       wx_t0 = time.monotonic()
       wx_live_timing_keys: set[str] = set()
-
-      def on_wx_stage(stage_name: str) -> None:
-        stage = str(stage_name or "").strip().lower()
-        if stage == "prepare":
-          progress_start_phase("whisperx_prepare", "Preparing WhisperX…", "whisperx_prepare")
-        elif stage == "transcribe":
-          progress_start_phase("whisperx_transcribe", "Transcribing…", "whisperx_transcribe")
-        elif stage == "align":
-          progress_start_phase("whisperx_align", "Aligning…", "whisperx_align")
-        elif stage == "diarize":
-          progress_start_phase("whisperx_diarize", "Diarizing…", "whisperx_diarize")
-        elif stage == "finalize":
-          progress_start_phase("whisperx_finalize", "Finalizing…", "finalizing")
 
       def on_wx_phase_timing(phase_name: str, elapsed_s: float) -> None:
         wx_live_timing_keys.add(str(phase_name or ""))
@@ -614,7 +639,7 @@ def main() -> int:
           "min_speakers": min_speakers,
           "max_speakers": max_speakers,
           "diarize_enabled": bool(speaker_mode != "none"),
-          "align_enabled": bool(cfg.get("align_enabled", True)),
+          "align_enabled": True,
           "initial_prompt": opts.get("initial_prompt"),
           "timestamps_mode": "segment",
         },
@@ -632,10 +657,7 @@ def main() -> int:
         },
         "priority": "background",
       }
-      try:
-        asr_request = prepare_request(raw_asr_request)
-      except AsrRequestError as e_req:
-        raise RuntimeError(f"{e_req.code}: {e_req}") from e_req
+      asr_request = dict(raw_asr_request)
       try:
         _append_log(
           job.log_path,
@@ -644,13 +666,59 @@ def main() -> int:
       except Exception:
         pass
 
-      asr_response = transcribe_with_oneshot_backend(
-        job=job,
-        request=asr_request,
-        on_phase_timing=on_wx_phase_timing,
-        on_stage_change=on_wx_stage,
-        on_heartbeat=progress_heartbeat,
-      )
+      progress_start_phase("whisperx_transcribe", "Transcribing…", "whisperx_transcribe")
+      asr_hb_stop, asr_hb_thread = _start_progress_heartbeat_thread(progress_heartbeat, interval_s=0.5)
+      wx_live_stage_keys: set[str] = set()
+      wx_live_finished_keys: set[str] = set()
+      wx_live_current_phase_key: str | None = "whisperx_transcribe"
+      wx_live_current_started_t = time.monotonic()
+      wx_stage_map: dict[str, tuple[str, str]] = {
+        "prepare": ("whisperx_prepare", "Preparing WhisperX…"),
+        "transcribe": ("whisperx_transcribe", "Transcribing…"),
+        "align": ("whisperx_align", "Aligning…"),
+        "diarize": ("whisperx_diarize", "Diarizing…"),
+        "finalize": ("whisperx_finalize", "Finalizing…"),
+      }
+
+      def on_asr_lifecycle_update(lifecycle: dict[str, Any]) -> None:
+        nonlocal wx_live_current_phase_key, wx_live_current_started_t
+        stage_raw = str((lifecycle or {}).get("stage") or "").strip().lower()
+        mapped = wx_stage_map.get(stage_raw)
+        if not mapped:
+          return
+        phase_key, phase_msg = mapped
+        now_mono = time.monotonic()
+        if wx_live_current_phase_key and wx_live_current_phase_key != phase_key and wx_live_current_phase_key not in wx_live_finished_keys:
+          try:
+            elapsed_prev = max(0.0, float(now_mono - wx_live_current_started_t))
+            on_wx_phase_timing(wx_live_current_phase_key, elapsed_prev)
+            wx_live_finished_keys.add(wx_live_current_phase_key)
+          except Exception:
+            pass
+        if phase_key in wx_live_stage_keys and phase_key == wx_live_current_phase_key:
+          return
+        wx_live_stage_keys.add(phase_key)
+        wx_live_current_phase_key = phase_key
+        wx_live_current_started_t = now_mono
+        try:
+          progress_start_phase(phase_key, phase_msg, phase_key)
+        except Exception:
+          pass
+      try:
+        asr_response = run_whisperx_phase_remote(
+          request_payload=asr_request,
+          on_lifecycle_update=on_asr_lifecycle_update,
+        )
+      finally:
+        asr_hb_stop.set()
+        asr_hb_thread.join(timeout=1.0)
+      if wx_live_current_phase_key and wx_live_current_phase_key not in wx_live_finished_keys:
+        try:
+          elapsed_last = max(0.0, float(time.monotonic() - wx_live_current_started_t))
+          on_wx_phase_timing(wx_live_current_phase_key, elapsed_last)
+          wx_live_finished_keys.add(wx_live_current_phase_key)
+        except Exception:
+          pass
       if not bool(asr_response.get("ok", False)):
         err = dict(asr_response.get("error") or {})
         raise RuntimeError(f"{err.get('code') or 'ASR_ERROR'}: {err.get('message') or 'ASR request failed'}")
@@ -670,9 +738,22 @@ def main() -> int:
       srt_path = Path(srt_path_str)
       if not srt_path.exists():
         raise RuntimeError(f"ASR backend SRT path missing: {srt_path}")
+      # Keep upload job contract stable: transcript endpoint expects SRT in job.whisperx_dir.
+      local_srt_path = (job.whisperx_dir / f"{snippet_path.stem}.srt").resolve()
+      try:
+        if srt_path.resolve() != local_srt_path:
+          local_srt_path.parent.mkdir(parents=True, exist_ok=True)
+          shutil.copy2(srt_path, local_srt_path)
+        else:
+          local_srt_path.parent.mkdir(parents=True, exist_ok=True)
+      except Exception as e:
+        raise RuntimeError(f"Failed to stage SRT into job workspace: {e!r}") from e
+      srt_path = local_srt_path
       wx_timings = dict(asr_response.get("timings") or {})
       wx_elapsed = time.monotonic() - wx_t0
       emitted = False
+      replay_min_visible_s = 1.15
+      replay_visible_phases = {"whisperx_align", "whisperx_diarize"}
       if isinstance(wx_timings, dict):
         order = ("prepare_s", "transcribe_s", "align_s", "diarize_s", "finalize_s")
         map_name = {
@@ -682,27 +763,72 @@ def main() -> int:
           "diarize_s": "whisperx_diarize",
           "finalize_s": "whisperx_finalize",
         }
+        phase_messages = {
+          "whisperx_prepare": "Preparing WhisperX…",
+          "whisperx_transcribe": "Transcribing…",
+          "whisperx_align": "Aligning…",
+          "whisperx_diarize": "Diarizing…",
+          "whisperx_finalize": "Finalizing…",
+        }
         seen: set[str] = set()
         for key in order:
           if key in wx_timings:
             out_key = map_name.get(key, "")
+            if out_key and out_key in wx_live_finished_keys:
+              seen.add(key)
+              emitted = True
+              continue
+            if out_key and out_key in wx_live_stage_keys:
+              try:
+                on_wx_phase_timing(out_key or key, float(wx_timings[key]))
+                emitted = True
+                seen.add(key)
+              except Exception:
+                pass
+              continue
             if out_key and out_key in wx_live_timing_keys:
               seen.add(key)
               emitted = True
               continue
             try:
+              phase_show_t0 = time.monotonic()
+              if out_key:
+                progress_start_phase(out_key, phase_messages.get(out_key, out_key), out_key)
               on_wx_phase_timing(out_key or key, float(wx_timings[key]))
+              if out_key in replay_visible_phases:
+                shown_for = max(0.0, float(time.monotonic() - phase_show_t0))
+                pad = max(0.0, replay_min_visible_s - shown_for)
+                if pad > 0:
+                  time.sleep(min(0.5, pad))
               emitted = True
               seen.add(key)
             except Exception:
               pass
         for key in sorted(k for k in wx_timings.keys() if k not in seen and k != "total_s"):
           out_key = map_name.get(key, key)
+          if out_key in wx_live_finished_keys:
+            emitted = True
+            continue
+          if out_key in wx_live_stage_keys:
+            try:
+              on_wx_phase_timing(out_key, float(wx_timings[key]))
+              emitted = True
+            except Exception:
+              pass
+            continue
           if out_key in wx_live_timing_keys:
             emitted = True
             continue
           try:
+            phase_show_t0 = time.monotonic()
+            if out_key in phase_messages:
+              progress_start_phase(out_key, phase_messages.get(out_key, out_key), out_key)
             on_wx_phase_timing(out_key, float(wx_timings[key]))
+            if out_key in replay_visible_phases:
+              shown_for = max(0.0, float(time.monotonic() - phase_show_t0))
+              pad = max(0.0, replay_min_visible_s - shown_for)
+              if pad > 0:
+                time.sleep(min(0.5, pad))
             emitted = True
           except Exception:
             pass

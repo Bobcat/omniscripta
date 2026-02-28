@@ -34,19 +34,24 @@ This contract is intentionally separate from use-case orchestration.
 
 ### `audio`
 
-Exactly one audio source should be provided. Initial implementation can support `local_path` only.
+Exactly one audio source should be provided.
 
 - `local_path` (string, optional): absolute path on local filesystem
 - `inline_base64` (string, optional, reserved): base64-encoded audio payload for future HTTP/gRPC transport
-- `blob_ref` (string, optional, reserved): opaque storage reference for future use
+- `blob_ref` (string, optional): opaque storage reference (v1: `fs://`-backed blob store path)
 - `sample_rate_hz` (integer, optional)
 - `channels` (integer, optional)
 - `format` (string, optional): e.g. `wav`, `mp3`
 - `duration_ms` (integer, optional)
 
-Initial implementation rule:
-- require `audio.local_path`
-- reject `inline_base64` / `blob_ref` as not implemented yet
+Current implementation rule:
+- require exactly one source: `audio.local_path` or `audio.blob_ref`
+- `audio.inline_base64` is not implemented yet
+
+Blob ref (v1):
+- worker-side remote client can upload local audio into a shared blob store and send `audio.blob_ref`
+- pool resolves `blob_ref` to a local file path before ASR execution
+- `audio.local_path` remains supported for same-host/debug flows
 
 ### `options`
 

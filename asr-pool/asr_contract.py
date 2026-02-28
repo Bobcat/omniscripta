@@ -44,13 +44,16 @@ def _validate_audio(audio: dict[str, Any] | None) -> dict[str, Any]:
       "Exactly one audio source must be provided",
       details={"provided_sources": provided},
     )
-  if "local_path" not in provided:
+  if "inline_base64" in provided:
     raise AsrRequestError(
       "ASR_AUDIO_SOURCE_NOT_IMPLEMENTED",
-      "Only audio.local_path is supported in the current implementation",
+      "audio.inline_base64 is not supported in the current implementation",
       details={"provided_sources": provided},
     )
-  a["local_path"] = local_path
+  if "local_path" in provided:
+    a["local_path"] = local_path
+  if "blob_ref" in provided:
+    a["blob_ref"] = blob_ref
   return a
 
 

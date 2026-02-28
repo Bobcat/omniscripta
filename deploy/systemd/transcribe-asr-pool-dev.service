@@ -1,0 +1,13 @@
+[Unit]
+Description=Transcribe Dev ASR Pool (Uvicorn)
+
+[Service]
+Type=simple
+WorkingDirectory=/home/gunnar/projects/transcribe-dev/asr-pool
+ExecStart=/srv/transcribe/portal-api/.venv/bin/uvicorn main:app --host 127.0.0.1 --port 8090
+Restart=always
+RestartSec=2
+EnvironmentFile=-%h/.config/transcribe/dev.env
+
+[Install]
+WantedBy=default.target
