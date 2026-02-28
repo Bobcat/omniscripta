@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 .venv/
+.venvs/
 
 # Runtime config (track real JSON configs)
 config/*.json.example
