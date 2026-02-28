@@ -81,8 +81,132 @@ def _dedup_trim_incoming_prefix_words(
     return trimmed, meta
 
 
+def _merge_speculative_preview_text(
+    existing_text: str,
+    incoming_text: str,
+    *,
+    min_overlap_words: int,
+    max_trim_words: int,
+) -> tuple[str, dict[str, int | bool]]:
+    existing = str(existing_text or "").strip()
+    incoming = str(incoming_text or "").strip()
+    meta: dict[str, int | bool] = {
+        "dedup_applied": False,
+        "merge_overlap_words": 0,
+        "dedup_words_trimmed": 0,
+    }
+    if not incoming:
+        return existing, meta
+    if not existing:
+        return incoming, meta
+    if incoming == existing or existing.endswith(incoming):
+        incoming_word_count = len(_word_tokens_with_spans(incoming))
+        meta["dedup_applied"] = True
+        meta["merge_overlap_words"] = int(max(0, incoming_word_count))
+        meta["dedup_words_trimmed"] = int(max(0, incoming_word_count))
+        return existing, meta
+
+    append_text, dedup_meta = _dedup_trim_incoming_prefix_words(
+        existing,
+        incoming,
+        min_overlap_words=int(max(1, min_overlap_words)),
+        max_trim_words=int(max(0, max_trim_words)),
+    )
+    meta = {
+        "dedup_applied": bool(dedup_meta.get("dedup_applied", False)),
+        "merge_overlap_words": int(max(0, int(dedup_meta.get("merge_overlap_words") or 0))),
+        "dedup_words_trimmed": int(max(0, int(dedup_meta.get("dedup_words_trimmed") or 0))),
+    }
+    append_clean = str(append_text or "").strip()
+    if not append_clean:
+        return existing, meta
+    return f"{existing} {append_clean}", meta
+
+
+def _speculative_suffix_from_final_text(
+    final_text: str,
+    speculative_text: str,
+    *,
+    min_overlap_words: int,
+    max_trim_words: int,
+) -> tuple[str, dict[str, int | bool]]:
+    final_value = str(final_text or "")
+    speculative_value = str(speculative_text or "").strip()
+    meta: dict[str, int | bool] = {
+        "dedup_applied": False,
+        "merge_overlap_words": 0,
+        "dedup_words_trimmed": 0,
+    }
+    if not final_value.strip() or not speculative_value:
+        return "", meta
+    final_trim_end = final_value.rstrip()
+    if final_trim_end.endswith(speculative_value):
+        spec_word_count = len(_word_tokens_with_spans(speculative_value))
+        meta["dedup_applied"] = True
+        meta["merge_overlap_words"] = int(max(0, spec_word_count))
+        meta["dedup_words_trimmed"] = int(max(0, spec_word_count))
+        return "", meta
+
+    suffix_text, dedup_meta = _dedup_trim_incoming_prefix_words(
+        final_trim_end,
+        speculative_value,
+        min_overlap_words=int(max(1, min_overlap_words)),
+        max_trim_words=int(max(0, max_trim_words)),
+    )
+    suffix_clean = str(suffix_text or "").strip()
+    return suffix_clean, {
+        "dedup_applied": bool(dedup_meta.get("dedup_applied", False)),
+        "merge_overlap_words": int(max(0, int(dedup_meta.get("merge_overlap_words") or 0))),
+        "dedup_words_trimmed": int(max(0, int(dedup_meta.get("dedup_words_trimmed") or 0))),
+    }
+
+
+def _copy_speculative_window_records(windows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for row in windows:
+        if not isinstance(row, dict):
+            continue
+        copied = dict(row)
+        items_src = row.get("items")
+        copied["items"] = [dict(item) for item in items_src] if isinstance(items_src, list) else []
+        out.append(copied)
+    return out
+
+
 def _utc_iso(ts: float) -> str:
     return datetime.fromtimestamp(float(ts), tz=timezone.utc).isoformat()
+
+
+def _semilive_chunk_rows_debug_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    total_rows = 0
+    invalid_index_rows = 0
+    by_index: dict[int, dict[str, Any]] = {}
+    reason_counts: dict[str, int] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        total_rows += 1
+        try:
+            idx = int(row.get("chunk_index"))
+        except Exception:
+            invalid_index_rows += 1
+            continue
+        # Snapshot contract is one row per chunk_index. If duplicates exist, keep the last one.
+        by_index[idx] = row
+    for row in by_index.values():
+        reason = str(row.get("reason") or "").strip()
+        if not reason:
+            continue
+        reason_counts[reason] = int(reason_counts.get(reason, 0) + 1)
+    unique_rows = len(by_index)
+    duplicate_rows = max(0, total_rows - invalid_index_rows - unique_rows)
+    return {
+        "chunk_reason_counts": dict(sorted(reason_counts.items(), key=lambda kv: kv[0])),
+        "chunk_results_rows_count": int(max(0, total_rows)),
+        "chunk_results_unique_count": int(max(0, unique_rows)),
+        "chunk_results_duplicate_index_rows": int(max(0, duplicate_rows)),
+        "chunk_results_invalid_index_rows": int(max(0, invalid_index_rows)),
+    }
 
 
 def _repo_root() -> Path:
@@ -120,6 +244,19 @@ class LiveSession:
     semilive_final_text: str = ""
     semilive_final_segments: list[dict[str, Any]] = field(default_factory=list)
     semilive_chunk_results: list[dict[str, Any]] = field(default_factory=list)
+    semilive_speculative_text: str = ""
+    semilive_speculative_seq: int = -1
+    semilive_speculative_audio_end_ms: int = 0
+    semilive_speculative_updated_unix: float = 0.0
+    semilive_speculative_windows: list[dict[str, Any]] = field(default_factory=list)
+    semilive_speculative_open_window: list[dict[str, Any]] = field(default_factory=list)
+    semilive_speculative_open_window_index: int = 0
+    semilive_speculative_open_window_started_revision: int = 0
+    semilive_speculative_enqueued: int = 0
+    semilive_speculative_shown: int = 0
+    semilive_speculative_dropped_busy: int = 0
+    semilive_speculative_dropped_stale: int = 0
+    semilive_time_to_first_speculative_ms: int | None = None
     fixture_id: str = ""
     fixture_version: str = ""
     fixture_test_mode: str = ""
@@ -146,6 +283,10 @@ class ClosedSessionArchive:
     semilive_final_text: str = ""
     semilive_final_segments: list[dict[str, Any]] = field(default_factory=list)
     semilive_chunk_results: list[dict[str, Any]] = field(default_factory=list)
+    semilive_speculative_windows: list[dict[str, Any]] = field(default_factory=list)
+    semilive_speculative_open_window: list[dict[str, Any]] = field(default_factory=list)
+    semilive_speculative_open_window_index: int = 0
+    semilive_speculative_open_window_started_revision: int = 0
     fixture_id: str = ""
     fixture_version: str = ""
     fixture_test_mode: str = ""
@@ -362,6 +503,196 @@ class LiveSessionManager:
                 sess.fixture_test_mode = str(fixture_test_mode or "").strip()
             return self._snapshot_locked(sess)
 
+    def _speculative_final_dedup_params(self) -> tuple[int, int]:
+        return (
+            int(max(1, self._semilive_text_dedup_min_words)),
+            int(max(self._semilive_text_dedup_min_words, self._semilive_text_dedup_max_trim_words)),
+        )
+
+    def _speculative_seam_dedup_params(self) -> tuple[int, int]:
+        # Keep seam dedup a bit less strict than final->spec suffix dedup.
+        # This trims obvious 2-word repeats between consecutive speculative updates
+        # while leaving final dedup threshold unchanged.
+        min_words = int(max(1, min(2, self._semilive_text_dedup_min_words)))
+        return (
+            min_words,
+            int(max(min_words, self._semilive_text_dedup_max_trim_words)),
+        )
+
+    def _merge_speculative_preview_text_locked(
+        self,
+        *,
+        existing_text: str,
+        incoming_text: str,
+    ) -> tuple[str, dict[str, int | bool]]:
+        min_words, max_words = self._speculative_seam_dedup_params()
+        return _merge_speculative_preview_text(
+            existing_text,
+            incoming_text,
+            min_overlap_words=min_words,
+            max_trim_words=max_words,
+        )
+
+    def _speculative_suffix_from_final_locked(
+        self,
+        *,
+        final_text: str,
+        speculative_text: str,
+    ) -> tuple[str, dict[str, int | bool]]:
+        min_words, max_words = self._speculative_final_dedup_params()
+        return _speculative_suffix_from_final_text(
+            final_text,
+            speculative_text,
+            min_overlap_words=min_words,
+            max_trim_words=max_words,
+        )
+
+    def _close_semilive_speculative_open_window_locked(
+        self,
+        sess: LiveSession,
+        *,
+        close_reason: str,
+        ended_by_final_revision: int | None = None,
+        final_chunk_index: int | None = None,
+        final_chunk_t1_ms: int | None = None,
+        target_final_chunk_text_raw: str | None = None,
+        target_final_chunk_text_effective: str | None = None,
+    ) -> None:
+        items = [dict(item) for item in sess.semilive_speculative_open_window if isinstance(item, dict)]
+        if not items:
+            return
+        window_index = int(max(0, int(sess.semilive_speculative_open_window_index or 0)))
+        started_revision = int(max(0, int(sess.semilive_speculative_open_window_started_revision or 0)))
+        if started_revision <= 0:
+            started_revision = int(max(0, int(sess.semilive_transcript_revision or 0)))
+        last_item = items[-1]
+        window_row: dict[str, Any] = {
+            "window_index": int(window_index),
+            "close_reason": str(close_reason or ""),
+            "started_at_revision": int(started_revision),
+            "items_count": int(len(items)),
+            "last_speculative_seq": int(max(-1, int(last_item.get("speculative_seq") or -1))),
+            "last_audio_end_ms": int(max(0, int(last_item.get("audio_end_ms") or 0))),
+            "items": items,
+        }
+        if ended_by_final_revision is not None:
+            window_row["ended_by_final_revision"] = int(max(0, int(ended_by_final_revision)))
+        if final_chunk_index is not None:
+            window_row["ended_by_final_chunk_index"] = int(max(0, int(final_chunk_index)))
+        if final_chunk_t1_ms is not None:
+            window_row["ended_by_final_t1_ms"] = int(max(0, int(final_chunk_t1_ms)))
+        if target_final_chunk_text_raw is not None:
+            window_row["target_final_chunk_text_raw"] = str(target_final_chunk_text_raw or "")
+        if target_final_chunk_text_effective is not None:
+            window_row["target_final_chunk_text_effective"] = str(target_final_chunk_text_effective or "")
+        sess.semilive_speculative_windows.append(window_row)
+        sess.semilive_speculative_open_window = []
+        sess.semilive_speculative_open_window_index = int(window_index + 1)
+        sess.semilive_speculative_open_window_started_revision = int(max(0, int(sess.semilive_transcript_revision or 0)))
+
+    def update_semilive_speculative_preview(
+        self,
+        session_id: str,
+        *,
+        text: str,
+        speculative_seq: int,
+        audio_end_ms: int,
+    ) -> dict[str, Any]:
+        now_unix = time.time()
+        incoming_raw_text = str(text or "")
+        safe_seq = int(max(0, int(speculative_seq)))
+        safe_audio_end_ms = int(max(0, int(audio_end_ms)))
+        with self._lock:
+            sess = self._sessions.get(session_id)
+            if not sess:
+                raise KeyError("session_not_found")
+            sess.last_seen_unix = now_unix
+            current_seq = int(getattr(sess, "semilive_speculative_seq", -1) or -1)
+            if safe_seq <= current_seq:
+                return self._snapshot_locked(sess)
+
+            merged_spec_text, seam_meta = self._merge_speculative_preview_text_locked(
+                existing_text=str(sess.semilive_speculative_text or ""),
+                incoming_text=incoming_raw_text,
+            )
+            suffix_text, final_dedup_meta = self._speculative_suffix_from_final_locked(
+                final_text=str(sess.semilive_final_text or ""),
+                speculative_text=merged_spec_text,
+            )
+
+            if not sess.semilive_speculative_open_window:
+                sess.semilive_speculative_open_window_started_revision = int(
+                    max(0, int(sess.semilive_transcript_revision or 0))
+                )
+            sess.semilive_speculative_open_window.append(
+                {
+                    "speculative_seq": int(safe_seq),
+                    "audio_end_ms": int(safe_audio_end_ms),
+                    "raw_text": incoming_raw_text,
+                    "merged_text_after_seam_dedup": str(merged_spec_text or ""),
+                    "suffix_text_after_final_dedup": str(suffix_text or ""),
+                    "seam_dedup_applied": bool(seam_meta.get("dedup_applied", False)),
+                    "seam_dedup_words_trimmed": int(max(0, int(seam_meta.get("dedup_words_trimmed") or 0))),
+                    "final_dedup_applied": bool(final_dedup_meta.get("dedup_applied", False)),
+                    "final_dedup_words_trimmed": int(max(0, int(final_dedup_meta.get("dedup_words_trimmed") or 0))),
+                    "received_at_utc": _utc_iso(now_unix),
+                }
+            )
+
+            sess.semilive_speculative_text = str(merged_spec_text or "")
+            sess.semilive_speculative_seq = int(safe_seq)
+            sess.semilive_speculative_audio_end_ms = int(safe_audio_end_ms)
+            sess.semilive_speculative_updated_unix = now_unix
+            return self._snapshot_locked(sess)
+
+    def clear_semilive_speculative_preview(
+        self,
+        session_id: str,
+        *,
+        max_seq: int | None = None,
+    ) -> dict[str, Any]:
+        now_unix = time.time()
+        with self._lock:
+            sess = self._sessions.get(session_id)
+            if not sess:
+                raise KeyError("session_not_found")
+            sess.last_seen_unix = now_unix
+            current_seq = int(getattr(sess, "semilive_speculative_seq", -1) or -1)
+            if max_seq is None or current_seq <= int(max_seq):
+                sess.semilive_speculative_text = ""
+                sess.semilive_speculative_seq = -1
+                sess.semilive_speculative_audio_end_ms = 0
+                sess.semilive_speculative_updated_unix = 0.0
+            return self._snapshot_locked(sess)
+
+    def update_semilive_speculative_metrics(
+        self,
+        session_id: str,
+        *,
+        enqueued: int | None = None,
+        shown: int | None = None,
+        dropped_busy: int | None = None,
+        dropped_stale: int | None = None,
+        time_to_first_speculative_ms: int | None = None,
+    ) -> dict[str, Any]:
+        now_unix = time.time()
+        with self._lock:
+            sess = self._sessions.get(session_id)
+            if not sess:
+                raise KeyError("session_not_found")
+            sess.last_seen_unix = now_unix
+            if enqueued is not None:
+                sess.semilive_speculative_enqueued = int(max(0, int(enqueued)))
+            if shown is not None:
+                sess.semilive_speculative_shown = int(max(0, int(shown)))
+            if dropped_busy is not None:
+                sess.semilive_speculative_dropped_busy = int(max(0, int(dropped_busy)))
+            if dropped_stale is not None:
+                sess.semilive_speculative_dropped_stale = int(max(0, int(dropped_stale)))
+            if time_to_first_speculative_ms is not None:
+                sess.semilive_time_to_first_speculative_ms = int(max(0, int(time_to_first_speculative_ms)))
+            return self._snapshot_locked(sess)
+
     def record_semilive_chunk_result(
         self,
         session_id: str,
@@ -373,6 +704,12 @@ class LiveSessionManager:
         segments: list[dict[str, Any]] | None = None,
         state: str = "ready",
         error: str = "",
+        reason: str = "",
+        speech_frames: int | None = None,
+        silence_frames_tail: int | None = None,
+        chunk_duration_ms: int | None = None,
+        asr_pipeline_time_s: float | None = None,
+        asr_transcribe_time_s: float | None = None,
     ) -> dict[str, Any]:
         now_unix = time.time()
         idx = int(max(0, chunk_index))
@@ -381,7 +718,15 @@ class LiveSessionManager:
         safe_text = str(text or "")
         safe_state = str(state or "ready")
         safe_error = str(error or "")
+        safe_reason = str(reason or "").strip()
         segs = [dict(seg) for seg in (segments or []) if isinstance(seg, dict)]
+        safe_speech_frames = None if speech_frames is None else int(max(0, int(speech_frames)))
+        safe_silence_frames_tail = None if silence_frames_tail is None else int(max(0, int(silence_frames_tail)))
+        safe_chunk_duration_ms = None if chunk_duration_ms is None else int(max(0, int(chunk_duration_ms)))
+        safe_asr_pipeline_time_s = None if asr_pipeline_time_s is None else max(0.0, float(asr_pipeline_time_s))
+        safe_asr_transcribe_time_s = (
+            None if asr_transcribe_time_s is None else max(0.0, float(asr_transcribe_time_s))
+        )
         with self._lock:
             sess = self._sessions.get(session_id)
             if not sess:
@@ -396,10 +741,38 @@ class LiveSessionManager:
                 "state": safe_state,
                 "error": safe_error,
                 "segments": segs,
+                "reason": safe_reason,
+                "speech_frames": safe_speech_frames,
+                "silence_frames_tail": safe_silence_frames_tail,
+                "chunk_duration_ms": safe_chunk_duration_ms,
+                "asr_pipeline_time_s": safe_asr_pipeline_time_s,
+                "asr_transcribe_time_s": safe_asr_transcribe_time_s,
             }
             replaced = False
             for i, existing in enumerate(sess.semilive_chunk_results):
-                if int(existing.get("chunk_index") or -1) == idx:
+                try:
+                    existing_idx = int(existing.get("chunk_index"))
+                except Exception:
+                    existing_idx = -1
+                if existing_idx == idx:
+                    if not row["reason"]:
+                        row["reason"] = str(existing.get("reason") or "")
+                    if row["speech_frames"] is None and existing.get("speech_frames") is not None:
+                        row["speech_frames"] = int(max(0, int(existing.get("speech_frames") or 0)))
+                    if row["silence_frames_tail"] is None and existing.get("silence_frames_tail") is not None:
+                        row["silence_frames_tail"] = int(max(0, int(existing.get("silence_frames_tail") or 0)))
+                    if row["chunk_duration_ms"] is None and existing.get("chunk_duration_ms") is not None:
+                        row["chunk_duration_ms"] = int(max(0, int(existing.get("chunk_duration_ms") or 0)))
+                    if row["asr_pipeline_time_s"] is None and existing.get("asr_pipeline_time_s") is not None:
+                        try:
+                            row["asr_pipeline_time_s"] = max(0.0, float(existing.get("asr_pipeline_time_s")))
+                        except Exception:
+                            row["asr_pipeline_time_s"] = None
+                    if row["asr_transcribe_time_s"] is None and existing.get("asr_transcribe_time_s") is not None:
+                        try:
+                            row["asr_transcribe_time_s"] = max(0.0, float(existing.get("asr_transcribe_time_s")))
+                        except Exception:
+                            row["asr_transcribe_time_s"] = None
                     sess.semilive_chunk_results[i] = row
                     replaced = True
                     break
@@ -418,6 +791,11 @@ class LiveSessionManager:
                     0,
                     sum(1 for r in sess.semilive_chunk_results if str(r.get("state") or "") == "error"),
                 )
+                # A new final chunk supersedes any speculative suffix that was shown before it.
+                sess.semilive_speculative_text = ""
+                sess.semilive_speculative_seq = -1
+                sess.semilive_speculative_audio_end_ms = 0
+                sess.semilive_speculative_updated_unix = 0.0
             elif safe_state == "error":
                 sess.chunks_failed = max(
                     0,
@@ -429,6 +807,8 @@ class LiveSessionManager:
                 )
 
             merged_final_text = ""
+            target_final_chunk_text_raw = ""
+            target_final_chunk_text_effective = ""
             for r in sess.semilive_chunk_results:
                 if not isinstance(r, dict):
                     continue
@@ -439,6 +819,10 @@ class LiveSessionManager:
             for r in sess.semilive_chunk_results:
                 if str(r.get("state") or "") != "ready":
                     continue
+                try:
+                    row_idx = int(r.get("chunk_index"))
+                except Exception:
+                    row_idx = -1
                 raw_row_text = str(r.get("text") or "")
                 row_text = raw_row_text.strip()
                 if not row_text:
@@ -456,8 +840,12 @@ class LiveSessionManager:
                     r["merge_overlap_words"] = int(max(0, int(dedup_meta.get("merge_overlap_words") or 0)))
                     r["dedup_words_trimmed"] = int(max(0, int(dedup_meta.get("dedup_words_trimmed") or 0)))
                 append_text = str(append_text or "").strip()
+                if safe_state == "ready" and row_idx == idx:
+                    target_final_chunk_text_raw = row_text
                 if not append_text:
                     continue
+                if safe_state == "ready" and row_idx == idx:
+                    target_final_chunk_text_effective = append_text
                 merged_final_text = append_text if not merged_final_text else f"{merged_final_text}\n{append_text}"
 
             sess.semilive_final_text = merged_final_text
@@ -522,6 +910,16 @@ class LiveSessionManager:
 
             sess.semilive_final_segments = merged_segments
             sess.semilive_transcript_revision += 1
+            if safe_state == "ready":
+                self._close_semilive_speculative_open_window_locked(
+                    sess,
+                    close_reason="final_ready",
+                    ended_by_final_revision=int(max(0, int(sess.semilive_transcript_revision or 0))),
+                    final_chunk_index=idx,
+                    final_chunk_t1_ms=safe_t1,
+                    target_final_chunk_text_raw=target_final_chunk_text_raw,
+                    target_final_chunk_text_effective=target_final_chunk_text_effective,
+                )
             return self._semilive_result_snapshot_locked(sess)
 
     def semilive_result_snapshot(self, session_id: str) -> dict[str, Any]:
@@ -532,6 +930,48 @@ class LiveSessionManager:
             arc = self._archives.get(session_id)
             if arc is not None:
                 return self._semilive_archive_result_snapshot_locked(arc)
+        raise KeyError("session_or_archive_not_found")
+
+    def semilive_speculative_history_snapshot(self, session_id: str) -> dict[str, Any]:
+        with self._lock:
+            sess = self._sessions.get(session_id)
+            if sess is not None:
+                return {
+                    "session_id": str(sess.session_id),
+                    "source": "active",
+                    "finalization_state": str(sess.finalization_state or ""),
+                    "transcript_revision": int(max(0, int(sess.semilive_transcript_revision or 0))),
+                    "final_text": str(sess.semilive_final_text or ""),
+                    "speculative_windows": _copy_speculative_window_records(sess.semilive_speculative_windows),
+                    "speculative_windows_count": len(sess.semilive_speculative_windows),
+                    "speculative_open_window": [
+                        dict(item) for item in sess.semilive_speculative_open_window if isinstance(item, dict)
+                    ],
+                    "speculative_open_window_count": len(sess.semilive_speculative_open_window),
+                    "speculative_open_window_index": int(max(0, int(sess.semilive_speculative_open_window_index or 0))),
+                    "speculative_open_window_started_revision": int(
+                        max(0, int(sess.semilive_speculative_open_window_started_revision or 0))
+                    ),
+                }
+            arc = self._archives.get(session_id)
+            if arc is not None:
+                return {
+                    "session_id": str(arc.session_id),
+                    "source": "archive",
+                    "finalization_state": str(arc.finalization_state or ""),
+                    "transcript_revision": int(max(0, int(arc.semilive_transcript_revision or arc.transcript_revision or 0))),
+                    "final_text": str(arc.semilive_final_text or arc.final_text or ""),
+                    "speculative_windows": _copy_speculative_window_records(arc.semilive_speculative_windows),
+                    "speculative_windows_count": len(arc.semilive_speculative_windows),
+                    "speculative_open_window": [
+                        dict(item) for item in arc.semilive_speculative_open_window if isinstance(item, dict)
+                    ],
+                    "speculative_open_window_count": len(arc.semilive_speculative_open_window),
+                    "speculative_open_window_index": int(max(0, int(arc.semilive_speculative_open_window_index or 0))),
+                    "speculative_open_window_started_revision": int(
+                        max(0, int(arc.semilive_speculative_open_window_started_revision or 0))
+                    ),
+                }
         raise KeyError("session_or_archive_not_found")
 
     def next_seq(self, session_id: str) -> int:
@@ -624,6 +1064,16 @@ class LiveSessionManager:
                 arc.semilive_final_text = str(src_sess.semilive_final_text or "")
                 arc.semilive_final_segments = [dict(seg) for seg in src_sess.semilive_final_segments]
                 arc.semilive_chunk_results = [dict(r) for r in src_sess.semilive_chunk_results]
+                arc.semilive_speculative_windows = _copy_speculative_window_records(src_sess.semilive_speculative_windows)
+                arc.semilive_speculative_open_window = [
+                    dict(item) for item in src_sess.semilive_speculative_open_window if isinstance(item, dict)
+                ]
+                arc.semilive_speculative_open_window_index = int(
+                    max(0, int(src_sess.semilive_speculative_open_window_index or 0))
+                )
+                arc.semilive_speculative_open_window_started_revision = int(
+                    max(0, int(src_sess.semilive_speculative_open_window_started_revision or 0))
+                )
                 arc.fixture_id = str(src_sess.fixture_id or "")
                 arc.fixture_version = str(src_sess.fixture_version or "")
                 arc.fixture_test_mode = str(src_sess.fixture_test_mode or "")
@@ -711,6 +1161,31 @@ class LiveSessionManager:
         chunks = [dict(r) for r in sess.semilive_chunk_results]
         dedup_chunks_applied = sum(1 for r in chunks if bool(r.get("dedup_applied")))
         dedup_words_trimmed_total = sum(int(max(0, int(r.get("dedup_words_trimmed") or 0))) for r in chunks)
+        chunk_debug = _semilive_chunk_rows_debug_metrics(chunks)
+        speculative_suffix_text, _ = self._speculative_suffix_from_final_locked(
+            final_text=str(sess.semilive_final_text or ""),
+            speculative_text=str(sess.semilive_speculative_text or ""),
+        )
+        final_covered_ms = 0
+        for seg in sess.semilive_final_segments:
+            if not isinstance(seg, dict):
+                continue
+            try:
+                t1 = int(seg.get("t1_ms") or 0)
+            except Exception:
+                t1 = 0
+            if t1 > final_covered_ms:
+                final_covered_ms = t1
+        if final_covered_ms <= 0:
+            for r in chunks:
+                if str(r.get("state") or "") != "ready":
+                    continue
+                try:
+                    t1 = int(r.get("t1_ms") or 0)
+                except Exception:
+                    t1 = 0
+                if t1 > final_covered_ms:
+                    final_covered_ms = t1
         return {
             "session_id": str(sess.session_id),
             "source": "active",
@@ -729,10 +1204,39 @@ class LiveSessionManager:
             "final_text": str(sess.semilive_final_text or ""),
             "final_segments": [dict(seg) for seg in sess.semilive_final_segments],
             "final_segments_count": len(sess.semilive_final_segments),
+            "final_covered_ms": int(max(0, final_covered_ms)),
             "chunk_results": chunks,
             "chunk_results_count": len(chunks),
+            "chunk_reason_counts": dict(chunk_debug.get("chunk_reason_counts") or {}),
+            "chunk_results_rows_count": int(max(0, int(chunk_debug.get("chunk_results_rows_count") or 0))),
+            "chunk_results_unique_count": int(max(0, int(chunk_debug.get("chunk_results_unique_count") or 0))),
+            "chunk_results_duplicate_index_rows": int(
+                max(0, int(chunk_debug.get("chunk_results_duplicate_index_rows") or 0))
+            ),
+            "chunk_results_invalid_index_rows": int(max(0, int(chunk_debug.get("chunk_results_invalid_index_rows") or 0))),
             "dedup_chunks_applied": int(max(0, dedup_chunks_applied)),
             "dedup_words_trimmed_total": int(max(0, dedup_words_trimmed_total)),
+            "speculative_preview": {
+                "text": str(speculative_suffix_text or ""),
+                "speculative_seq": int(max(-1, int(sess.semilive_speculative_seq))),
+                "audio_end_ms": int(max(0, int(sess.semilive_speculative_audio_end_ms or 0))),
+                "updated_at_utc": (
+                    _utc_iso(sess.semilive_speculative_updated_unix)
+                    if float(sess.semilive_speculative_updated_unix or 0.0) > 0
+                    else ""
+                ),
+            },
+            "speculative_metrics": {
+                "enqueued": int(max(0, int(sess.semilive_speculative_enqueued or 0))),
+                "shown": int(max(0, int(sess.semilive_speculative_shown or 0))),
+                "dropped_busy": int(max(0, int(sess.semilive_speculative_dropped_busy or 0))),
+                "dropped_stale": int(max(0, int(sess.semilive_speculative_dropped_stale or 0))),
+                "time_to_first_speculative_ms": (
+                    int(sess.semilive_time_to_first_speculative_ms)
+                    if sess.semilive_time_to_first_speculative_ms is not None
+                    else None
+                ),
+            },
             "fixture_id": str(sess.fixture_id or ""),
             "fixture_version": str(sess.fixture_version or ""),
             "fixture_test_mode": str(sess.fixture_test_mode or ""),
@@ -742,6 +1246,28 @@ class LiveSessionManager:
         chunks = [dict(r) for r in arc.semilive_chunk_results]
         dedup_chunks_applied = sum(1 for r in chunks if bool(r.get("dedup_applied")))
         dedup_words_trimmed_total = sum(int(max(0, int(r.get("dedup_words_trimmed") or 0))) for r in chunks)
+        chunk_debug = _semilive_chunk_rows_debug_metrics(chunks)
+        final_segments_src = arc.semilive_final_segments or arc.final_segments
+        final_covered_ms = 0
+        for seg in final_segments_src:
+            if not isinstance(seg, dict):
+                continue
+            try:
+                t1 = int(seg.get("t1_ms") or 0)
+            except Exception:
+                t1 = 0
+            if t1 > final_covered_ms:
+                final_covered_ms = t1
+        if final_covered_ms <= 0:
+            for r in chunks:
+                if str(r.get("state") or "") != "ready":
+                    continue
+                try:
+                    t1 = int(r.get("t1_ms") or 0)
+                except Exception:
+                    t1 = 0
+                if t1 > final_covered_ms:
+                    final_covered_ms = t1
         return {
             "session_id": str(arc.session_id),
             "source": "archive",
@@ -757,12 +1283,33 @@ class LiveSessionManager:
             "chunks_pending": int(max(0, arc.chunks_total - arc.chunks_done - arc.chunks_failed)),
             "transcript_revision": int(max(0, arc.semilive_transcript_revision or arc.transcript_revision)),
             "final_text": str(arc.semilive_final_text or arc.final_text or ""),
-            "final_segments": [dict(seg) for seg in (arc.semilive_final_segments or arc.final_segments)],
-            "final_segments_count": len(arc.semilive_final_segments or arc.final_segments),
+            "final_segments": [dict(seg) for seg in final_segments_src],
+            "final_segments_count": len(final_segments_src),
+            "final_covered_ms": int(max(0, final_covered_ms)),
             "chunk_results": chunks,
             "chunk_results_count": len(chunks),
+            "chunk_reason_counts": dict(chunk_debug.get("chunk_reason_counts") or {}),
+            "chunk_results_rows_count": int(max(0, int(chunk_debug.get("chunk_results_rows_count") or 0))),
+            "chunk_results_unique_count": int(max(0, int(chunk_debug.get("chunk_results_unique_count") or 0))),
+            "chunk_results_duplicate_index_rows": int(
+                max(0, int(chunk_debug.get("chunk_results_duplicate_index_rows") or 0))
+            ),
+            "chunk_results_invalid_index_rows": int(max(0, int(chunk_debug.get("chunk_results_invalid_index_rows") or 0))),
             "dedup_chunks_applied": int(max(0, dedup_chunks_applied)),
             "dedup_words_trimmed_total": int(max(0, dedup_words_trimmed_total)),
+            "speculative_preview": {
+                "text": "",
+                "speculative_seq": -1,
+                "audio_end_ms": 0,
+                "updated_at_utc": "",
+            },
+            "speculative_metrics": {
+                "enqueued": 0,
+                "shown": 0,
+                "dropped_busy": 0,
+                "dropped_stale": 0,
+                "time_to_first_speculative_ms": None,
+            },
             "fixture_id": str(arc.fixture_id or ""),
             "fixture_version": str(arc.fixture_version or ""),
             "fixture_test_mode": str(arc.fixture_test_mode or ""),

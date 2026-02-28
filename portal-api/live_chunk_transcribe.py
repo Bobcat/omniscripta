@@ -192,7 +192,11 @@ class LiveChunkBatchBridge:
         t1_ms: int,
         pcm16le: bytes,
         language: str | None = None,
+        asr_beam_size: int | None = None,
         initial_prompt: str | None = None,
+        live_lane: str | None = None,
+        speculative_seq: int | None = None,
+        speculative_audio_end_ms: int | None = None,
     ) -> EnqueuedChunkJob:
         safe_id = _safe_session_id(session_id)
         idx = int(max(0, chunk_index))
@@ -215,6 +219,7 @@ class LiveChunkBatchBridge:
             orig_filename=chunk_wav.name,
             options={
                 "language": str(language or self.language),
+                "beam_size": (int(max(1, asr_beam_size)) if asr_beam_size is not None else None),
                 "speaker_mode": "none",
                 "expected_speakers": None,
                 "min_speakers": None,
@@ -226,6 +231,13 @@ class LiveChunkBatchBridge:
                 "live_chunk_t0_ms": int(max(0, t0_ms)),
                 "live_chunk_t1_ms": int(max(max(0, t0_ms), t1_ms)),
                 "initial_prompt": prompt_text if prompt_text else None,
+                "live_lane": str(live_lane or "final"),
+                "speculative_seq": (
+                    int(max(0, speculative_seq)) if speculative_seq is not None else None
+                ),
+                "speculative_audio_end_ms": (
+                    int(max(0, speculative_audio_end_ms)) if speculative_audio_end_ms is not None else None
+                ),
             },
             job_kind="live_chunk",
             upload_src_path=chunk_wav,

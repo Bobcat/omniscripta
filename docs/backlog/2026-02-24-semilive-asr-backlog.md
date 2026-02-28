@@ -4,6 +4,11 @@
 
 Working backlog (ordered draft)
 
+## Gerelateerde uitwerking
+
+- Concrete uitvoering voor schaalbare centrale ASR pool:
+  - `docs/backlog/2026-02-28-asr-runtime-pool-v1-implementation-plan.md`
+
 ## Doel
 
 Compact overzicht van wat we al weten dat we willen, maar nog niet hebben, voor:
@@ -20,6 +25,7 @@ Bron van waarheid voor gedrag blijft de code. Dit document is alleen voor priori
 - `live_chunk` gebruikt persistente warme ASR runner (`persistent_local`)
 - warm-runner winst gevalideerd (fase 6)
 - `upload_audio` gebruikt voor WhisperX-stap dezelfde ASR contract/backend-laag (fase 7), met behoud van bestaande upload-orchestratie
+- Huidige warme ASR runner is **per worker process** (process-local IPC), nog niet gedeeld tussen meerdere workers
 - Fixture test-harness op Live page:
   - playback fixture run
   - inject fixture run (zonder speaker->mic loopback)
@@ -76,6 +82,10 @@ Bron van waarheid voor gedrag blijft de code. Dit document is alleen voor priori
 
 ### UX / product
 
+- Time-to-first-transcript verlagen (zonder extra UI-complexiteit):
+  - runner prewarm bij `Start`
+  - eventueel startup-only kortere eerste chunk-policy
+  - doel: sneller eerste zichtbare tekst zonder extra technische UI-labels
 - Handoff vanuit live resultaat:
   - `Open in Upload audio`
   - `Open in editor`
@@ -91,6 +101,10 @@ Bron van waarheid voor gedrag blijft de code. Dit document is alleen voor priori
 
 ### Schaalbaarheid / scheduling (later)
 
+- Warm-runner sharing expliciet ontwerpen:
+  - huidige warm runner is per-worker, niet gedeeld
+  - voorkomen van VRAM-multiplicatie bij meerdere workers
+  - route naar centrale ASR service/pool
 - Resource/scheduling policy voor multi-worker / multi-user:
   - prioriteit/fairness `live_chunk` vs `upload_audio`
   - expliciete GPU concurrency policy/lock bij >1 worker
