@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 import wave
 from dataclasses import dataclass
 from pathlib import Path
@@ -241,9 +240,8 @@ class LiveChunkBatchBridge:
                 ),
             },
             job_kind="live_chunk",
+            upload_src_path=chunk_wav,
         )
-        dst = (job.upload_dir / chunk_wav.name).resolve()
-        shutil.copy2(chunk_wav, dst)
         return EnqueuedChunkJob(
             session_id=str(session_id),
             chunk_index=idx,

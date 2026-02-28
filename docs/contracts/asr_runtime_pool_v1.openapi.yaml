@@ -172,10 +172,13 @@ components:
       properties:
         local_path:
           type: string
+          description: Same-host path (temporary compatibility path in v1).
         inline_base64:
           type: string
+          description: Not implemented in v1.
         blob_ref:
           type: string
+          description: Opaque blob reference (v1 supports `fs://<relative-path>`).
         sample_rate_hz:
           type: integer
         channels:

@@ -8,6 +8,7 @@ import mimetypes
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any, Dict
 from urllib.parse import urlparse, parse_qs
 
@@ -30,6 +31,7 @@ from live_quality import score_semilive_text_against_fixture, load_fixture_refer
 from live_sessions import LiveSessionManager
 from speculative_quality import score_speculative_history_against_final, score_speculative_history_against_reference
 import speculative_tuning_runner
+import asr_loadtest_runner
 from queue_fs import init_job_in_inbox, JobPaths, BASE as BASE_JOBS
 
 ROOT_PATH = os.getenv("TRANSCRIBE_ROOT_PATH", "/api")
@@ -175,6 +177,8 @@ LIVE_SEMILIVE_FINAL_BEAM_SIZE_OVERRIDE = max(
     int(str(os.getenv("TRANSCRIBE_LIVE_SEMILIVE_FINAL_BEAM_SIZE_OVERRIDE", "0")).strip() or "0"),
 )
 LIVE_SWEEP_WS_BASE_URL = (str(os.getenv("TRANSCRIBE_LIVE_SWEEP_WS_BASE_URL", "ws://127.0.0.1:8001")) or "").strip()
+ASR_POOL_STATUS_URL = (str(os.getenv("TRANSCRIBE_ASR_POOL_STATUS_URL", "http://127.0.0.1:8090/asr/v1/pool")) or "").strip()
+ASR_POOL_TOKEN = (str(os.getenv("TRANSCRIBE_ASR_POOL_TOKEN", "")) or "").strip()
 LIVE_SESSIONS = LiveSessionManager(
     default_ttl_seconds=LIVE_SESSION_TTL_S,
     preconnect_ttl_seconds=LIVE_SESSION_PRECONNECT_TTL_S,
@@ -424,6 +428,22 @@ async def start_live_speculative_tuning_run(request: Request) -> Dict[str, Any]:
 def get_live_speculative_tuning_report(run_id: str) -> Dict[str, Any]:
     _configure_speculative_tuning_runner()
     return speculative_tuning_runner.get_report(run_id)
+
+
+@app.post("/demo/live/asr-loadtest/run")
+async def start_live_asr_loadtest_run(request: Request) -> Dict[str, Any]:
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    _configure_asr_loadtest_runner()
+    return await asr_loadtest_runner.start_run(payload if isinstance(payload, dict) else {})
+
+
+@app.get("/demo/live/asr-loadtest/report/{run_id}")
+def get_live_asr_loadtest_report(run_id: str) -> Dict[str, Any]:
+    _configure_asr_loadtest_runner()
+    return asr_loadtest_runner.get_report(run_id)
 
 
 @app.get("/demo/live/sessions/{session_id}/transcript.txt")
@@ -819,6 +839,7 @@ async def live_session_ws(session_id: str, websocket: WebSocket) -> None:
                 continue
             job_id = str(item.get("job_id") or "")
             t0_ms = int(item.get("t0_ms") or 0)
+            enqueued_mono = float(item.get("enqueued_mono") or 0.0)
             if not job_id:
                 continue
             try:
@@ -843,6 +864,27 @@ async def live_session_ws(session_id: str, websocket: WebSocket) -> None:
             if str(item.get("reported_state") or "") != poll_state:
                 item["reported_state"] = poll_state
                 if poll_state == "ready":
+                    status_obj = dict(poll.status) if isinstance(poll.status, dict) else {}
+                    def _status_int(name: str) -> int | None:
+                        if name not in status_obj or status_obj.get(name) is None:
+                            return None
+                        try:
+                            return int(max(0, int(status_obj.get(name))))
+                        except Exception:
+                            return None
+                    def _status_float(name: str) -> float | None:
+                        if name not in status_obj or status_obj.get(name) is None:
+                            return None
+                        try:
+                            return max(0.0, float(status_obj.get(name)))
+                        except Exception:
+                            return None
+                    wait_ms = None
+                    if enqueued_mono > 0.0:
+                        try:
+                            wait_ms = int(max(0, round((time.monotonic() - enqueued_mono) * 1000.0)))
+                        except Exception:
+                            wait_ms = None
                     audio_end_ms = int(max(0, int(item.get("audio_end_ms") or 0)))
                     final_covered_ms = 0
                     try:
@@ -914,6 +956,12 @@ async def live_session_ws(session_id: str, websocket: WebSocket) -> None:
                             final_covered_ms=int(max(0, final_covered_ms)),
                             text_chars=len(str(poll.text or "")),
                             segments_count=len(poll.segments or []),
+                            wait_ms=(int(wait_ms) if wait_ms is not None else None),
+                            remote_submit_attempts=_status_int("asr_remote_submit_attempts"),
+                            remote_status_attempts_total=_status_int("asr_remote_status_attempts_total"),
+                            remote_status_http_calls=_status_int("asr_remote_status_http_calls"),
+                            remote_cancel_attempts=_status_int("asr_remote_cancel_attempts"),
+                            blob_fetch_ms=_status_float("asr_blob_fetch_ms"),
                         )
                 elif poll_state == "error":
                     _append_semilive_log(
@@ -1123,6 +1171,7 @@ async def live_session_ws(session_id: str, websocket: WebSocket) -> None:
             t0_ms = int(item.get("t0_ms") or 0)
             t1_ms = int(item.get("t1_ms") or t0_ms)
             job_id = str(item.get("job_id") or "")
+            enqueued_mono = float(item.get("enqueued_mono") or 0.0)
             chunk_meta = item.get("chunk_meta") if isinstance(item.get("chunk_meta"), dict) else None
             if not job_id:
                 continue
@@ -1159,6 +1208,27 @@ async def live_session_ws(session_id: str, websocket: WebSocket) -> None:
             if str(item.get("reported_state") or "") != poll_state:
                 item["reported_state"] = poll_state
                 if poll_state == "ready":
+                    status_obj = dict(poll.status) if isinstance(poll.status, dict) else {}
+                    def _status_int(name: str) -> int | None:
+                        if name not in status_obj or status_obj.get(name) is None:
+                            return None
+                        try:
+                            return int(max(0, int(status_obj.get(name))))
+                        except Exception:
+                            return None
+                    def _status_float(name: str) -> float | None:
+                        if name not in status_obj or status_obj.get(name) is None:
+                            return None
+                        try:
+                            return max(0.0, float(status_obj.get(name)))
+                        except Exception:
+                            return None
+                    wait_ms = None
+                    if enqueued_mono > 0.0:
+                        try:
+                            wait_ms = int(max(0, round((time.monotonic() - enqueued_mono) * 1000.0)))
+                        except Exception:
+                            wait_ms = None
                     await _record_semilive_chunk_job_state(
                         chunk_index=chunk_index,
                         t0_ms=t0_ms,
@@ -1176,6 +1246,12 @@ async def live_session_ws(session_id: str, websocket: WebSocket) -> None:
                         status={"state": poll.state, "ok": poll.ok, "done": poll.done},
                         text_chars=len(str(poll.text or "")),
                         segments_count=len(poll.segments or []),
+                        wait_ms=(int(wait_ms) if wait_ms is not None else None),
+                        remote_submit_attempts=_status_int("asr_remote_submit_attempts"),
+                        remote_status_attempts_total=_status_int("asr_remote_status_attempts_total"),
+                        remote_status_http_calls=_status_int("asr_remote_status_http_calls"),
+                        remote_cancel_attempts=_status_int("asr_remote_cancel_attempts"),
+                        blob_fetch_ms=_status_float("asr_blob_fetch_ms"),
                     )
                 elif poll_state == "error":
                     await _record_semilive_chunk_job_state(
@@ -1652,6 +1728,24 @@ def _configure_speculative_tuning_runner() -> None:
         semilive_chunk_stop_wait_s=LIVE_SEMILIVE_CHUNK_STOP_WAIT_S,
         semilive_chunk_post_close_wait_s=LIVE_SEMILIVE_CHUNK_POST_CLOSE_WAIT_S,
         ws_base_url=LIVE_SWEEP_WS_BASE_URL,
+    )
+
+
+def _configure_asr_loadtest_runner() -> None:
+    asr_loadtest_runner.configure(
+        protocol_version=PROTOCOL_VERSION,
+        repo_root=_repo_root(),
+        live_benchmark_export_root=LIVE_BENCHMARK_EXPORT_ROOT,
+        live_sessions=LIVE_SESSIONS,
+        rooted_path_cb=_rooted_path,
+        autosave_snapshot_cb=_try_autosave_live_benchmark_snapshot,
+        ws_base_url=LIVE_SWEEP_WS_BASE_URL,
+        live_audio_sample_width_bytes=LIVE_AUDIO_SAMPLE_WIDTH_BYTES,
+        live_audio_bytes_per_second=LIVE_AUDIO_BYTES_PER_SECOND,
+        semilive_chunk_stop_wait_s=LIVE_SEMILIVE_CHUNK_STOP_WAIT_S,
+        semilive_chunk_post_close_wait_s=LIVE_SEMILIVE_CHUNK_POST_CLOSE_WAIT_S,
+        asr_pool_status_url=ASR_POOL_STATUS_URL,
+        asr_pool_token=ASR_POOL_TOKEN,
     )
 
 
@@ -2196,46 +2290,62 @@ def create_demo_job(
     calibration_enabled = _calibration_requested(request)
     calibration_seconds = _parse_calibration_seconds_env() if calibration_enabled else []
 
-    # Primary job (the one returned to frontend)
-    jp: JobPaths = init_job_in_inbox(
-        orig_filename=orig_name,
-        options=dict(base_options),
-        job_kind="upload_audio",
-    )
-
-    # Schrijf upload naar job upload/
-    dst_primary = jp.upload_dir / orig_name
+    staging_dir = (BASE_JOBS / "_staging_uploads").resolve()
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    staged_upload_path: Path | None = None
     try:
-        with dst_primary.open("wb") as f:
-            shutil.copyfileobj(file.file, f)
+        with NamedTemporaryFile(prefix="upload_", suffix=".bin", dir=str(staging_dir), delete=False) as tmp_f:
+            shutil.copyfileobj(file.file, tmp_f)
+            staged_upload_path = Path(tmp_f.name).resolve()
     finally:
         file.file.close()
 
-    extra_job_ids: list[str] = []
-    extra_failed: list[str] = []
-    if calibration_enabled:
-        sec_list = list(calibration_seconds)
-        if snippet_seconds_override is not None:
-            sec_list = [s for s in sec_list if int(s) != int(snippet_seconds_override)]
-        for sec in sec_list:
-            try:
-                opts = dict(base_options)
-                opts["snippet_seconds"] = int(sec)
-                extra = init_job_in_inbox(orig_filename=orig_name, options=opts, job_kind="upload_audio")
-                dst_extra = extra.upload_dir / orig_name
-                shutil.copy2(dst_primary, dst_extra)
-                extra_job_ids.append(extra.job_id)
-            except Exception as e:
-                extra_failed.append(f"{sec}s:{type(e).__name__}")
+    if staged_upload_path is None or not staged_upload_path.exists():
+        raise HTTPException(status_code=500, detail="Failed to stage upload file")
 
-    return {
-        "job_id": jp.job_id,
-        "state": "queued",
-        "calibration_enqueued": len(extra_job_ids),
-        "calibration_seconds": calibration_seconds if calibration_enabled else [],
-        "calibration_failed": extra_failed,
-        "snippet_seconds": base_options.get("snippet_seconds"),
-    }
+    try:
+        # Primary job (the one returned to frontend)
+        jp: JobPaths = init_job_in_inbox(
+            orig_filename=orig_name,
+            options=dict(base_options),
+            job_kind="upload_audio",
+            upload_src_path=staged_upload_path,
+        )
+        dst_primary = jp.upload_dir / orig_name
+
+        extra_job_ids: list[str] = []
+        extra_failed: list[str] = []
+        if calibration_enabled:
+            sec_list = list(calibration_seconds)
+            if snippet_seconds_override is not None:
+                sec_list = [s for s in sec_list if int(s) != int(snippet_seconds_override)]
+            for sec in sec_list:
+                try:
+                    opts = dict(base_options)
+                    opts["snippet_seconds"] = int(sec)
+                    extra = init_job_in_inbox(
+                        orig_filename=orig_name,
+                        options=opts,
+                        job_kind="upload_audio",
+                        upload_src_path=dst_primary,
+                    )
+                    extra_job_ids.append(extra.job_id)
+                except Exception as e:
+                    extra_failed.append(f"{sec}s:{type(e).__name__}")
+
+        return {
+            "job_id": jp.job_id,
+            "state": "queued",
+            "calibration_enqueued": len(extra_job_ids),
+            "calibration_seconds": calibration_seconds if calibration_enabled else [],
+            "calibration_failed": extra_failed,
+            "snippet_seconds": base_options.get("snippet_seconds"),
+        }
+    finally:
+        try:
+            staged_upload_path.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 @app.get("/demo/jobs/{job_id}")

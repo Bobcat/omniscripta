@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import time
 import wave
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from asr_backend import transcribe_live_chunk_backend
-from asr_contract import AsrRequestError, build_error_response, prepare_request
+from phase_whisperx import run_whisperx_phase_remote
 from worker_status_io import _append_log, _utc_iso, _write_status
 
 
@@ -66,6 +66,9 @@ def run_live_chunk_job(*, job: Any, job_cfg: dict[str, Any]) -> None:
   if not initial_prompt.strip():
     initial_prompt = ""
   beam_size = opts.get("beam_size")
+  live_lane = str(opts.get("live_lane") or "final").strip().lower()
+  if live_lane not in {"final", "speculative"}:
+    live_lane = "final"
 
   _write_status(
     job.status_path,
@@ -105,6 +108,7 @@ def run_live_chunk_job(*, job: Any, job_cfg: dict[str, Any]) -> None:
       "live_session_id": str(opts.get("live_session_id") or ""),
       "live_chunk_index": int(opts.get("live_chunk_index", 0) or 0),
       "t0_offset_ms": int(opts.get("live_chunk_t0_ms", 0) or 0),
+      "live_lane": live_lane,
       "job_id": str(getattr(job, "job_id", "") or ""),
     },
     "outputs": {
@@ -122,33 +126,35 @@ def run_live_chunk_job(*, job: Any, job_cfg: dict[str, Any]) -> None:
       raw_request["options"]["beam_size"] = max(1, int(beam_size))
     except Exception:
       pass
-
-  try:
-    request = prepare_request(raw_request)
-  except AsrRequestError as e_req:
-    response = build_error_response(
-      request=raw_request,
-      code=e_req.code,
-      message=str(e_req),
-      retryable=False,
-      details=e_req.details,
-    )
-  else:
+  speculative_seq = opts.get("speculative_seq")
+  if speculative_seq is not None:
     try:
-      resolved_for_log = dict(request.get("resolved_options") or {})
-      if "initial_prompt" in resolved_for_log:
-        ptxt = str(resolved_for_log.get("initial_prompt") or "")
-        resolved_for_log["initial_prompt"] = {
-          "chars": len(ptxt),
-          "words": len([tok for tok in ptxt.split() if tok]),
-        }
-      _append_log(
-        job.log_path,
-        f"[{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}] WORKER asr_request profile={request.get('profile_id')} resolved_options={json.dumps(resolved_for_log, ensure_ascii=False, sort_keys=True)}",
-      )
+      raw_request["context"]["speculative_seq"] = int(max(0, int(speculative_seq)))
     except Exception:
       pass
-    response = transcribe_live_chunk_backend(job=job, request=request)
+  speculative_audio_end_ms = opts.get("speculative_audio_end_ms")
+  if speculative_audio_end_ms is not None:
+    try:
+      raw_request["context"]["speculative_audio_end_ms"] = int(max(0, int(speculative_audio_end_ms)))
+    except Exception:
+      pass
+
+  request = dict(raw_request)
+  try:
+    resolved_for_log = dict(request.get("resolved_options") or {})
+    if "initial_prompt" in resolved_for_log:
+      ptxt = str(resolved_for_log.get("initial_prompt") or "")
+      resolved_for_log["initial_prompt"] = {
+        "chars": len(ptxt),
+        "words": len([tok for tok in ptxt.split() if tok]),
+      }
+    _append_log(
+      job.log_path,
+      f"[{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}] WORKER asr_request profile={request.get('profile_id')} resolved_options={json.dumps(resolved_for_log, ensure_ascii=False, sort_keys=True)}",
+    )
+  except Exception:
+    pass
+  response = run_whisperx_phase_remote(request_payload=request)
 
   if not bool(response.get("ok", False)):
     err = dict(response.get("error") or {})
@@ -162,6 +168,17 @@ def run_live_chunk_job(*, job: Any, job_cfg: dict[str, Any]) -> None:
   srt_path = Path(srt_path_str)
   if not srt_path.exists():
     raise RuntimeError(f"ASR backend SRT path missing: {srt_path}")
+  # Keep chunk-job contract stable: live_chunk_transcribe reads SRT from job.whisperx_dir.
+  # Remote ASR pool returns an external path, so mirror it into this job workspace.
+  local_srt_path = (job.whisperx_dir / srt_path.name).resolve()
+  try:
+    if srt_path.resolve() != local_srt_path:
+      local_srt_path.parent.mkdir(parents=True, exist_ok=True)
+      shutil.copy2(srt_path, local_srt_path)
+    else:
+      local_srt_path.parent.mkdir(parents=True, exist_ok=True)
+  except Exception as e:
+    raise RuntimeError(f"Failed to stage SRT into job workspace: {e!r}") from e
 
   timings = dict(response.get("timings") or {})
   wx_elapsed = max(0.0, float(timings.get("total_s", 0.0) or 0.0))
@@ -202,6 +219,20 @@ def run_live_chunk_job(*, job: Any, job_cfg: dict[str, Any]) -> None:
       return max(0.0, float(timings[key]))
     except Exception:
       return None
+  def _runtime_int(key: str) -> int | None:
+    if key not in runtime_meta or runtime_meta.get(key) is None:
+      return None
+    try:
+      return int(max(0, int(runtime_meta.get(key))))
+    except Exception:
+      return None
+  def _runtime_float(key: str) -> float | None:
+    if key not in runtime_meta or runtime_meta.get(key) is None:
+      return None
+    try:
+      return max(0.0, float(runtime_meta.get(key)))
+    except Exception:
+      return None
   _write_status(
     job.status_path,
     state="done",
@@ -209,7 +240,7 @@ def run_live_chunk_job(*, job: Any, job_cfg: dict[str, Any]) -> None:
     progress=1.0,
     finished_at=_utc_iso(),
     message="Done",
-    srt_filename=srt_path.name,
+    srt_filename=local_srt_path.name,
     timings_text=timings_text,
     # Chunk jobs do not produce speaker_lines/topics; keep status explicit.
     speaker_lines_filename="",
@@ -221,7 +252,6 @@ def run_live_chunk_job(*, job: Any, job_cfg: dict[str, Any]) -> None:
     asr_runner_kind=str(runtime_meta.get("runner_kind") or ""),
     asr_runner_reused=bool(runtime_meta.get("runner_reused", False)),
     asr_backend=str(runtime_meta.get("backend") or ""),
-    asr_warm_fallback_used=bool(runtime_meta.get("warm_fallback_used", False)),
     asr_device=str(runtime_meta.get("device") or ""),
     asr_model=str(runtime_meta.get("model") or ""),
     asr_initial_prompt_chars=len(resolved_initial_prompt),
@@ -232,4 +262,9 @@ def run_live_chunk_job(*, job: Any, job_cfg: dict[str, Any]) -> None:
     asr_timing_whisperx_align_s=_timing_value("align_s"),
     asr_timing_whisperx_diarize_s=_timing_value("diarize_s"),
     asr_timing_whisperx_finalize_s=_timing_value("finalize_s"),
+    asr_remote_submit_attempts=_runtime_int("remote_submit_attempts"),
+    asr_remote_status_attempts_total=_runtime_int("remote_status_attempts_total"),
+    asr_remote_status_http_calls=_runtime_int("remote_status_http_calls"),
+    asr_remote_cancel_attempts=_runtime_int("remote_cancel_attempts"),
+    asr_blob_fetch_ms=_runtime_float("blob_fetch_ms"),
   )

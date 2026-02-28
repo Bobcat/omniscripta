@@ -51,12 +51,12 @@ Voor v1 blijft de huidige keten bewust bestaan:
 
 - `Portal API` enqueued jobs in de bestaande filesystem queue.
 - `Worker daemon` blijft de actor die `live_chunk` jobs claimt.
-- Worker stuurt vervolgens de ASR request naar de centrale ASR gateway (remote mode), of naar local backend (fallback mode).
+- Worker stuurt vervolgens de ASR request naar de centrale ASR gateway (remote-only).
 
 Rationale:
 
 - kleinste migratiestap zonder directe breuk in huidige job-orchestratie
-- rollback blijft eenvoudig via feature flag
+- workerpad blijft eenduidig (1 transportpad)
 - direct `Portal API -> ASR` kan later als v2-vereenvoudiging worden uitgewerkt
 
 ### Prioriteiten
@@ -112,7 +112,7 @@ Rationale:
 ## Scope v1
 
 - Nieuwe ASR pool service met queue + scheduler + runner slots.
-- Worker remote client met feature flag.
+- Worker remote client (remote-only pad voor live chunk).
 - Endpoints:
   - `POST /asr/v1/requests`
   - `GET /asr/v1/requests/{request_id}`
@@ -160,7 +160,7 @@ Deliverables:
   - context en probleemstelling
   - keuze voor centrale pool en contract
   - alternatieven en trade-offs
-  - rollout + rollback
+  - rollout + operationeel fallbackplan binnen de pool
 - OpenAPI spec voor bovengenoemde endpoints.
 - Besluit vastleggen voor:
   - callerpad (`Worker -> ASR Gateway`, niet direct `Portal API -> ASR`)
@@ -209,19 +209,17 @@ Definition of Done:
 - `background` wordt niet oneindig uitgehongerd.
 - Crash/herstartgedrag is aantoonbaar voor queue + runner slots.
 
-### Fase 3 — Worker integratie met feature flag
+### Fase 3 — Worker integratie (remote-only)
 
 Deliverables:
 
 - Nieuwe remote ASR client in worker.
-- Feature flag:
-  - `TRANSCRIBE_ASR_TRANSPORT=local|remote`
-- Fallback pad naar bestaande local mode.
+- Verwijderen van local transport/fallback pad voor live chunk ASR in worker.
 
 Definition of Done:
 
 - Live chunk pipeline draait end-to-end via remote mode.
-- Rollback naar local mode werkt zonder codewijziging.
+- Geen runtime branching meer tussen local/remote in worker live chunk pad.
 
 ### Fase 4 — Remote audio transport (`blob_ref`)
 
@@ -276,7 +274,7 @@ Definition of Done:
   - TLS/mTLS beleid
 - Is het callerpad expliciet en haalbaar zonder queue-architectuurbreuk?
 - Is `cancel_running` bewust soft-cancel (niet hard kill) en operationeel acceptabel?
-- Is rollback simpel genoeg (`remote` -> `local`)?
+- Is foutafhandeling zonder worker-side local fallback operationeel acceptabel?
 - Is de migratie incrementeel uitvoerbaar zonder lange freeze?
 
 ## Risico's en mitigatie
@@ -299,7 +297,7 @@ Definition of Done:
 - Meerdere gelijktijdige live streams zonder crash of systemische backlog.
 - Centrale ASR capaciteit is observeerbaar en begrensd.
 - `interactive` latency aantoonbaar beter dan `normal/background`.
-- Worker kan via feature flag veilig terug naar local mode.
+- Worker live chunk pad is remote-only en stabiel onder storingen/timeouts.
 - Architectuur klaar voor volgende stap: multi-node ASR pools.
 
 ## Securitypad (v1 -> v2)

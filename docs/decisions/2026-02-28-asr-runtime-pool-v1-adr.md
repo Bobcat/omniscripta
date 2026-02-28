@@ -21,7 +21,7 @@ Voor v1 blijft de bestaande job-orchestratie behouden:
 
 - `Portal API` enqueued filesystem jobs
 - `Worker` claimt jobs
-- `Worker` stuurt ASR requests naar de centrale ASR gateway (remote mode), met local fallback via feature flag
+- `Worker` stuurt ASR requests naar de centrale ASR gateway (remote-only)
 
 Dit voorkomt een grote architecturele breuk in de eerste migratiestap.
 
@@ -119,29 +119,29 @@ Niet gekozen voor interactive v1; cold-start latency te hoog.
 
 ### Positief
 
-- Incrementele migratie met rollback via feature flag
+- Incrementele migratie met eenduidig worker transportpad
 - Centrale resource- en schedulingcontrole
 - Heldere route naar remote ASR nodes
 
 ### Negatief / trade-offs
 
 - Worker blijft in v1 nog tussenlaag
-- Tijdelijke dual-path complexiteit (`local` + `remote`)
+- Minder graceful degradatie bij uitval van pool (geen worker-side local fallback)
 - In-memory queue in pool vereist expliciete crash/recovery afspraken
 
 ## Rollout Plan
 
 1. Fase 0: ADR + OpenAPI afronden en reviewen
 2. Fase 1/2: pool skeleton + scheduler + recovery
-3. Fase 3: worker remote client onder feature flag
+3. Fase 3: worker remote client + verwijderen local/fallback pad
 4. Fase 4: `blob_ref` audio transport
 5. Fase 5: load-validatie en SLO check
 
 ## Rollback Plan
 
-- Zet `TRANSCRIBE_ASR_TRANSPORT=local`
-- Worker gebruikt bestaande local backend pad
-- Centrale pool kan uitgezet worden zonder breuk in live flow
+- Herstel ASR pool service en runner slots (systemd restart + health check).
+- Gebruik queue limits/timeouts en duidelijke retryable fouten als backpressure pad.
+- Geen rollback naar worker-side local ASR pad in v1.
 
 ## Links
 
