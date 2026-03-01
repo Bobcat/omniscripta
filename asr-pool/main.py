@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -54,7 +55,11 @@ def _parse_utc_unix(value: str | None) -> float | None:
         return None
 
 
-from asr_blob_store import AsrBlobError, resolve_blob_ref_to_local_path
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from shared.asr.blob_store import AsrBlobError, resolve_blob_ref_to_local_path
 from asr_contract import (
     AsrRequestError,
     build_error_response,
@@ -170,9 +175,9 @@ class AsrPoolService:
         self._interactive_burst_max = _cfg_int("TRANSCRIBE_ASR_POOL_INTERACTIVE_BURST_MAX", 8, min_value=1)
         self._warm_clients: list[Any] = []
         try:
-            from whisperx_runner_client import _LiveChunkWarmRunnerClient
+            from whisperx_runner_client import _AsrPoolWarmRunnerClient
 
-            self._warm_clients = [_LiveChunkWarmRunnerClient() for _ in range(self._runner_slots)]
+            self._warm_clients = [_AsrPoolWarmRunnerClient() for _ in range(self._runner_slots)]
         except Exception:
             self._warm_clients = []
 
@@ -981,8 +986,6 @@ class AsrPoolService:
         out_dir.mkdir(parents=True, exist_ok=True)
         job = SimpleNamespace(
             whisperx_dir=out_dir,
-            status_path=(job_root / "status.json").resolve(),
-            log_path=(job_root / "worker.log").resolve(),
         )
         if slot_idx < 0 or slot_idx >= len(self._warm_clients):
             return build_error_response(

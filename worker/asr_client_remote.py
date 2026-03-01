@@ -3,23 +3,20 @@ from __future__ import annotations
 import json
 import os
 import random
-import re
-import secrets
-import shutil
-import threading
+import sys
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 from urllib import error as urlerror
 from urllib import parse as urlparse
 from urllib import request as urlrequest
 
-ASR_SCHEMA_VERSION = "asr_v1"
-_BLOB_REF_PREFIX = "fs://"
-_SAFE_TOKEN_RE = re.compile(r"[^a-zA-Z0-9._-]+")
-_cleanup_lock = threading.Lock()
-_last_cleanup_monotonic = 0.0
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+  sys.path.insert(0, str(_REPO_ROOT))
+
+from shared.asr.blob_store import cleanup_blob_store_if_due, upload_local_path_as_blob_ref
+from shared.asr.schema import ASR_SCHEMA_VERSION
 
 
 def _env_str(name: str, default: str) -> str:
@@ -74,99 +71,6 @@ def _build_error_response(
     },
     "warnings": [],
   }
-
-
-def _repo_root() -> Path:
-  return Path(__file__).resolve().parents[1]
-
-
-def _blob_root() -> Path:
-  raw = _env_str("TRANSCRIBE_ASR_BLOB_ROOT", str((_repo_root() / "data" / "asr_blobs").resolve()))
-  p = Path(raw).expanduser()
-  if not p.is_absolute():
-    p = (_repo_root() / p).resolve()
-  p.mkdir(parents=True, exist_ok=True)
-  return p.resolve()
-
-
-def _safe_token(value: str, *, fallback: str = "blob") -> str:
-  s = _SAFE_TOKEN_RE.sub("_", str(value or "").strip())
-  s = s.strip("._-")
-  return s or fallback
-
-
-def _validate_rel_blob_path(rel: str) -> Path:
-  text = str(rel or "").strip().replace("\\", "/")
-  while text.startswith("/"):
-    text = text[1:]
-  p = Path(text)
-  if not p.parts or any(part in {"", ".", ".."} for part in p.parts):
-    raise RuntimeError(f"Invalid blob_ref path: {rel!r}")
-  return p
-
-
-def _upload_local_path_as_blob_ref(*, local_path: Path, request_id: str) -> tuple[str, dict[str, Any]]:
-  src = Path(str(local_path)).expanduser().resolve()
-  if not src.exists() or not src.is_file():
-    raise RuntimeError(f"Blob upload source missing: {src}")
-  root = _blob_root()
-  day = datetime.now(timezone.utc).strftime("%Y%m%d")
-  safe_req = _safe_token(str(request_id or ""), fallback="req")
-  suffix = "".join(ch for ch in str(src.suffix or "") if ch.isalnum() or ch in {".", "_", "-"}).lower()[:16]
-  blob_name = f"{safe_req}_{secrets.token_hex(8)}{suffix}"
-  rel = _validate_rel_blob_path((Path(day) / blob_name).as_posix())
-  dst = (root / rel).resolve()
-  if not dst.is_relative_to(root):
-    raise RuntimeError("Resolved blob target escapes blob root")
-  dst.parent.mkdir(parents=True, exist_ok=True)
-  shutil.copyfile(src, dst)
-  try:
-    os.utime(dst, None)
-  except Exception:
-    pass
-  blob_ref = f"{_BLOB_REF_PREFIX}{rel.as_posix()}"
-  return blob_ref, {
-    "blob_ref": blob_ref,
-    "blob_rel": rel.as_posix(),
-    "blob_path": str(dst),
-    "bytes": int(dst.stat().st_size),
-  }
-
-
-def _cleanup_blob_store_if_due() -> None:
-  interval_s = _env_int("TRANSCRIBE_ASR_BLOB_CLEANUP_INTERVAL_S", 120, min_value=0)
-  ttl_s = _env_int("TRANSCRIBE_ASR_BLOB_TTL_S", 3600, min_value=0)
-  max_scan = _env_int("TRANSCRIBE_ASR_BLOB_CLEANUP_MAX_SCAN_FILES", 5000, min_value=1)
-  if interval_s <= 0 or ttl_s <= 0:
-    return
-  now_mono = time.monotonic()
-  global _last_cleanup_monotonic
-  with _cleanup_lock:
-    if (now_mono - float(_last_cleanup_monotonic)) < float(interval_s):
-      return
-    _last_cleanup_monotonic = now_mono
-
-  root = _blob_root()
-  cutoff_unix = time.time() - float(ttl_s)
-  scanned = 0
-  try:
-    for p in root.rglob("*"):
-      if scanned >= max_scan:
-        break
-      if not p.is_file():
-        continue
-      scanned += 1
-      try:
-        st = p.stat()
-      except Exception:
-        continue
-      if float(st.st_mtime) < cutoff_unix:
-        try:
-          p.unlink(missing_ok=True)
-        except Exception:
-          pass
-  except Exception:
-    return
 
 
 def _pool_base_url() -> str:
@@ -396,7 +300,7 @@ def transcribe_with_remote_pool(
     local_path = str(audio.get("local_path") or "").strip()
     if local_path:
       try:
-        blob_ref, blob_info = _upload_local_path_as_blob_ref(
+        blob_ref, blob_info = upload_local_path_as_blob_ref(
           local_path=Path(local_path),
           request_id=(request_id or f"req_{int(time.time() * 1000)}"),
         )
@@ -404,7 +308,7 @@ def transcribe_with_remote_pool(
         audio["blob_ref"] = str(blob_ref)
         req["audio"] = audio
         blob_meta = dict(blob_info or {})
-        _cleanup_blob_store_if_due()
+        cleanup_blob_store_if_due()
       except Exception as e:
         return _build_error_response(
           request=req,

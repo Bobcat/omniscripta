@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import sys
+from pathlib import Path
 from typing import Any
 
 from asr_profiles import AsrProfileError, resolve_profile_options
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+  sys.path.insert(0, str(_REPO_ROOT))
 
-
-ASR_SCHEMA_VERSION = "asr_v1"
+from shared.asr.schema import ASR_SCHEMA_VERSION
 
 
 class AsrRequestError(ValueError):

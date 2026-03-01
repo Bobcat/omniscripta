@@ -33,8 +33,8 @@ class AsrBlobError(RuntimeError):
 
 
 def _repo_root() -> Path:
-  # worker/asr_blob_store.py -> worker -> repo root
-  return Path(__file__).resolve().parents[1]
+  # shared/asr/blob_store.py -> asr -> shared -> repo root
+  return Path(__file__).resolve().parents[2]
 
 
 def _env_str(name: str, default: str) -> str:
@@ -216,3 +216,4 @@ def cleanup_blob_store_if_due() -> None:
   except Exception:
     # Cleanup must never break ASR path.
     return
+

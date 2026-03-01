@@ -243,9 +243,6 @@ class PersistentWhisperxRunner:
     except Exception:
       pass
 
-  def _suppress_noisy_output(self):
-    return redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO())
-
   def prewarm(self, *, language: str, align_enabled: bool = False) -> dict[str, Any]:
     timings: dict[str, float] = {}
     t0 = time.monotonic()
@@ -308,7 +305,7 @@ class PersistentWhisperxRunner:
         "resolved_options": resolved,
         "error": {
           "code": "ASR_UNSUPPORTED_OUTPUT",
-          "message": "persistent live_chunk runner does not populate requested outputs",
+          "message": "persistent ASR pool runner does not populate requested outputs",
           "retryable": False,
           "details": {"requested_outputs": unsupported_outputs},
         },

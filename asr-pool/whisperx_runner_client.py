@@ -9,7 +9,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from whisperx_runner_runtime import _build_runner_env, _load_server_config, _resolve_whisperx_python
+from whisperx_runner_env import _build_runner_env, _load_server_config, _resolve_whisperx_python
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -58,7 +58,7 @@ def _log(msg: str) -> None:
     pass
 
 
-class _LiveChunkWarmRunnerClient:
+class _AsrPoolWarmRunnerClient:
   def __init__(self) -> None:
     self._lock = threading.RLock()
     self._proc: subprocess.Popen[str] | None = None
@@ -74,12 +74,12 @@ class _LiveChunkWarmRunnerClient:
       if proc is None or proc.poll() is not None or proc.stdin is None:
         raise PersistentRunnerClientError("Persistent runner is not available")
 
-      prewarm_timeout_s = max(5.0, _env_float("TRANSCRIBE_LIVE_CHUNK_WARM_PREWARM_TIMEOUT_S", 180.0))
-      poll_s = max(0.02, _env_float("TRANSCRIBE_LIVE_CHUNK_WARM_RESPONSE_POLL_S", 0.05))
-      prewarm_language = str(os.getenv("TRANSCRIBE_LIVE_CHUNK_WARM_PREWARM_LANGUAGE", "en") or "en").strip() or "en"
-      prewarm_align_enabled = _env_bool("TRANSCRIBE_LIVE_CHUNK_ALIGN_ENABLED", False)
+      prewarm_timeout_s = max(5.0, _env_float("TRANSCRIBE_ASR_POOL_WARM_PREWARM_TIMEOUT_S", 180.0))
+      poll_s = max(0.02, _env_float("TRANSCRIBE_ASR_POOL_WARM_RESPONSE_POLL_S", 0.05))
+      prewarm_language = str(os.getenv("TRANSCRIBE_ASR_POOL_WARM_PREWARM_LANGUAGE", "en") or "en").strip() or "en"
+      prewarm_align_enabled = _env_bool("TRANSCRIBE_ASR_POOL_ALIGN_ENABLED", False)
 
-      ipc_dir = (Path("/tmp") / "transcribe_live_chunk_runner" / "_ipc").resolve()
+      ipc_dir = (Path("/tmp") / "transcribe_asr_pool_runner" / "_ipc").resolve()
       ipc_dir.mkdir(parents=True, exist_ok=True)
       token = uuid.uuid4().hex
       response_path = ipc_dir / f"{token}.prewarm.response.json"
@@ -122,7 +122,7 @@ class _LiveChunkWarmRunnerClient:
     if not server_script.exists():
       raise PersistentRunnerClientError(f"Missing persistent server script: {server_script}")
 
-    init_dir = Path("/tmp") / "transcribe_live_chunk_runner"
+    init_dir = Path("/tmp") / "transcribe_asr_pool_runner"
     init_dir.mkdir(parents=True, exist_ok=True)
     init_path = init_dir / f"init_{os.getpid()}_{uuid.uuid4().hex}.json"
     init_path.write_text(json.dumps({"cfg": cfg}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -203,7 +203,7 @@ class _LiveChunkWarmRunnerClient:
       self._shutdown_locked(reason=reason)
 
   def maybe_shutdown_idle(self) -> None:
-    idle_s = max(0.0, _env_float("TRANSCRIBE_LIVE_CHUNK_WARM_IDLE_S", 120.0))
+    idle_s = max(0.0, _env_float("TRANSCRIBE_ASR_POOL_WARM_IDLE_S", 120.0))
     if idle_s <= 0:
       return
     with self._lock:
@@ -215,8 +215,8 @@ class _LiveChunkWarmRunnerClient:
         self._shutdown_locked(reason="idle_timeout")
 
   def transcribe(self, *, job: Any, request: dict[str, Any], progress_path: Path | None = None) -> dict[str, Any]:
-    request_timeout_s = max(1.0, _env_float("TRANSCRIBE_LIVE_CHUNK_WARM_REQUEST_TIMEOUT_S", 120.0))
-    poll_s = max(0.02, _env_float("TRANSCRIBE_LIVE_CHUNK_WARM_RESPONSE_POLL_S", 0.05))
+    request_timeout_s = max(1.0, _env_float("TRANSCRIBE_ASR_POOL_WARM_REQUEST_TIMEOUT_S", 120.0))
+    poll_s = max(0.02, _env_float("TRANSCRIBE_ASR_POOL_WARM_RESPONSE_POLL_S", 0.05))
     with self._lock:
       self._ensure_runner_locked()
       proc = self._proc
@@ -298,23 +298,3 @@ class _LiveChunkWarmRunnerClient:
 
     self._shutdown_locked(reason=timeout_reason)
     raise PersistentRunnerClientError(f"Persistent runner timed out after {float(timeout_s):.1f}s")
-
-
-_CLIENT = _LiveChunkWarmRunnerClient()
-
-
-def live_chunk_warm_enabled() -> bool:
-  return _env_bool("TRANSCRIBE_LIVE_CHUNK_WARM_ENABLED", True)
-
-
-def transcribe_with_persistent_local_runner(*, job: Any, request: dict[str, Any]) -> dict[str, Any]:
-  _CLIENT.maybe_shutdown_idle()
-  return _CLIENT.transcribe(job=job, request=request)
-
-
-def shutdown_live_chunk_warm_runner(*, reason: str = "manual") -> None:
-  _CLIENT.shutdown(reason=reason)
-
-
-def maybe_shutdown_live_chunk_warm_runner_idle() -> None:
-  _CLIENT.maybe_shutdown_idle()
