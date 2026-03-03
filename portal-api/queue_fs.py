@@ -61,6 +61,7 @@ def init_job_in_inbox(
     options: Dict[str, Any],
     job_kind: str = "upload_audio",
     upload_src_path: str | Path | None = None,
+    move_upload_src: bool = True,
 ) -> JobPaths:
     """
     Maakt een jobfolder in INBOX via:
@@ -134,7 +135,10 @@ def init_job_in_inbox(
         if not src.exists():
             raise FileNotFoundError(f"Upload source missing: {src}")
         dst = (upload_dir / str(orig_filename)).resolve()
-        shutil.copy2(src, dst)
+        if bool(move_upload_src):
+            os.replace(src, dst)
+        else:
+            shutil.copy2(src, dst)
 
     # Atomic publish: tmp -> final
     os.replace(tmp_dir, final_dir)

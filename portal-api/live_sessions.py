@@ -221,6 +221,7 @@ class LiveSession:
     created_unix: float
     expires_unix: float
     ttl_seconds: int
+    live_engine: str = "chunked_dual"
     state: str = "created"
     ws_connected: bool = False
     closed: bool = False
@@ -257,6 +258,7 @@ class LiveSession:
     semilive_speculative_dropped_busy: int = 0
     semilive_speculative_dropped_stale: int = 0
     semilive_time_to_first_speculative_ms: int | None = None
+    semilive_engine_runtime: dict[str, Any] = field(default_factory=dict)
     fixture_id: str = ""
     fixture_version: str = ""
     fixture_test_mode: str = ""
@@ -271,6 +273,7 @@ class ClosedSessionArchive:
     final_text: str
     final_segments: list[dict[str, Any]]
     transcript_revision: int
+    live_engine: str = "chunked_dual"
     recording_path: str = ""
     recording_bytes: int = 0
     recording_duration_ms: int = 0
@@ -287,6 +290,7 @@ class ClosedSessionArchive:
     semilive_speculative_open_window: list[dict[str, Any]] = field(default_factory=list)
     semilive_speculative_open_window_index: int = 0
     semilive_speculative_open_window_started_revision: int = 0
+    semilive_engine_runtime: dict[str, Any] = field(default_factory=dict)
     fixture_id: str = ""
     fixture_version: str = ""
     fixture_test_mode: str = ""
@@ -358,12 +362,18 @@ class LiveSessionManager:
             self._max_sessions = safe
             return prev
 
-    def create_session(self, *, ttl_seconds: int | None = None) -> dict[str, Any]:
+    def create_session(
+        self,
+        *,
+        ttl_seconds: int | None = None,
+        live_engine: str | None = None,
+    ) -> dict[str, Any]:
         now_unix = time.time()
         now_mono = time.monotonic()
         ttl = self._default_ttl_seconds if ttl_seconds is None else int(ttl_seconds)
         ttl = int(max(10, ttl))
         preconnect_ttl = int(max(5, min(ttl, self._preconnect_ttl_seconds)))
+        engine_name = str(live_engine or "").strip().lower() or "chunked_dual"
 
         with self._lock:
             self._cleanup_expired_locked(now_unix)
@@ -377,6 +387,7 @@ class LiveSessionManager:
                 created_unix=now_unix,
                 expires_unix=(now_unix + preconnect_ttl),
                 ttl_seconds=ttl,
+                live_engine=engine_name,
                 last_seen_unix=now_unix,
             )
             self._sessions[session_id] = sess
@@ -597,6 +608,7 @@ class LiveSessionManager:
         text: str,
         speculative_seq: int,
         audio_end_ms: int,
+        merge_with_existing: bool = True,
     ) -> dict[str, Any]:
         now_unix = time.time()
         incoming_raw_text = str(text or "")
@@ -611,10 +623,18 @@ class LiveSessionManager:
             if safe_seq <= current_seq:
                 return self._snapshot_locked(sess)
 
-            merged_spec_text, seam_meta = self._merge_speculative_preview_text_locked(
-                existing_text=str(sess.semilive_speculative_text or ""),
-                incoming_text=incoming_raw_text,
-            )
+            if merge_with_existing:
+                merged_spec_text, seam_meta = self._merge_speculative_preview_text_locked(
+                    existing_text=str(sess.semilive_speculative_text or ""),
+                    incoming_text=incoming_raw_text,
+                )
+            else:
+                merged_spec_text = str(incoming_raw_text or "").strip()
+                seam_meta = {
+                    "dedup_applied": False,
+                    "merge_overlap_words": 0,
+                    "dedup_words_trimmed": 0,
+                }
             suffix_text, final_dedup_meta = self._speculative_suffix_from_final_locked(
                 final_text=str(sess.semilive_final_text or ""),
                 speculative_text=merged_spec_text,
@@ -691,6 +711,22 @@ class LiveSessionManager:
                 sess.semilive_speculative_dropped_stale = int(max(0, int(dropped_stale)))
             if time_to_first_speculative_ms is not None:
                 sess.semilive_time_to_first_speculative_ms = int(max(0, int(time_to_first_speculative_ms)))
+            return self._snapshot_locked(sess)
+
+    def set_semilive_engine_runtime(
+        self,
+        session_id: str,
+        *,
+        runtime: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        now_unix = time.time()
+        payload = dict(runtime or {})
+        with self._lock:
+            sess = self._sessions.get(session_id)
+            if not sess:
+                raise KeyError("session_not_found")
+            sess.last_seen_unix = now_unix
+            sess.semilive_engine_runtime = payload
             return self._snapshot_locked(sess)
 
     def record_semilive_chunk_result(
@@ -1030,8 +1066,10 @@ class LiveSessionManager:
         chunks_failed: int = 0,
         finalization_state: str = "",
         batch_job_id: str = "",
+        live_engine: str | None = None,
     ) -> dict[str, Any]:
         now = time.time()
+        requested_engine = str(live_engine or "").strip().lower()
         with self._lock:
             self._cleanup_expired_locked(now)
             arc = ClosedSessionArchive(
@@ -1042,6 +1080,7 @@ class LiveSessionManager:
                 final_text=str(final_text or ""),
                 final_segments=[dict(seg) for seg in (final_segments or [])],
                 transcript_revision=int(max(0, transcript_revision)),
+                live_engine=(requested_engine or "chunked_dual"),
                 recording_path=str(recording_path or ""),
                 recording_bytes=int(max(0, recording_bytes)),
                 recording_duration_ms=int(max(0, recording_duration_ms)),
@@ -1064,6 +1103,7 @@ class LiveSessionManager:
                 arc.semilive_final_text = str(src_sess.semilive_final_text or "")
                 arc.semilive_final_segments = [dict(seg) for seg in src_sess.semilive_final_segments]
                 arc.semilive_chunk_results = [dict(r) for r in src_sess.semilive_chunk_results]
+                arc.semilive_engine_runtime = dict(src_sess.semilive_engine_runtime or {})
                 arc.semilive_speculative_windows = _copy_speculative_window_records(src_sess.semilive_speculative_windows)
                 arc.semilive_speculative_open_window = [
                     dict(item) for item in src_sess.semilive_speculative_open_window if isinstance(item, dict)
@@ -1077,6 +1117,8 @@ class LiveSessionManager:
                 arc.fixture_id = str(src_sess.fixture_id or "")
                 arc.fixture_version = str(src_sess.fixture_version or "")
                 arc.fixture_test_mode = str(src_sess.fixture_test_mode or "")
+                if not requested_engine:
+                    arc.live_engine = str(src_sess.live_engine or "chunked_dual")
             self._archives[arc.session_id] = arc
             return self._archive_snapshot_locked(arc)
 
@@ -1089,12 +1131,19 @@ class LiveSessionManager:
                 raise KeyError("archive_not_found")
             return self._archive_snapshot_locked(arc)
 
+    @staticmethod
+    def _preview_source_for_engine(live_engine: str) -> str:
+        if str(live_engine or "").strip().lower() == "rolling_context":
+            return "uncommitted_preview"
+        return "speculative_lane"
+
     def _snapshot_locked(self, sess: LiveSession) -> dict[str, Any]:
         now_mono = time.monotonic()
         age_s = max(0.0, float(now_mono - sess.created_monotonic))
         ttl_remaining = max(0.0, float(sess.expires_unix - time.time()))
         return {
             "session_id": sess.session_id,
+            "live_engine": str(sess.live_engine or "chunked_dual"),
             "state": sess.state,
             "ws_connected": bool(sess.ws_connected),
             "closed": bool(sess.closed),
@@ -1133,6 +1182,7 @@ class LiveSessionManager:
     def _archive_snapshot_locked(self, arc: ClosedSessionArchive) -> dict[str, Any]:
         return {
             "session_id": arc.session_id,
+            "live_engine": str(arc.live_engine or "chunked_dual"),
             "close_reason": arc.close_reason,
             "closed_at_utc": _utc_iso(arc.closed_unix),
             "expires_at_utc": _utc_iso(arc.expires_unix),
@@ -1162,10 +1212,16 @@ class LiveSessionManager:
         dedup_chunks_applied = sum(1 for r in chunks if bool(r.get("dedup_applied")))
         dedup_words_trimmed_total = sum(int(max(0, int(r.get("dedup_words_trimmed") or 0))) for r in chunks)
         chunk_debug = _semilive_chunk_rows_debug_metrics(chunks)
+        live_engine = str(sess.live_engine or "chunked_dual")
+        preview_source = self._preview_source_for_engine(live_engine)
         speculative_suffix_text, _ = self._speculative_suffix_from_final_locked(
             final_text=str(sess.semilive_final_text or ""),
             speculative_text=str(sess.semilive_speculative_text or ""),
         )
+        if live_engine == "rolling_context" and not str(sess.semilive_final_text or "").strip():
+            # Rolling engine should expose uncommitted preview immediately,
+            # even before the first committed segment exists.
+            speculative_suffix_text = str(sess.semilive_speculative_text or "").strip()
         final_covered_ms = 0
         for seg in sess.semilive_final_segments:
             if not isinstance(seg, dict):
@@ -1186,9 +1242,18 @@ class LiveSessionManager:
                     t1 = 0
                 if t1 > final_covered_ms:
                     final_covered_ms = t1
+        engine_runtime = {
+            "mode": ("single_lane" if live_engine == "rolling_context" else "dual_lane"),
+            "preview_source": str(preview_source),
+            "uncommitted_audio_ms": int(max(0, int(sess.recording_duration_ms) - int(final_covered_ms))),
+        }
+        extra_engine_runtime = dict(sess.semilive_engine_runtime or {})
+        if extra_engine_runtime:
+            engine_runtime["engine_state"] = extra_engine_runtime
         return {
             "session_id": str(sess.session_id),
             "source": "active",
+            "live_engine": live_engine,
             "state": str(sess.state or ""),
             "recording_state": str(sess.recording_state or ""),
             "finalization_state": str(sess.finalization_state or ""),
@@ -1218,6 +1283,7 @@ class LiveSessionManager:
             "dedup_words_trimmed_total": int(max(0, dedup_words_trimmed_total)),
             "speculative_preview": {
                 "text": str(speculative_suffix_text or ""),
+                "source": str(preview_source),
                 "speculative_seq": int(max(-1, int(sess.semilive_speculative_seq))),
                 "audio_end_ms": int(max(0, int(sess.semilive_speculative_audio_end_ms or 0))),
                 "updated_at_utc": (
@@ -1237,6 +1303,7 @@ class LiveSessionManager:
                     else None
                 ),
             },
+            "engine_runtime": engine_runtime,
             "fixture_id": str(sess.fixture_id or ""),
             "fixture_version": str(sess.fixture_version or ""),
             "fixture_test_mode": str(sess.fixture_test_mode or ""),
@@ -1247,6 +1314,8 @@ class LiveSessionManager:
         dedup_chunks_applied = sum(1 for r in chunks if bool(r.get("dedup_applied")))
         dedup_words_trimmed_total = sum(int(max(0, int(r.get("dedup_words_trimmed") or 0))) for r in chunks)
         chunk_debug = _semilive_chunk_rows_debug_metrics(chunks)
+        live_engine = str(arc.live_engine or "chunked_dual")
+        preview_source = self._preview_source_for_engine(live_engine)
         final_segments_src = arc.semilive_final_segments or arc.final_segments
         final_covered_ms = 0
         for seg in final_segments_src:
@@ -1268,9 +1337,18 @@ class LiveSessionManager:
                     t1 = 0
                 if t1 > final_covered_ms:
                     final_covered_ms = t1
+        engine_runtime = {
+            "mode": ("single_lane" if live_engine == "rolling_context" else "dual_lane"),
+            "preview_source": str(preview_source),
+            "uncommitted_audio_ms": int(max(0, int(arc.recording_duration_ms) - int(final_covered_ms))),
+        }
+        extra_engine_runtime = dict(arc.semilive_engine_runtime or {})
+        if extra_engine_runtime:
+            engine_runtime["engine_state"] = extra_engine_runtime
         return {
             "session_id": str(arc.session_id),
             "source": "archive",
+            "live_engine": live_engine,
             "close_reason": str(arc.close_reason or ""),
             "finalization_state": str(arc.finalization_state or ""),
             "batch_job_id": str(arc.batch_job_id or ""),
@@ -1299,6 +1377,7 @@ class LiveSessionManager:
             "dedup_words_trimmed_total": int(max(0, dedup_words_trimmed_total)),
             "speculative_preview": {
                 "text": "",
+                "source": str(preview_source),
                 "speculative_seq": -1,
                 "audio_end_ms": 0,
                 "updated_at_utc": "",
@@ -1310,6 +1389,7 @@ class LiveSessionManager:
                 "dropped_stale": 0,
                 "time_to_first_speculative_ms": None,
             },
+            "engine_runtime": engine_runtime,
             "fixture_id": str(arc.fixture_id or ""),
             "fixture_version": str(arc.fixture_version or ""),
             "fixture_test_mode": str(arc.fixture_test_mode or ""),

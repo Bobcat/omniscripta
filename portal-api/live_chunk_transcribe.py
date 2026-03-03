@@ -241,13 +241,15 @@ class LiveChunkBatchBridge:
             },
             job_kind="live_chunk",
             upload_src_path=chunk_wav,
+            move_upload_src=True,
         )
+        chunk_upload_path = (job.upload_dir / chunk_wav.name).resolve()
         return EnqueuedChunkJob(
             session_id=str(session_id),
             chunk_index=idx,
             job_id=str(job.job_id),
             job_dir=str(job.dir),
-            chunk_wav_path=str(chunk_wav),
+            chunk_wav_path=str(chunk_upload_path),
             language=str(language or self.language),
             initial_prompt_chars=len(prompt_text),
             initial_prompt_words=prompt_words,

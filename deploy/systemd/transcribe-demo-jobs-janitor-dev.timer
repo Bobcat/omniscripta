@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Transcribe Dev demo_jobs janitor every 5 minutes
+
+[Timer]
+OnBootSec=2m
+OnUnitActiveSec=5m
+Persistent=true
+Unit=transcribe-demo-jobs-janitor-dev.service
+
+[Install]
+WantedBy=timers.target
+

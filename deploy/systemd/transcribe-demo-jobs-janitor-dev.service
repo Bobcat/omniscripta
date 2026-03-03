@@ -1,0 +1,10 @@
+[Unit]
+Description=Transcribe Dev demo_jobs janitor (live_chunk only)
+After=network.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/gunnar/projects/transcribe-dev
+EnvironmentFile=%h/.config/transcribe/dev.env
+ExecStart=/usr/bin/python3 /home/gunnar/projects/transcribe-dev/deploy/jobs_janitor.py
+
