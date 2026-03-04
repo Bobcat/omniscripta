@@ -81,6 +81,12 @@ def prepare_request(raw_request: dict[str, Any]) -> dict[str, Any]:
   req["outputs"] = _normalize_outputs(req.get("outputs"))
   req["options"] = dict(req.get("options") or {})
   req["context"] = dict(req.get("context") or {})
+  if "speculative_seq" in req["context"] or "speculative_audio_end_ms" in req["context"]:
+    raise AsrRequestError(
+      "ASR_CONTEXT_KEY_UNSUPPORTED",
+      "Deprecated context keys are not supported; use preview_seq/preview_audio_end_ms",
+      details={"deprecated_keys": ["speculative_seq", "speculative_audio_end_ms"]},
+    )
   req["priority"] = str(req.get("priority") or "normal").strip().lower() or "normal"
   if req["priority"] not in {"interactive", "normal", "background"}:
     req["priority"] = "normal"

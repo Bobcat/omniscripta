@@ -195,8 +195,8 @@ class LiveChunkBatchBridge:
         asr_beam_size: int | None = None,
         initial_prompt: str | None = None,
         live_lane: str | None = None,
-        speculative_seq: int | None = None,
-        speculative_audio_end_ms: int | None = None,
+        preview_seq: int | None = None,
+        preview_audio_end_ms: int | None = None,
     ) -> EnqueuedChunkJob:
         safe_id = _safe_session_id(session_id)
         idx = int(max(0, chunk_index))
@@ -232,11 +232,11 @@ class LiveChunkBatchBridge:
                 "live_chunk_t1_ms": int(max(max(0, t0_ms), t1_ms)),
                 "initial_prompt": prompt_text if prompt_text else None,
                 "live_lane": str(live_lane or "final"),
-                "speculative_seq": (
-                    int(max(0, speculative_seq)) if speculative_seq is not None else None
+                "preview_seq": (
+                    int(max(0, preview_seq)) if preview_seq is not None else None
                 ),
-                "speculative_audio_end_ms": (
-                    int(max(0, speculative_audio_end_ms)) if speculative_audio_end_ms is not None else None
+                "preview_audio_end_ms": (
+                    int(max(0, preview_audio_end_ms)) if preview_audio_end_ms is not None else None
                 ),
             },
             job_kind="live_chunk",
@@ -291,7 +291,7 @@ class LiveChunkBatchBridge:
                 err = ""
 
         # Some short/empty chunk jobs fail late on speaker_lines generation while transcript output is empty.
-        # For semilive chunk mode this should not poison the whole session result.
+        # For live chunk mode this should not poison the whole session result.
         if (not ok) and done and _is_speaker_lines_parse_error(status, err):
             transcript_end = str(status.get("transcript_end") or "").strip()
             if transcript_end in {"", "00:00:00", "0:00:00"} and not plain.strip() and not segments:

@@ -183,8 +183,7 @@ class AsrPoolService:
 
         self._records: dict[str, _Record] = {}
         self._queues: dict[str, deque[str]] = {
-            "interactive_final": deque(),
-            "interactive_speculative": deque(),
+            "interactive": deque(),
             "normal": deque(),
             "background": deque(),
         }
@@ -422,9 +421,8 @@ class AsrPoolService:
         request_id = str(prepared.get("request_id") or "").strip()
         payload_hash = _json_hash(prepared)
         priority = str(prepared.get("priority") or "normal").strip().lower() or "normal"
-        context = dict(prepared.get("context") or {})
-        live_lane = str(context.get("live_lane") or "").strip().lower()
-        queue_key = self._queue_key_for(priority=priority, live_lane=live_lane)
+        live_lane = "single"
+        queue_key = self._queue_key_for(priority=priority)
 
         async with self._lock:
             self._maybe_prune_records_unlocked(reason="submit", force=False)
@@ -435,7 +433,6 @@ class AsrPoolService:
                         "submit_conflict",
                         request_id=str(request_id),
                         priority=str(priority),
-                        live_lane=str(live_lane),
                     )
                     return 409, {
                         "code": "ASR_REQUEST_ID_CONFLICT",
@@ -455,7 +452,6 @@ class AsrPoolService:
                     "submit_rejected_queue_full",
                     request_id=str(request_id),
                     priority=str(priority),
-                    live_lane=str(live_lane),
                     queue_depth=self._queue_depth_snapshot_unlocked(),
                     queue_limit=int(self._queue_limits.get(priority, 1)),
                 )
@@ -607,18 +603,16 @@ class AsrPoolService:
                     "last_prune_count": int(self._records_last_prune_count),
                 },
                 "scheduling_policy": {
-                    "interactive_final_first": True,
-                    "speculative_mode": "metadata.live_lane",
+                    "interactive_single_queue": True,
                     "interactive_burst_max": int(self._interactive_burst_max),
                     "fairness_mode": "burst_then_round_robin_noninteractive",
                 },
             }
 
-    def _queue_key_for(self, *, priority: str, live_lane: str) -> str:
+    def _queue_key_for(self, *, priority: str) -> str:
         p = str(priority or "normal").strip().lower() or "normal"
-        lane = str(live_lane or "").strip().lower()
         if p == "interactive":
-            return "interactive_speculative" if lane == "speculative" else "interactive_final"
+            return "interactive"
         if p == "background":
             return "background"
         return "normal"
@@ -626,7 +620,7 @@ class AsrPoolService:
     def _priority_depth(self, priority: str) -> int:
         p = str(priority or "").strip().lower()
         if p == "interactive":
-            return int(len(self._queues["interactive_final"]) + len(self._queues["interactive_speculative"]))
+            return int(len(self._queues["interactive"]))
         if p == "background":
             return int(len(self._queues["background"]))
         return int(len(self._queues["normal"]))
@@ -672,8 +666,8 @@ class AsrPoolService:
             and int(self._interactive_burst_count) >= int(self._interactive_burst_max)
         )
         if prefer_noninteractive:
-            return self._noninteractive_order_unlocked() + ["interactive_final", "interactive_speculative"]
-        return ["interactive_final", "interactive_speculative"] + self._noninteractive_order_unlocked()
+            return self._noninteractive_order_unlocked() + ["interactive"]
+        return ["interactive"] + self._noninteractive_order_unlocked()
 
     def _note_dequeue_key_unlocked(self, queue_key: str) -> None:
         key = str(queue_key or "").strip().lower()

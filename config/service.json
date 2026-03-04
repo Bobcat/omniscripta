@@ -2,9 +2,9 @@
   "snip": { "minutes_default": 15 },
 
   "live": {
-    "engine": "chunked_dual",
+    "engine": "rolling_context",
     "rolling_single_commit_min_ms": 12000,
-    "mode": "semilive_chunked",
+    "mode": "rolling_context",
     "sample_rate_hz": 16000,
     "channels": 1
   },

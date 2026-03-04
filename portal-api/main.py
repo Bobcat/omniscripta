@@ -24,13 +24,9 @@ from live_protocol import (
     ready_event,
     stats_event,
 )
-from live_quality import score_semilive_text_against_fixture, load_fixture_reference
+from live_quality import score_live_text_against_fixture, load_fixture_reference
 from live_sessions import LiveSessionManager
-from live_engine_chunked_dual import run_live_session_ws_chunked_dual
 from live_engine_rolling_context import run_live_session_ws_rolling_context
-from speculative_quality import score_speculative_history_against_final, score_speculative_history_against_reference
-import speculative_tuning_runner
-import asr_loadtest_runner
 from queue_fs import init_job_in_inbox, JobPaths, BASE as BASE_JOBS
 
 ROOT_PATH = os.getenv("TRANSCRIBE_ROOT_PATH", "/api")
@@ -51,144 +47,22 @@ LIVE_AUDIO_SAMPLE_WIDTH_BYTES = 2
 LIVE_AUDIO_BYTES_PER_SECOND = int(max(1, LIVE_AUDIO_SAMPLE_RATE_HZ * LIVE_AUDIO_CHANNELS * LIVE_AUDIO_SAMPLE_WIDTH_BYTES))
 
 
-def _parse_live_engine(value: str) -> str:
-    raw = str(value or "").strip().lower()
-    if not raw:
-        return "chunked_dual"
-    if raw in {"chunked_dual", "rolling_context"}:
-        return raw
-    raise RuntimeError(
-        "invalid TRANSCRIBE_LIVE_ENGINE value; expected one of: chunked_dual, rolling_context"
-    )
-
-
-LIVE_ENGINE = _parse_live_engine(os.getenv("TRANSCRIBE_LIVE_ENGINE", "chunked_dual"))
-LIVE_SEMILIVE_CHUNK_BATCH_SHADOW = str(os.getenv("TRANSCRIBE_LIVE_SEMILIVE_CHUNK_BATCH_SHADOW", "1")).strip().lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
-}
+LIVE_ENGINE = "rolling_context"
 try:
-    LIVE_SEMILIVE_CHUNK_POLL_INTERVAL_S = max(
-        0.1,
-        float(str(os.getenv("TRANSCRIBE_LIVE_SEMILIVE_CHUNK_POLL_INTERVAL_S", "0.75")).strip() or "0.75"),
-    )
-except Exception:
-    LIVE_SEMILIVE_CHUNK_POLL_INTERVAL_S = 0.75
-try:
-    LIVE_SEMILIVE_CHUNK_STOP_WAIT_S = max(
+    LIVE_DRAIN_WAIT_S = max(
         0.0,
-        float(str(os.getenv("TRANSCRIBE_LIVE_SEMILIVE_CHUNK_STOP_WAIT_S", "20.0")).strip() or "20.0"),
+        float(str(os.getenv("TRANSCRIBE_LIVE_DRAIN_WAIT_S", "20.0")).strip() or "20.0"),
     )
 except Exception:
-    LIVE_SEMILIVE_CHUNK_STOP_WAIT_S = 20.0
+    LIVE_DRAIN_WAIT_S = 20.0
 try:
-    LIVE_SEMILIVE_CHUNK_POST_CLOSE_WAIT_S = max(
+    LIVE_POST_CLOSE_WAIT_S = max(
         0.0,
-        float(str(os.getenv("TRANSCRIBE_LIVE_SEMILIVE_CHUNK_POST_CLOSE_WAIT_S", "60.0")).strip() or "60.0"),
+        float(str(os.getenv("TRANSCRIBE_LIVE_POST_CLOSE_WAIT_S", "60.0")).strip() or "60.0"),
     )
 except Exception:
-    LIVE_SEMILIVE_CHUNK_POST_CLOSE_WAIT_S = 60.0
-LIVE_SEMILIVE_CHUNK_LANGUAGE = (str(os.getenv("TRANSCRIBE_LIVE_SEMILIVE_CHUNK_LANGUAGE", "en")) or "en").strip() or "en"
-LIVE_SEMILIVE_CHUNK_ENERGY_THRESHOLD = max(
-    0,
-    int(str(os.getenv("TRANSCRIBE_LIVE_SEMILIVE_CHUNK_ENERGY_THRESHOLD", "12")).strip() or "12"),
-)
-LIVE_SEMILIVE_CHUNK_SILENCE_MS = max(
-    0,
-    int(str(os.getenv("TRANSCRIBE_LIVE_SEMILIVE_CHUNK_SILENCE_MS", "1200")).strip() or "1200"),
-)
-LIVE_SEMILIVE_CHUNK_MAX_MS = max(
-    200,
-    int(str(os.getenv("TRANSCRIBE_LIVE_SEMILIVE_CHUNK_MAX_MS", "20000")).strip() or "20000"),
-)
-LIVE_SEMILIVE_CHUNK_MIN_MS = max(
-    0,
-    int(str(os.getenv("TRANSCRIBE_LIVE_SEMILIVE_CHUNK_MIN_MS", "800")).strip() or "800"),
-)
-LIVE_SEMILIVE_CHUNK_PRE_ROLL_MS = max(
-    0,
-    int(str(os.getenv("TRANSCRIBE_LIVE_SEMILIVE_CHUNK_PRE_ROLL_MS", "800")).strip() or "800"),
-)
-LIVE_SEMILIVE_DEDUP_ENABLED = str(os.getenv("TRANSCRIBE_LIVE_SEMILIVE_DEDUP_ENABLED", "1")).strip().lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
-}
-LIVE_SEMILIVE_DEDUP_MIN_WORDS = max(
-    1,
-    int(str(os.getenv("TRANSCRIBE_LIVE_SEMILIVE_DEDUP_MIN_WORDS", "3")).strip() or "3"),
-)
-LIVE_SEMILIVE_DEDUP_MAX_TRIM_WORDS = max(
-    LIVE_SEMILIVE_DEDUP_MIN_WORDS,
-    int(str(os.getenv("TRANSCRIBE_LIVE_SEMILIVE_DEDUP_MAX_TRIM_WORDS", "24")).strip() or "24"),
-)
-LIVE_SEMILIVE_INITIAL_PROMPT_ENABLED = str(
-    os.getenv("TRANSCRIBE_LIVE_SEMILIVE_INITIAL_PROMPT_ENABLED", "1")
-).strip().lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
-}
-LIVE_SEMILIVE_SPECULATIVE_INITIAL_PROMPT_ENABLED = str(
-    os.getenv("TRANSCRIBE_LIVE_SEMILIVE_SPECULATIVE_INITIAL_PROMPT_ENABLED", "1")
-).strip().lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
-}
-LIVE_SEMILIVE_INITIAL_PROMPT_TAIL_WORDS = max(
-    1,
-    int(str(os.getenv("TRANSCRIBE_LIVE_SEMILIVE_INITIAL_PROMPT_TAIL_WORDS", "30")).strip() or "30"),
-)
-LIVE_SEMILIVE_INITIAL_PROMPT_MIN_WORDS = max(
-    1,
-    int(str(os.getenv("TRANSCRIBE_LIVE_SEMILIVE_INITIAL_PROMPT_MIN_WORDS", "6")).strip() or "6"),
-)
-LIVE_SEMILIVE_INITIAL_PROMPT_MAX_CHARS = max(
-    0,
-    int(str(os.getenv("TRANSCRIBE_LIVE_SEMILIVE_INITIAL_PROMPT_MAX_CHARS", "400")).strip() or "400"),
-)
-LIVE_SEMILIVE_SPECULATIVE_ENABLED = str(
-    os.getenv("TRANSCRIBE_LIVE_SEMILIVE_SPECULATIVE_ENABLED", "1")
-).strip().lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
-}
-LIVE_SEMILIVE_SPECULATIVE_INTERVAL_MS = max(
-    200,
-    int(str(os.getenv("TRANSCRIBE_LIVE_SEMILIVE_SPECULATIVE_INTERVAL_MS", "1800")).strip() or "1800"),
-)
-LIVE_SEMILIVE_SPECULATIVE_WINDOW_MS = max(
-    LIVE_SEMILIVE_SPECULATIVE_INTERVAL_MS,
-    int(str(os.getenv("TRANSCRIBE_LIVE_SEMILIVE_SPECULATIVE_WINDOW_MS", "3000")).strip() or "3000"),
-)
-LIVE_SEMILIVE_SPECULATIVE_OVERLAP_MS = max(
-    0,
-    int(str(os.getenv("TRANSCRIBE_LIVE_SEMILIVE_SPECULATIVE_OVERLAP_MS", "800")).strip() or "800"),
-)
-LIVE_SEMILIVE_SPECULATIVE_MAX_STALENESS_MS = max(
-    0,
-    int(str(os.getenv("TRANSCRIBE_LIVE_SEMILIVE_SPECULATIVE_MAX_STALENESS_MS", "1200")).strip() or "1200"),
-)
-LIVE_SEMILIVE_SPECULATIVE_REQUIRE_NO_FINAL_PENDING = str(
-    os.getenv("TRANSCRIBE_LIVE_SEMILIVE_SPECULATIVE_REQUIRE_NO_FINAL_PENDING", "1")
-).strip().lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
-}
-LIVE_SEMILIVE_FINAL_BEAM_SIZE_OVERRIDE = max(
-    0,
-    int(str(os.getenv("TRANSCRIBE_LIVE_SEMILIVE_FINAL_BEAM_SIZE_OVERRIDE", "0")).strip() or "0"),
-)
+    LIVE_POST_CLOSE_WAIT_S = 60.0
+LIVE_ASR_LANGUAGE = (str(os.getenv("TRANSCRIBE_LIVE_ASR_LANGUAGE", "en")) or "en").strip() or "en"
 LIVE_ROLLING_POLL_INTERVAL_MS = max(
     100,
     int(str(os.getenv("TRANSCRIBE_LIVE_ROLLING_POLL_INTERVAL_MS", "250")).strip() or "250"),
@@ -233,51 +107,13 @@ LIVE_ROLLING_REQUIRE_SINGLE_INFLIGHT = str(
     "yes",
     "on",
 }
-LIVE_SWEEP_WS_BASE_URL = (str(os.getenv("TRANSCRIBE_LIVE_SWEEP_WS_BASE_URL", "ws://127.0.0.1:8001")) or "").strip()
-ASR_POOL_STATUS_URL = (str(os.getenv("TRANSCRIBE_ASR_POOL_STATUS_URL", "http://127.0.0.1:8090/asr/v1/pool")) or "").strip()
-ASR_POOL_TOKEN = (str(os.getenv("TRANSCRIBE_ASR_POOL_TOKEN", "")) or "").strip()
 LIVE_SESSIONS = LiveSessionManager(
     default_ttl_seconds=LIVE_SESSION_TTL_S,
     preconnect_ttl_seconds=LIVE_SESSION_PRECONNECT_TTL_S,
     max_sessions=LIVE_MAX_SESSIONS,
     archive_ttl_seconds=LIVE_ARCHIVE_TTL_S,
     max_archives=LIVE_MAX_ARCHIVES,
-    semilive_text_dedup_enabled=LIVE_SEMILIVE_DEDUP_ENABLED,
-    semilive_text_dedup_min_words=LIVE_SEMILIVE_DEDUP_MIN_WORDS,
-    semilive_text_dedup_max_trim_words=LIVE_SEMILIVE_DEDUP_MAX_TRIM_WORDS,
 )
-def _live_engine_chunked_dual_config() -> dict[str, Any]:
-    return {
-        "LIVE_ENGINE": LIVE_ENGINE,
-        "LIVE_AUDIO_SAMPLE_RATE_HZ": LIVE_AUDIO_SAMPLE_RATE_HZ,
-        "LIVE_AUDIO_CHANNELS": LIVE_AUDIO_CHANNELS,
-        "LIVE_AUDIO_SAMPLE_WIDTH_BYTES": LIVE_AUDIO_SAMPLE_WIDTH_BYTES,
-        "LIVE_AUDIO_BYTES_PER_SECOND": LIVE_AUDIO_BYTES_PER_SECOND,
-        "LIVE_SEMILIVE_CHUNK_BATCH_SHADOW": LIVE_SEMILIVE_CHUNK_BATCH_SHADOW,
-        "LIVE_SEMILIVE_CHUNK_POLL_INTERVAL_S": LIVE_SEMILIVE_CHUNK_POLL_INTERVAL_S,
-        "LIVE_SEMILIVE_CHUNK_STOP_WAIT_S": LIVE_SEMILIVE_CHUNK_STOP_WAIT_S,
-        "LIVE_SEMILIVE_CHUNK_POST_CLOSE_WAIT_S": LIVE_SEMILIVE_CHUNK_POST_CLOSE_WAIT_S,
-        "LIVE_SEMILIVE_CHUNK_LANGUAGE": LIVE_SEMILIVE_CHUNK_LANGUAGE,
-        "LIVE_SEMILIVE_CHUNK_ENERGY_THRESHOLD": LIVE_SEMILIVE_CHUNK_ENERGY_THRESHOLD,
-        "LIVE_SEMILIVE_CHUNK_SILENCE_MS": LIVE_SEMILIVE_CHUNK_SILENCE_MS,
-        "LIVE_SEMILIVE_CHUNK_MAX_MS": LIVE_SEMILIVE_CHUNK_MAX_MS,
-        "LIVE_SEMILIVE_CHUNK_MIN_MS": LIVE_SEMILIVE_CHUNK_MIN_MS,
-        "LIVE_SEMILIVE_CHUNK_PRE_ROLL_MS": LIVE_SEMILIVE_CHUNK_PRE_ROLL_MS,
-        "LIVE_SEMILIVE_INITIAL_PROMPT_ENABLED": LIVE_SEMILIVE_INITIAL_PROMPT_ENABLED,
-        "LIVE_SEMILIVE_SPECULATIVE_INITIAL_PROMPT_ENABLED": LIVE_SEMILIVE_SPECULATIVE_INITIAL_PROMPT_ENABLED,
-        "LIVE_SEMILIVE_INITIAL_PROMPT_TAIL_WORDS": LIVE_SEMILIVE_INITIAL_PROMPT_TAIL_WORDS,
-        "LIVE_SEMILIVE_INITIAL_PROMPT_MIN_WORDS": LIVE_SEMILIVE_INITIAL_PROMPT_MIN_WORDS,
-        "LIVE_SEMILIVE_INITIAL_PROMPT_MAX_CHARS": LIVE_SEMILIVE_INITIAL_PROMPT_MAX_CHARS,
-        "LIVE_SEMILIVE_SPECULATIVE_ENABLED": LIVE_SEMILIVE_SPECULATIVE_ENABLED,
-        "LIVE_SEMILIVE_SPECULATIVE_INTERVAL_MS": LIVE_SEMILIVE_SPECULATIVE_INTERVAL_MS,
-        "LIVE_SEMILIVE_SPECULATIVE_WINDOW_MS": LIVE_SEMILIVE_SPECULATIVE_WINDOW_MS,
-        "LIVE_SEMILIVE_SPECULATIVE_OVERLAP_MS": LIVE_SEMILIVE_SPECULATIVE_OVERLAP_MS,
-        "LIVE_SEMILIVE_SPECULATIVE_MAX_STALENESS_MS": LIVE_SEMILIVE_SPECULATIVE_MAX_STALENESS_MS,
-        "LIVE_SEMILIVE_SPECULATIVE_REQUIRE_NO_FINAL_PENDING": LIVE_SEMILIVE_SPECULATIVE_REQUIRE_NO_FINAL_PENDING,
-        "LIVE_SEMILIVE_FINAL_BEAM_SIZE_OVERRIDE": LIVE_SEMILIVE_FINAL_BEAM_SIZE_OVERRIDE,
-    }
-
-
 def _live_engine_rolling_context_config() -> dict[str, Any]:
     return {
         "LIVE_ENGINE": LIVE_ENGINE,
@@ -285,9 +121,9 @@ def _live_engine_rolling_context_config() -> dict[str, Any]:
         "LIVE_AUDIO_CHANNELS": LIVE_AUDIO_CHANNELS,
         "LIVE_AUDIO_SAMPLE_WIDTH_BYTES": LIVE_AUDIO_SAMPLE_WIDTH_BYTES,
         "LIVE_AUDIO_BYTES_PER_SECOND": LIVE_AUDIO_BYTES_PER_SECOND,
-        "LIVE_SEMILIVE_CHUNK_STOP_WAIT_S": LIVE_SEMILIVE_CHUNK_STOP_WAIT_S,
-        "LIVE_SEMILIVE_CHUNK_POST_CLOSE_WAIT_S": LIVE_SEMILIVE_CHUNK_POST_CLOSE_WAIT_S,
-        "LIVE_SEMILIVE_CHUNK_LANGUAGE": LIVE_SEMILIVE_CHUNK_LANGUAGE,
+        "LIVE_DRAIN_WAIT_S": LIVE_DRAIN_WAIT_S,
+        "LIVE_POST_CLOSE_WAIT_S": LIVE_POST_CLOSE_WAIT_S,
+        "LIVE_ASR_LANGUAGE": LIVE_ASR_LANGUAGE,
         "LIVE_ROLLING_POLL_INTERVAL_MS": LIVE_ROLLING_POLL_INTERVAL_MS,
         "LIVE_ROLLING_MIN_INFER_AUDIO_MS": LIVE_ROLLING_MIN_INFER_AUDIO_MS,
         "LIVE_ROLLING_SINGLE_COMMIT_MIN_MS": LIVE_ROLLING_SINGLE_COMMIT_MIN_MS,
@@ -378,7 +214,7 @@ def get_live_session_final(session_id: str) -> Dict[str, Any]:
 @app.get("/demo/live/sessions/{session_id}/result")
 def get_live_session_result(session_id: str) -> Dict[str, Any]:
     try:
-        result = LIVE_SESSIONS.semilive_result_snapshot(session_id)
+        result = LIVE_SESSIONS.live_result_snapshot(session_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Live session result not found")
     result = dict(result)
@@ -442,7 +278,7 @@ async def set_live_session_fixture(session_id: str, request: Request) -> Dict[st
 @app.get("/demo/live/sessions/{session_id}/quality")
 def get_live_session_quality(session_id: str, fixture_id: str | None = None) -> Dict[str, Any]:
     try:
-        result = LIVE_SESSIONS.semilive_result_snapshot(session_id)
+        result = LIVE_SESSIONS.live_result_snapshot(session_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Live session result not found")
 
@@ -461,10 +297,10 @@ def get_live_session_quality(session_id: str, fixture_id: str | None = None) -> 
         raise HTTPException(status_code=409, detail="Transcript text not ready")
 
     try:
-        quality = score_semilive_text_against_fixture(
+        quality = score_live_text_against_fixture(
             fixture_id=resolved_fixture_id,
-            semilive_text=final_text,
-            semilive_result=result,
+            live_text=final_text,
+            live_result=result,
             stats_log_path=LIVE_SESSIONS.stats_log_path(session_id),
         )
     except FileNotFoundError as e:
@@ -484,96 +320,13 @@ def get_live_session_quality(session_id: str, fixture_id: str | None = None) -> 
         artifact_name="final-quality",
         envelope=envelope,
     )
-    _try_autosave_speculative_lane_trace(str(session_id))
     return envelope
-
-
-@app.get("/demo/live/sessions/{session_id}/speculative-quality")
-def get_live_session_speculative_quality(
-    session_id: str,
-    verbose: bool = False,
-    fixture_id: str | None = None,
-) -> Dict[str, Any]:
-    try:
-        history = LIVE_SESSIONS.semilive_speculative_history_snapshot(session_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Live session speculative history not found")
-
-    quality = score_speculative_history_against_final(
-        speculative_history=history,
-        verbose=bool(verbose),
-    )
-    envelope = {
-        "protocol_version": PROTOCOL_VERSION,
-        "session_id": str(session_id),
-        "ready": True,
-        "speculative_quality": quality,
-    }
-    resolved_fixture_id = str(fixture_id or "").strip()
-    if not resolved_fixture_id:
-        try:
-            semilive_result = LIVE_SESSIONS.semilive_result_snapshot(session_id)
-            resolved_fixture_id = str((semilive_result or {}).get("fixture_id") or "").strip()
-        except Exception:
-            resolved_fixture_id = ""
-    if resolved_fixture_id:
-        try:
-            fixture = load_fixture_reference(resolved_fixture_id)
-            ref_text = str(fixture.get("reference_text") or "")
-            vs_ref = score_speculative_history_against_reference(
-                speculative_history=history,
-                reference_text=ref_text,
-                verbose=bool(verbose),
-            )
-            envelope["speculative_quality_vs_reference"] = vs_ref
-            envelope["fixture_id"] = str(resolved_fixture_id)
-        except Exception:
-            pass
-    _try_autosave_live_benchmark_snapshot(
-        session_id=str(session_id),
-        artifact_name="speculative-quality",
-        envelope=envelope,
-        request_meta={"verbose": bool(verbose), "fixture_id": str(resolved_fixture_id or "")},
-    )
-    return envelope
-
-
-@app.post("/demo/live/speculative-tuning/run")
-async def start_live_speculative_tuning_run(request: Request) -> Dict[str, Any]:
-    try:
-        payload = await request.json()
-    except Exception:
-        payload = {}
-    _configure_speculative_tuning_runner()
-    return await speculative_tuning_runner.start_run(payload if isinstance(payload, dict) else {})
-
-
-@app.get("/demo/live/speculative-tuning/report/{run_id}")
-def get_live_speculative_tuning_report(run_id: str) -> Dict[str, Any]:
-    _configure_speculative_tuning_runner()
-    return speculative_tuning_runner.get_report(run_id)
-
-
-@app.post("/demo/live/asr-loadtest/run")
-async def start_live_asr_loadtest_run(request: Request) -> Dict[str, Any]:
-    try:
-        payload = await request.json()
-    except Exception:
-        payload = {}
-    _configure_asr_loadtest_runner()
-    return await asr_loadtest_runner.start_run(payload if isinstance(payload, dict) else {})
-
-
-@app.get("/demo/live/asr-loadtest/report/{run_id}")
-def get_live_asr_loadtest_report(run_id: str) -> Dict[str, Any]:
-    _configure_asr_loadtest_runner()
-    return asr_loadtest_runner.get_report(run_id)
 
 
 @app.get("/demo/live/sessions/{session_id}/transcript.txt")
 def get_live_session_transcript_txt(session_id: str) -> Response:
     try:
-        result = LIVE_SESSIONS.semilive_result_snapshot(session_id)
+        result = LIVE_SESSIONS.live_result_snapshot(session_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Live session result not found")
     text = str(result.get("final_text") or "")
@@ -586,7 +339,7 @@ def get_live_session_transcript_txt(session_id: str) -> Response:
 @app.get("/demo/live/sessions/{session_id}/transcript.srt")
 def get_live_session_transcript_srt(session_id: str) -> Response:
     try:
-        result = LIVE_SESSIONS.semilive_result_snapshot(session_id)
+        result = LIVE_SESSIONS.live_result_snapshot(session_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Live session result not found")
     srt_text = _live_result_to_srt_text(result)
@@ -599,7 +352,7 @@ def get_live_session_transcript_srt(session_id: str) -> Response:
 @app.get("/demo/live/sessions/{session_id}/recording.wav")
 def get_live_session_recording_wav(session_id: str) -> FileResponse:
     try:
-        result = LIVE_SESSIONS.semilive_result_snapshot(session_id)
+        result = LIVE_SESSIONS.live_result_snapshot(session_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Live session result not found")
     wav_path = _live_recording_wav_path_from_result(result)
@@ -623,89 +376,12 @@ def get_live_metrics() -> Dict[str, Any]:
 
 @app.websocket("/demo/live/sessions/{session_id}/ws")
 async def live_session_ws(session_id: str, websocket: WebSocket) -> None:
-    if LIVE_ENGINE == "rolling_context":
-        await run_live_session_ws_rolling_context(
-            session_id=session_id,
-            websocket=websocket,
-            live_sessions=LIVE_SESSIONS,
-            rooted_path_cb=_rooted_path,
-            config=_live_engine_rolling_context_config(),
-        )
-        return
-
-    await run_live_session_ws_chunked_dual(
+    await run_live_session_ws_rolling_context(
         session_id=session_id,
         websocket=websocket,
         live_sessions=LIVE_SESSIONS,
         rooted_path_cb=_rooted_path,
-        config=_live_engine_chunked_dual_config(),
-    )
-
-
-def _get_speculative_timing_runtime() -> dict[str, int]:
-    return {
-        "interval_ms": int(max(200, int(LIVE_SEMILIVE_SPECULATIVE_INTERVAL_MS))),
-        "window_ms": int(max(200, int(LIVE_SEMILIVE_SPECULATIVE_WINDOW_MS))),
-        "overlap_ms": int(max(0, int(LIVE_SEMILIVE_SPECULATIVE_OVERLAP_MS))),
-    }
-
-
-def _set_speculative_timing_runtime(*, interval_ms: int, window_ms: int, overlap_ms: int) -> dict[str, int]:
-    global LIVE_SEMILIVE_SPECULATIVE_INTERVAL_MS
-    global LIVE_SEMILIVE_SPECULATIVE_WINDOW_MS
-    global LIVE_SEMILIVE_SPECULATIVE_OVERLAP_MS
-    prev = _get_speculative_timing_runtime()
-    LIVE_SEMILIVE_SPECULATIVE_INTERVAL_MS = int(max(200, int(interval_ms)))
-    LIVE_SEMILIVE_SPECULATIVE_WINDOW_MS = int(max(LIVE_SEMILIVE_SPECULATIVE_INTERVAL_MS, int(window_ms)))
-    LIVE_SEMILIVE_SPECULATIVE_OVERLAP_MS = int(max(0, int(overlap_ms)))
-    return prev
-
-
-def _set_final_beam_override_runtime(*, final_beam_size: int | None) -> int:
-    global LIVE_SEMILIVE_FINAL_BEAM_SIZE_OVERRIDE
-    prev = int(max(0, int(LIVE_SEMILIVE_FINAL_BEAM_SIZE_OVERRIDE or 0)))
-    if final_beam_size is None:
-        LIVE_SEMILIVE_FINAL_BEAM_SIZE_OVERRIDE = 0
-    else:
-        LIVE_SEMILIVE_FINAL_BEAM_SIZE_OVERRIDE = int(max(1, int(final_beam_size)))
-    return prev
-
-
-def _configure_speculative_tuning_runner() -> None:
-    speculative_tuning_runner.configure(
-        protocol_version=PROTOCOL_VERSION,
-        repo_root=_repo_root(),
-        live_benchmark_export_root=LIVE_BENCHMARK_EXPORT_ROOT,
-        live_sessions=LIVE_SESSIONS,
-        rooted_path_cb=_rooted_path,
-        autosave_snapshot_cb=_try_autosave_live_benchmark_snapshot,
-        autosave_spec_trace_cb=_try_autosave_speculative_lane_trace,
-        get_spec_timing_cb=_get_speculative_timing_runtime,
-        set_spec_timing_cb=_set_speculative_timing_runtime,
-        set_final_beam_override_cb=_set_final_beam_override_runtime,
-        live_audio_sample_width_bytes=LIVE_AUDIO_SAMPLE_WIDTH_BYTES,
-        live_audio_bytes_per_second=LIVE_AUDIO_BYTES_PER_SECOND,
-        semilive_chunk_stop_wait_s=LIVE_SEMILIVE_CHUNK_STOP_WAIT_S,
-        semilive_chunk_post_close_wait_s=LIVE_SEMILIVE_CHUNK_POST_CLOSE_WAIT_S,
-        ws_base_url=LIVE_SWEEP_WS_BASE_URL,
-    )
-
-
-def _configure_asr_loadtest_runner() -> None:
-    asr_loadtest_runner.configure(
-        protocol_version=PROTOCOL_VERSION,
-        repo_root=_repo_root(),
-        live_benchmark_export_root=LIVE_BENCHMARK_EXPORT_ROOT,
-        live_sessions=LIVE_SESSIONS,
-        rooted_path_cb=_rooted_path,
-        autosave_snapshot_cb=_try_autosave_live_benchmark_snapshot,
-        ws_base_url=LIVE_SWEEP_WS_BASE_URL,
-        live_audio_sample_width_bytes=LIVE_AUDIO_SAMPLE_WIDTH_BYTES,
-        live_audio_bytes_per_second=LIVE_AUDIO_BYTES_PER_SECOND,
-        semilive_chunk_stop_wait_s=LIVE_SEMILIVE_CHUNK_STOP_WAIT_S,
-        semilive_chunk_post_close_wait_s=LIVE_SEMILIVE_CHUNK_POST_CLOSE_WAIT_S,
-        asr_pool_status_url=ASR_POOL_STATUS_URL,
-        asr_pool_token=ASR_POOL_TOKEN,
+        config=_live_engine_rolling_context_config(),
     )
 
 
@@ -968,168 +644,6 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return int(value)
     except Exception:
         return int(default)
-
-
-def _build_speculative_lane_trace(
-    *,
-    session_id: str,
-    speculative_history: Dict[str, Any],
-) -> Dict[str, Any]:
-    history = speculative_history if isinstance(speculative_history, dict) else {}
-    windows_src = history.get("speculative_windows")
-    windows = [dict(w) for w in windows_src] if isinstance(windows_src, list) else []
-    open_window_src = history.get("speculative_open_window")
-    open_window = [dict(x) for x in open_window_src] if isinstance(open_window_src, list) else []
-
-    trace_windows: list[Dict[str, Any]] = []
-    timeline_rows: list[Dict[str, Any]] = []
-
-    for w in windows:
-        window_index = int(max(0, _safe_int(w.get("window_index"), 0)))
-        final_chunk_raw = str(w.get("target_final_chunk_text_raw") or "")
-        final_chunk_effective = str(w.get("target_final_chunk_text_effective") or "")
-        final_chunk_rendered = final_chunk_effective or final_chunk_raw
-        final_row = {
-            "row_type": "final_chunk",
-            "window_index": int(window_index),
-            "text": final_chunk_rendered,
-            "raw_text": final_chunk_raw,
-            "effective_text": final_chunk_effective,
-            "ended_by_final_chunk_index": (
-                int(max(0, _safe_int(w.get("ended_by_final_chunk_index"), 0)))
-                if w.get("ended_by_final_chunk_index") is not None
-                else None
-            ),
-            "ended_by_final_t1_ms": (
-                int(max(0, _safe_int(w.get("ended_by_final_t1_ms"), 0)))
-                if w.get("ended_by_final_t1_ms") is not None
-                else None
-            ),
-        }
-
-        timeline_rows.append(dict(final_row))
-        item_rows: list[Dict[str, Any]] = []
-        items_src = w.get("items")
-        items = [dict(item) for item in items_src] if isinstance(items_src, list) else []
-        for item_index, item in enumerate(items, start=1):
-            seq = int(max(-1, _safe_int(item.get("speculative_seq"), -1)))
-            audio_end_ms = int(max(0, _safe_int(item.get("audio_end_ms"), 0)))
-            raw_text = str(item.get("raw_text") or "")
-            suffix_text = str(item.get("suffix_text_after_final_dedup") or "")
-            merged_text = str(item.get("merged_text_after_seam_dedup") or "")
-            raw_row = {
-                "row_type": "raw_speculative",
-                "window_index": int(window_index),
-                "item_index": int(item_index),
-                "speculative_seq": int(seq),
-                "audio_end_ms": int(audio_end_ms),
-                "text": raw_text,
-            }
-            suffix_row = {
-                "row_type": "suffix_speculative",
-                "window_index": int(window_index),
-                "item_index": int(item_index),
-                "speculative_seq": int(seq),
-                "audio_end_ms": int(audio_end_ms),
-                "text": suffix_text,
-            }
-            timeline_rows.append(dict(raw_row))
-            timeline_rows.append(dict(suffix_row))
-            item_rows.append(
-                {
-                    "item_index": int(item_index),
-                    "speculative_seq": int(seq),
-                    "audio_end_ms": int(audio_end_ms),
-                    "raw_text": raw_text,
-                    "suffix_text": suffix_text,
-                    "merged_text": merged_text,
-                    "seam_dedup_applied": bool(item.get("seam_dedup_applied")),
-                    "seam_dedup_words_trimmed": int(max(0, _safe_int(item.get("seam_dedup_words_trimmed"), 0))),
-                    "final_dedup_applied": bool(item.get("final_dedup_applied")),
-                    "final_dedup_words_trimmed": int(max(0, _safe_int(item.get("final_dedup_words_trimmed"), 0))),
-                    "received_at_utc": str(item.get("received_at_utc") or ""),
-                }
-            )
-
-        trace_windows.append(
-            {
-                "window_index": int(window_index),
-                "started_at_revision": int(max(0, _safe_int(w.get("started_at_revision"), 0))),
-                "ended_by_final_revision": (
-                    int(max(0, _safe_int(w.get("ended_by_final_revision"), 0)))
-                    if w.get("ended_by_final_revision") is not None
-                    else None
-                ),
-                "close_reason": str(w.get("close_reason") or ""),
-                "items_count": int(len(item_rows)),
-                "final_chunk": final_row,
-                "speculative_items": item_rows,
-            }
-        )
-
-    open_window_rows: list[Dict[str, Any]] = []
-    for item_index, item in enumerate(open_window, start=1):
-        seq = int(max(-1, _safe_int(item.get("speculative_seq"), -1)))
-        audio_end_ms = int(max(0, _safe_int(item.get("audio_end_ms"), 0)))
-        raw_text = str(item.get("raw_text") or "")
-        suffix_text = str(item.get("suffix_text_after_final_dedup") or "")
-        open_window_rows.append(
-            {
-                "item_index": int(item_index),
-                "speculative_seq": int(seq),
-                "audio_end_ms": int(audio_end_ms),
-                "raw_text": raw_text,
-                "suffix_text": suffix_text,
-                "merged_text": str(item.get("merged_text_after_seam_dedup") or ""),
-            }
-        )
-
-    return {
-        "metric_version": "speculative_lane_trace_v1",
-        "session_id": str(session_id or ""),
-        "history_source": str(history.get("source") or ""),
-        "finalization_state": str(history.get("finalization_state") or ""),
-        "transcript_revision": int(max(0, _safe_int(history.get("transcript_revision"), 0))),
-        "windows_count": int(len(trace_windows)),
-        "timeline_rows_count": int(len(timeline_rows)),
-        "windows": trace_windows,
-        "timeline_rows": timeline_rows,
-        "open_window": {
-            "window_index": int(max(0, _safe_int(history.get("speculative_open_window_index"), 0))),
-            "started_at_revision": int(max(0, _safe_int(history.get("speculative_open_window_started_revision"), 0))),
-            "items_count": int(len(open_window_rows)),
-            "items": open_window_rows,
-        },
-    }
-
-
-def _try_autosave_speculative_lane_trace(session_id: str) -> None:
-    sid = str(session_id or "").strip()
-    if not sid:
-        return
-    try:
-        history = LIVE_SESSIONS.semilive_speculative_history_snapshot(sid)
-    except Exception:
-        return
-    try:
-        trace = _build_speculative_lane_trace(
-            session_id=sid,
-            speculative_history=history,
-        )
-        trace_envelope = {
-            "protocol_version": PROTOCOL_VERSION,
-            "session_id": sid,
-            "ready": True,
-            "speculative_lane_trace": trace,
-        }
-        _try_autosave_live_benchmark_snapshot(
-            session_id=sid,
-            artifact_name="speculative-lane-trace",
-            envelope=trace_envelope,
-            request_meta={"source": "final-quality"},
-        )
-    except Exception as e:
-        print(f"[speculative-lane-trace-autosave] failed session={sid}: {type(e).__name__}: {e}")
 
 
 def _find_job_dir(job_id: str) -> Path | None:

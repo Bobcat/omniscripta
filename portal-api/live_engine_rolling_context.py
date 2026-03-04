@@ -64,9 +64,9 @@ async def run_live_session_ws_rolling_context(
     LIVE_AUDIO_CHANNELS = int(_cfg(config, "LIVE_AUDIO_CHANNELS"))
     LIVE_AUDIO_SAMPLE_WIDTH_BYTES = int(_cfg(config, "LIVE_AUDIO_SAMPLE_WIDTH_BYTES"))
     LIVE_AUDIO_BYTES_PER_SECOND = int(_cfg(config, "LIVE_AUDIO_BYTES_PER_SECOND"))
-    LIVE_SEMILIVE_CHUNK_STOP_WAIT_S = float(_cfg(config, "LIVE_SEMILIVE_CHUNK_STOP_WAIT_S"))
-    LIVE_SEMILIVE_CHUNK_POST_CLOSE_WAIT_S = float(_cfg(config, "LIVE_SEMILIVE_CHUNK_POST_CLOSE_WAIT_S"))
-    LIVE_SEMILIVE_CHUNK_LANGUAGE = str(_cfg(config, "LIVE_SEMILIVE_CHUNK_LANGUAGE"))
+    LIVE_DRAIN_WAIT_S = float(_cfg(config, "LIVE_DRAIN_WAIT_S"))
+    LIVE_POST_CLOSE_WAIT_S = float(_cfg(config, "LIVE_POST_CLOSE_WAIT_S"))
+    LIVE_ASR_LANGUAGE = str(_cfg(config, "LIVE_ASR_LANGUAGE"))
     LIVE_ROLLING_POLL_INTERVAL_MS = int(_cfg(config, "LIVE_ROLLING_POLL_INTERVAL_MS"))
     LIVE_ROLLING_MIN_INFER_AUDIO_MS = int(_cfg(config, "LIVE_ROLLING_MIN_INFER_AUDIO_MS"))
     LIVE_ROLLING_SINGLE_COMMIT_MIN_MS = int(_cfg(config, "LIVE_ROLLING_SINGLE_COMMIT_MIN_MS"))
@@ -130,13 +130,6 @@ async def run_live_session_ws_rolling_context(
     rolling_last_emit_mono = 0.0
     rolling_last_poll_mono = 0.0
 
-    rolling_preview_metrics: dict[str, Any] = {
-        "enqueued": 0,
-        "shown": 0,
-        "dropped_busy": 0,
-        "dropped_stale": 0,
-        "time_to_first_speculative_ms": None,
-    }
     rolling_call_audit_recent: list[dict[str, Any]] = []
     rolling_call_audit_summary: dict[str, Any] = {
         "calls_done": 0,
@@ -371,13 +364,13 @@ async def run_live_session_ws_rolling_context(
             processed_offset_ms=int(max(0, rolling_processed_offset_ms)),
         )
         try:
-            LIVE_SESSIONS.clear_semilive_speculative_preview(session_id)
+            LIVE_SESSIONS.clear_live_preview(session_id)
         except Exception:
             pass
 
     def _update_state() -> None:
         try:
-            LIVE_SESSIONS.update_semilive(
+            LIVE_SESSIONS.update_live_state(
                 session_id,
                 recording_state=recording_state,
                 recording_path=recording_path,
@@ -393,22 +386,7 @@ async def run_live_session_ws_rolling_context(
         except Exception:
             pass
         try:
-            LIVE_SESSIONS.update_semilive_speculative_metrics(
-                session_id,
-                enqueued=int(max(0, int(rolling_preview_metrics.get("enqueued") or 0))),
-                shown=int(max(0, int(rolling_preview_metrics.get("shown") or 0))),
-                dropped_busy=int(max(0, int(rolling_preview_metrics.get("dropped_busy") or 0))),
-                dropped_stale=int(max(0, int(rolling_preview_metrics.get("dropped_stale") or 0))),
-                time_to_first_speculative_ms=(
-                    int(rolling_preview_metrics.get("time_to_first_speculative_ms"))
-                    if rolling_preview_metrics.get("time_to_first_speculative_ms") is not None
-                    else None
-                ),
-            )
-        except Exception:
-            pass
-        try:
-            LIVE_SESSIONS.set_semilive_engine_runtime(
+            LIVE_SESSIONS.set_live_engine_runtime(
                 session_id,
                 runtime=_engine_runtime_payload(),
             )
@@ -416,35 +394,35 @@ async def run_live_session_ws_rolling_context(
             pass
         if str(finalization_state or "").strip().lower() in {"ready", "error", "finalized"}:
             try:
-                LIVE_SESSIONS.clear_semilive_speculative_preview(session_id)
+                LIVE_SESSIONS.clear_live_preview(session_id)
             except Exception:
                 pass
 
     def _archive_current_result(*, close_reason: str) -> dict[str, Any]:
         try:
-            semilive_result = LIVE_SESSIONS.semilive_result_snapshot(session_id)
+            live_result = LIVE_SESSIONS.live_result_snapshot(session_id)
         except Exception:
             return {}
-        if not semilive_result:
+        if not live_result:
             return {}
         has_content = (
-            bool(str(semilive_result.get("final_text") or "").strip())
-            or bool(semilive_result.get("final_segments"))
-            or int(semilive_result.get("chunks_total") or 0) > 0
+            bool(str(live_result.get("final_text") or "").strip())
+            or bool(live_result.get("final_segments"))
+            or int(live_result.get("chunks_total") or 0) > 0
             or int(max(0, recording_duration_ms)) > 0
         )
         if not has_content:
-            return semilive_result
+            return live_result
         LIVE_SESSIONS.archive_transcript(
             session_id,
             close_reason=str(close_reason or stop_reason or "closed"),
-            final_text=str(semilive_result.get("final_text") or ""),
+            final_text=str(live_result.get("final_text") or ""),
             final_segments=[
                 dict(seg)
-                for seg in (semilive_result.get("final_segments") or [])
+                for seg in (live_result.get("final_segments") or [])
                 if isinstance(seg, dict)
             ],
-            transcript_revision=int(max(0, int(semilive_result.get("transcript_revision") or 0))),
+            transcript_revision=int(max(0, int(live_result.get("transcript_revision") or 0))),
             recording_path=str(recording_path or ""),
             recording_bytes=int(max(0, recording_bytes)),
             recording_duration_ms=int(max(0, recording_duration_ms)),
@@ -455,7 +433,7 @@ async def run_live_session_ws_rolling_context(
             batch_job_id="",
             live_engine=LIVE_ENGINE,
         )
-        return semilive_result
+        return live_result
 
     def _finalize_recording(*, reason: str) -> None:
         nonlocal recording_finalized
@@ -564,10 +542,10 @@ async def run_live_session_ws_rolling_context(
                 t0_ms=int(infer_t0_ms),
                 t1_ms=int(infer_t1_ms),
                 pcm16le=pcm,
-                language=LIVE_SEMILIVE_CHUNK_LANGUAGE,
+                language=LIVE_ASR_LANGUAGE,
                 live_lane="final",
-                speculative_seq=infer_seq,
-                speculative_audio_end_ms=int(infer_t1_ms),
+                preview_seq=infer_seq,
+                preview_audio_end_ms=int(infer_t1_ms),
             )
         except Exception as e:
             _append_log(
@@ -590,7 +568,6 @@ async def run_live_session_ws_rolling_context(
             "t1_ms": int(infer_t1_ms),
             "enqueued_mono": float(now_mono),
         }
-        rolling_preview_metrics["enqueued"] = int(max(0, int(rolling_preview_metrics.get("enqueued") or 0)) + 1)
         if finalization_state not in {"error", "ready"}:
             finalization_state = "processing_chunks"
         _update_state()
@@ -766,7 +743,7 @@ async def run_live_session_ws_rolling_context(
                     asr_pipeline_time_s = _safe_float(status_obj.get("asr_timing_whisperx_total_s"))
                     asr_transcribe_time_s = _safe_float(status_obj.get("asr_timing_whisperx_transcribe_s"))
                     try:
-                        result = LIVE_SESSIONS.record_semilive_chunk_result(
+                        result = LIVE_SESSIONS.record_live_commit(
                             session_id,
                             chunk_index=int(max(0, rolling_commit_index_next)),
                             t0_ms=int(commit_t0_ms),
@@ -819,18 +796,15 @@ async def run_live_session_ws_rolling_context(
                 rolling_last_preview_text = str(preview_text or "")
                 rolling_last_preview_audio_end_fallback_ms = int(max(0, preview_audio_end_ms))
                 try:
-                    LIVE_SESSIONS.update_semilive_speculative_preview(
+                    LIVE_SESSIONS.update_live_preview(
                         session_id,
                         text=preview_text,
-                        speculative_seq=int(max(0, seq)),
+                        preview_seq=int(max(0, seq)),
                         audio_end_ms=int(max(0, preview_audio_end_ms)),
-                        merge_with_existing=False,
+                        append_to_existing=False,
                     )
                 except Exception:
                     pass
-                rolling_preview_metrics["shown"] = int(max(0, int(rolling_preview_metrics.get("shown") or 0)) + 1)
-                if rolling_preview_metrics.get("time_to_first_speculative_ms") is None:
-                    rolling_preview_metrics["time_to_first_speculative_ms"] = int(max(0, preview_audio_end_ms))
                 _append_log(
                     "rolling_preview_ready",
                     seq=seq,
@@ -849,7 +823,7 @@ async def run_live_session_ws_rolling_context(
                     rolling_last_preview_audio_end_ms = -1
                     rolling_same_preview_audio_repeats = 0
                     try:
-                        LIVE_SESSIONS.clear_semilive_speculative_preview(
+                        LIVE_SESSIONS.clear_live_preview(
                             session_id,
                             max_seq=int(max(0, seq)),
                         )
@@ -867,7 +841,7 @@ async def run_live_session_ws_rolling_context(
         else:
             err = str(poll.error or "asr_error")
             try:
-                result = LIVE_SESSIONS.record_semilive_chunk_result(
+                result = LIVE_SESSIONS.record_live_commit(
                     session_id,
                     chunk_index=int(max(0, rolling_commit_index_next)),
                     t0_ms=int(t0_ms),
@@ -920,10 +894,10 @@ async def run_live_session_ws_rolling_context(
         if recording_duration_ms <= rolling_processed_offset_ms:
             return
         try:
-            result = LIVE_SESSIONS.semilive_result_snapshot(session_id)
+            result = LIVE_SESSIONS.live_result_snapshot(session_id)
         except Exception:
             return
-        preview = result.get("speculative_preview") or {}
+        preview = result.get("preview") or {}
         preview_text = str(preview.get("text") or "").strip()
         if not preview_text:
             preview_text = str(rolling_last_preview_text or "").strip()
@@ -951,7 +925,7 @@ async def run_live_session_ws_rolling_context(
             "t1_ms": int(commit_t1),
         }
         try:
-            stored = LIVE_SESSIONS.record_semilive_chunk_result(
+            stored = LIVE_SESSIONS.record_live_commit(
                 session_id,
                 chunk_index=int(max(0, rolling_commit_index_next)),
                 t0_ms=int(commit_t0),
@@ -974,7 +948,7 @@ async def run_live_session_ws_rolling_context(
             rolling_last_preview_text = ""
             rolling_last_preview_audio_end_fallback_ms = 0
             try:
-                LIVE_SESSIONS.clear_semilive_speculative_preview(session_id)
+                LIVE_SESSIONS.clear_live_preview(session_id)
             except Exception:
                 pass
             _append_log("rolling_tail_preview_committed", t0_ms=commit_t0, t1_ms=commit_t1, chars=len(preview_text))
@@ -1000,7 +974,7 @@ async def run_live_session_ws_rolling_context(
             chunk_bridge = LiveChunkBatchBridge(
                 sample_rate_hz=LIVE_AUDIO_SAMPLE_RATE_HZ,
                 channels=LIVE_AUDIO_CHANNELS,
-                language=LIVE_SEMILIVE_CHUNK_LANGUAGE,
+                language=LIVE_ASR_LANGUAGE,
             )
             recording_state = "recording"
             recording_path = str(rec_snap.wav_path)
@@ -1022,7 +996,7 @@ async def run_live_session_ws_rolling_context(
                     "buffer_trim_threshold_ms": int(buffer_trim_threshold_ms),
                     "buffer_trim_drop_ms": int(buffer_trim_drop_ms),
                     "require_single_inflight": bool(LIVE_ROLLING_REQUIRE_SINGLE_INFLIGHT),
-                    "language": str(LIVE_SEMILIVE_CHUNK_LANGUAGE),
+                    "language": str(LIVE_ASR_LANGUAGE),
                 },
             )
         except Exception as e:
@@ -1083,36 +1057,18 @@ async def run_live_session_ws_rolling_context(
                         uptime_s=snapshot["age_s"],
                         live_engine=LIVE_ENGINE,
                         live_mode="rolling_context",
-                        semilive_recording_state=str(recording_state or ""),
-                        semilive_recording_bytes=int(max(0, recording_bytes)),
-                        semilive_recording_duration_ms=int(max(0, recording_duration_ms)),
-                        semilive_chunk_index_next=int(max(0, rolling_commit_index_next)),
-                        semilive_chunks_total=int(max(0, rolling_chunks_total)),
-                        semilive_chunks_done=int(max(0, rolling_chunks_done)),
-                        semilive_chunks_failed=int(max(0, rolling_chunks_failed)),
-                        semilive_finalization_state=str(finalization_state or ""),
-                        semilive_chunk_jobs_enabled=True,
-                        semilive_chunk_jobs_pending=(1 if rolling_inflight is not None else 0),
-                        semilive_chunk_jobs_to_enqueue=0,
-                        semilive_speculative_enabled=True,
-                        semilive_speculative_pending=(1 if rolling_inflight is not None else 0),
-                        semilive_speculative_enqueued=int(max(0, int(rolling_preview_metrics.get("enqueued") or 0))),
-                        semilive_speculative_shown=int(max(0, int(rolling_preview_metrics.get("shown") or 0))),
-                        semilive_speculative_dropped_busy=int(
-                            max(0, int(rolling_preview_metrics.get("dropped_busy") or 0))
-                        ),
-                        semilive_speculative_dropped_stale=int(
-                            max(0, int(rolling_preview_metrics.get("dropped_stale") or 0))
-                        ),
-                        semilive_time_to_first_speculative_ms=(
-                            int(rolling_preview_metrics.get("time_to_first_speculative_ms"))
-                            if rolling_preview_metrics.get("time_to_first_speculative_ms") is not None
-                            else None
-                        ),
-                        semilive_shadow_disabled_reason=str(shadow_disabled_reason or ""),
-                        semilive_chunker_chunk_open=False,
-                        semilive_chunker_active_chunk_duration_ms=0,
-                        semilive_chunker_pre_roll_frames=0,
+                        live_recording_state=str(recording_state or ""),
+                        live_recording_bytes=int(max(0, recording_bytes)),
+                        live_recording_duration_ms=int(max(0, recording_duration_ms)),
+                        live_commit_index_next=int(max(0, rolling_commit_index_next)),
+                        live_commits_total=int(max(0, rolling_chunks_total)),
+                        live_commits_done=int(max(0, rolling_chunks_done)),
+                        live_commits_failed=int(max(0, rolling_chunks_failed)),
+                        live_finalization_state=str(finalization_state or ""),
+                        live_jobs_enabled=True,
+                        live_jobs_pending=(1 if rolling_inflight is not None else 0),
+                        live_shadow_disabled_reason=str(shadow_disabled_reason or ""),
+                        live_inflight=bool(rolling_inflight is not None),
                         rolling_guardrails=dict(rolling_guardrail_metrics),
                         rolling_unprocessed_audio_ms=int(max(0, int(recording_duration_ms) - int(rolling_processed_offset_ms))),
                         rolling_pcm_base_ms=int(max(0, rolling_pcm_base_ms)),
@@ -1173,7 +1129,7 @@ async def run_live_session_ws_rolling_context(
 
             if control_type == "stop":
                 stop_reason = "client_stop"
-                semilive_result: dict[str, Any] = {}
+                live_result: dict[str, Any] = {}
                 if recording_state in {"recording", "paused"}:
                     recording_state = "finalizing"
                 if finalization_state not in {"error", "ready"}:
@@ -1181,7 +1137,7 @@ async def run_live_session_ws_rolling_context(
                 _update_state()
                 # Enqueue maximaal één laatste rolling inferentie en drain daarna alleen polls.
                 await _process_rolling(force_poll=True, force_emit=True)
-                wait_deadline = time.monotonic() + max(0.0, LIVE_SEMILIVE_CHUNK_STOP_WAIT_S)
+                wait_deadline = time.monotonic() + max(0.0, LIVE_DRAIN_WAIT_S)
                 while time.monotonic() < wait_deadline:
                     await _drain_inflight_only(force_poll=True)
                     if rolling_inflight is None:
@@ -1195,18 +1151,18 @@ async def run_live_session_ws_rolling_context(
                     finalization_state = "ready"
                 _update_state()
                 try:
-                    semilive_result = _archive_current_result(close_reason=stop_reason)
+                    live_result = _archive_current_result(close_reason=stop_reason)
                     archived_result = True
                 except Exception:
-                    semilive_result = {}
+                    live_result = {}
 
                 await send_event(
                     ended_event(
                         session_id,
                         reason=stop_reason,
-                        transcript_revision=int(max(0, int(semilive_result.get("transcript_revision") or 0))),
-                        final_segments_count=len(semilive_result.get("final_segments") or []),
-                        final_text=str(semilive_result.get("final_text") or ""),
+                        transcript_revision=int(max(0, int(live_result.get("transcript_revision") or 0))),
+                        final_segments_count=len(live_result.get("final_segments") or []),
+                        final_text=str(live_result.get("final_text") or ""),
                         final_transcript_url=_rooted_path(f"/demo/live/sessions/{session_id}/final"),
                     )
                 )
@@ -1241,7 +1197,7 @@ async def run_live_session_ws_rolling_context(
             # The explicit stop path already drains in-flight work before emitting ended.
             wait_timeout = 0.0
         else:
-            wait_timeout = LIVE_SEMILIVE_CHUNK_STOP_WAIT_S
+            wait_timeout = LIVE_DRAIN_WAIT_S
         wait_deadline = time.monotonic() + max(0.0, float(wait_timeout))
         while time.monotonic() < wait_deadline:
             await _drain_inflight_only(force_poll=True)

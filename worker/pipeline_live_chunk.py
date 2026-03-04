@@ -66,9 +66,7 @@ def run_live_chunk_job(*, job: Any, job_cfg: dict[str, Any]) -> None:
   if not initial_prompt.strip():
     initial_prompt = ""
   beam_size = opts.get("beam_size")
-  live_lane = str(opts.get("live_lane") or "final").strip().lower()
-  if live_lane not in {"final", "speculative"}:
-    live_lane = "final"
+  live_lane = "single"
 
   _write_status(
     job.status_path,
@@ -126,16 +124,16 @@ def run_live_chunk_job(*, job: Any, job_cfg: dict[str, Any]) -> None:
       raw_request["options"]["beam_size"] = max(1, int(beam_size))
     except Exception:
       pass
-  speculative_seq = opts.get("speculative_seq")
-  if speculative_seq is not None:
+  preview_seq = opts.get("preview_seq")
+  if preview_seq is not None:
     try:
-      raw_request["context"]["speculative_seq"] = int(max(0, int(speculative_seq)))
+      raw_request["context"]["preview_seq"] = int(max(0, int(preview_seq)))
     except Exception:
       pass
-  speculative_audio_end_ms = opts.get("speculative_audio_end_ms")
-  if speculative_audio_end_ms is not None:
+  preview_audio_end_ms = opts.get("preview_audio_end_ms")
+  if preview_audio_end_ms is not None:
     try:
-      raw_request["context"]["speculative_audio_end_ms"] = int(max(0, int(speculative_audio_end_ms)))
+      raw_request["context"]["preview_audio_end_ms"] = int(max(0, int(preview_audio_end_ms)))
     except Exception:
       pass
 
