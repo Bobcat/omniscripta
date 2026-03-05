@@ -12,6 +12,7 @@ HOST = os.getenv("TRANSCRIBE_FRONTEND_HOST", "127.0.0.1")
 PORT = int(os.getenv("TRANSCRIBE_FRONTEND_PORT", "8010"))
 WS_PROXY_BUFFER_BYTES = int(os.getenv("TRANSCRIBE_FRONTEND_WS_BUFFER_BYTES", "65536"))
 WS_PROXY_IDLE_TIMEOUT_S = float(os.getenv("TRANSCRIBE_FRONTEND_WS_IDLE_TIMEOUT_S", "1800"))
+LIVE_AUTO_GAIN_CONTROL = os.getenv("TRANSCRIBE_LIVE_AUTO_GAIN_CONTROL", "0").strip().lower() in ("1", "true", "yes", "on")
 
 _api_parts = urlparse(API_BASE)
 _api_host = _api_parts.hostname or "127.0.0.1"
@@ -139,9 +140,23 @@ class Handler(SimpleHTTPRequestHandler):
     def do_GET(self):
         if self._is_ws_upgrade():
             return self._proxy_api_websocket()
+        if self.path == "/api/config":
+            return self._serve_config()
         if self.path.startswith("/api/"):
             return self._proxy_api_http()
         return super().do_GET()
+
+    def _serve_config(self):
+        import json
+        config = {
+            "live_auto_gain_control": LIVE_AUTO_GAIN_CONTROL
+        }
+        payload = json.dumps(config).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
 
     def do_POST(self):
         if self.path.startswith("/api/"):

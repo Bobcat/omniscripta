@@ -454,7 +454,22 @@ class PersistentWhisperxRunner:
             upload_batch_size = 4
           if upload_batch_size > 0:
             transcribe_kwargs["batch_size"] = max(1, min(int(transcribe_kwargs["batch_size"]), int(upload_batch_size)))
+        else:
+          # Live/interactive: use smaller chunk_size for better latency with short audio windows
+          transcribe_kwargs["chunk_size"] = int(self.cfg.get("chunk_size_live", 10) or 10)
         result = self.asr_model.transcribe(audio_arr, **transcribe_kwargs)  # type: ignore[union-attr]
+        # Debug: log segment details for confidence analysis
+        try:
+          segments = result.get("segments") or []
+          import json as _json
+          for idx, seg in enumerate(segments[:10]):
+            seg_text = str(seg.get("text") or "").strip()
+            seg_start = float(seg.get("start") or 0)
+            seg_end = float(seg.get("end") or 0)
+            seg_dur = round(seg_end - seg_start, 3)
+            print(f"INFO seg_{idx} dur={seg_dur}s text={_json.dumps(seg_text, ensure_ascii=False)}", flush=True)
+        except Exception:
+          pass
       timings["transcribe_s"] = round(max(0.0, float(time.monotonic() - t0)), 6)
 
       aligned: dict[str, Any]

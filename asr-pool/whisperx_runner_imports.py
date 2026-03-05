@@ -167,6 +167,14 @@ def _run(args_obj: dict[str, Any], out_json: Path) -> int:
   print(f"TIMING transcribe {durations['transcribe']:.6f}", flush=True)
   print(f"INFO transcribe_segments={len(result.get('segments') or [])}", flush=True)
   print(f"INFO initial_prompt_applied={str(bool(initial_prompt_applied)).lower()}", flush=True)
+  # Debug: log segment details for confidence analysis
+  segments = result.get("segments") or []
+  for idx, seg in enumerate(segments[:10]):  # max 10 segments
+    seg_text = str(seg.get("text") or "").strip()
+    seg_start = float(seg.get("start") or 0)
+    seg_end = float(seg.get("end") or 0)
+    seg_dur = round(seg_end - seg_start, 3)
+    print(f"INFO seg_{idx} dur={seg_dur}s text={json.dumps(seg_text, ensure_ascii=False)}", flush=True)
 
   del asr_model
   _cleanup_torch(torch)

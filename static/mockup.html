@@ -187,27 +187,25 @@
             transition: color 0.3s;
         }
 
-        /* Controls Area (Floating at bottom of canvas) */
+        /* Controls Area (Fixed Bottom Bar to match Editor View) */
         .controls-container {
-            position: absolute;
-            bottom: 32px;
-            left: 50%;
-            transform: translateX(-50%);
             display: flex;
-            flex-direction: column;
+            flex-direction: row;
             align-items: center;
-            gap: 12px;
+            justify-content: space-between;
             background: white;
-            padding: 16px 24px;
-            border-radius: 24px;
-            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
-            border: 1px solid var(--border-color);
+            padding: 10px 16px;
+            /* Slightly more padding than editor for layout breathing room, much less than previous */
+            border-top: 1px solid var(--border-color);
             transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            min-height: 56px;
+            /* Reduced from 80px */
         }
 
         .timer {
             font-variant-numeric: tabular-nums;
-            font-size: 1.5rem;
+            font-size: 1.25rem;
+            /* Reduced from 1.5rem */
             font-weight: 600;
             color: var(--text-main);
             display: none;
@@ -216,7 +214,8 @@
 
         .button-group {
             display: flex;
-            gap: 12px;
+            gap: 8px;
+            /* Reduced from 12px */
             align-items: center;
         }
 
@@ -231,12 +230,14 @@
             transition: all 0.2s;
         }
 
-        /* The Big Start Button */
+        /* The Big Start Button (Now smaller) */
         .btn-primary-start {
             background-color: var(--accent-blue);
             color: white;
-            width: 64px;
-            height: 64px;
+            width: 44px;
+            /* Reduced from 64px */
+            height: 44px;
+            /* Reduced from 64px */
             border-radius: 50%;
             box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
             display: flex;
@@ -251,17 +252,21 @@
         /* Circle indicating record inside start button */
         .btn-primary-start::after {
             content: '';
-            width: 24px;
-            height: 24px;
+            width: 16px;
+            /* Reduced from 24px */
+            height: 16px;
+            /* Reduced from 24px */
             background-color: white;
             border-radius: 50%;
         }
 
         .btn-secondary {
-            padding: 10px 20px;
+            padding: 8px 16px;
+            /* Reduced padding */
             border-radius: 8px;
             font-weight: 500;
-            font-size: 0.95rem;
+            font-size: 0.9rem;
+            /* Reduced font size */
             background-color: #f1f5f9;
             color: var(--text-main);
             display: none;
@@ -273,10 +278,12 @@
         }
 
         .btn-danger {
-            padding: 10px 20px;
+            padding: 8px 16px;
+            /* Reduced padding */
             border-radius: 8px;
             font-weight: 500;
-            font-size: 0.95rem;
+            font-size: 0.9rem;
+            /* Reduced font size */
             background-color: #fef2f2;
             color: var(--accent-red);
             display: none;
@@ -291,15 +298,17 @@
         .export-actions {
             display: none;
             /* Hidden in IDLE/LISTENING */
-            gap: 12px;
-            margin-top: 16px;
+            gap: 8px;
+            /* Reduced gap */
         }
 
         .btn-outline {
-            padding: 10px 16px;
+            padding: 8px 12px;
+            /* Reduced padding */
             border: 1px solid var(--border-color);
             border-radius: 8px;
             font-weight: 500;
+            font-size: 0.9rem;
             color: var(--text-main);
             background: white;
         }
@@ -337,148 +346,6 @@
 
         .mockup-controls button.active-state {
             background: var(--accent-blue);
-        }
-
-        /* Dev Panel (Bottom Drawer) */
-        .dev-container {
-            display: none;
-            background-color: var(--bg-body);
-            color: var(--text-main);
-            border-top: 1px solid var(--border-color);
-            flex-shrink: 0;
-            flex-direction: column;
-            font-size: 0.85rem;
-        }
-
-        .dev-container.open {
-            display: flex;
-        }
-
-        .dev-header {
-            padding: 12px 24px;
-            background-color: var(--bg-canvas);
-            border-bottom: 1px solid var(--border-color);
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            font-weight: 600;
-            color: var(--text-main);
-            letter-spacing: 0.5px;
-        }
-
-        .dev-close-btn {
-            background: none;
-            border: none;
-            color: var(--text-muted);
-            font-size: 1.25rem;
-            cursor: pointer;
-            padding: 4px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-
-        .dev-close-btn:hover {
-            color: var(--text-main);
-        }
-
-        .dev-layout {
-            display: flex;
-            flex: 1;
-            overflow: hidden;
-            background-color: var(--bg-canvas);
-        }
-
-        .dev-col {
-            flex: 1;
-            padding: 16px 24px;
-            overflow-y: auto;
-            border-right: 1px solid var(--border-color);
-            display: flex;
-            flex-direction: column;
-        }
-
-        .dev-col:last-child {
-            border-right: none;
-        }
-
-        .dev-label {
-            color: var(--text-muted);
-            margin-bottom: 4px;
-            font-size: 0.7rem;
-            text-transform: uppercase;
-            font-weight: 600;
-            letter-spacing: 0.5px;
-        }
-
-        .dev-value-box {
-            background-color: var(--bg-body);
-            border: 1px solid var(--border-color);
-            padding: 6px 10px;
-            border-radius: 6px;
-            font-family: inherit;
-            margin-bottom: 12px;
-            word-break: break-all;
-            color: var(--text-main);
-            font-size: 0.8rem;
-        }
-
-        .dev-btn {
-            background-color: white;
-            color: var(--text-main);
-            border: 1px solid var(--border-color);
-            padding: 6px 16px;
-            border-radius: 6px;
-            font-size: 0.85rem;
-            font-weight: 500;
-            cursor: pointer;
-            margin-right: 8px;
-            transition: all 0.2s;
-        }
-
-        .dev-btn:hover {
-            background-color: var(--bg-body);
-        }
-
-        .dev-btn.primary {
-            background-color: var(--accent-blue);
-            color: white;
-            border-color: var(--accent-blue);
-        }
-
-        .dev-btn.primary:hover {
-            background-color: var(--accent-blue-hover);
-        }
-
-        /* The Terminal Log Box */
-        .dev-log {
-            font-family: monospace;
-            line-height: 1.4;
-            color: #cbd5e1;
-            background-color: #0f172a;
-            padding: 12px;
-            border-radius: 8px;
-            flex: 1;
-            /* Take remaining space */
-            overflow: auto;
-            /* Allow both scrollbars if really needed, but try to fit */
-            white-space: pre-wrap;
-            word-break: break-word;
-            /* Prevent horizontal scroll for long single words */
-            box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.1);
-            font-size: 0.8rem;
-        }
-
-        .dev-log .time {
-            color: #64748b;
-        }
-
-        .dev-log .error {
-            color: #f87171;
-        }
-
-        .dev-log .success {
-            color: #34d399;
         }
     </style>
 </head>
@@ -557,132 +424,35 @@
                 </div>
             </div>
 
-            <!-- Floating Controls -->
+            <!-- Fixed Bottom Controls -->
             <div class="controls-container" id="ui-controls">
 
-                <div class="timer" id="ui-timer">00:00</div>
+                <div class="controls-left" style="flex: 1; display: flex; align-items: center;">
+                    <div class="timer" id="ui-timer" style="margin: 0;">00:00</div>
+                </div>
 
-                <div class="button-group">
+                <div class="controls-center" style="display: flex; gap: 12px; justify-content: center;">
                     <button class="btn-primary-start" id="btn-start" title="Start Recording"></button>
                     <button class="btn-secondary" id="btn-pause">Pause</button>
                     <button class="btn-danger" id="btn-finish">Finish</button>
                 </div>
 
-                <div class="export-actions" id="ui-exports">
-                    <button class="btn-outline">Download WAV</button>
-                    <button class="btn-outline">Download SRT</button>
-                    <button class="btn-outline"
-                        style="color: var(--accent-red); margin-left: auto; border-color: transparent;">Clear
-                        transcript</button>
+                <div class="controls-right"
+                    style="flex: 1; display: flex; justify-content: flex-end; align-items: center;">
+                    <div class="export-actions" id="ui-exports">
+                        <button class="btn-outline">Download WAV</button>
+                        <button class="btn-outline">Download SRT</button>
+                        <button class="btn-outline"
+                            style="color: var(--accent-red); border-color: transparent;">Clear</button>
+                    </div>
                 </div>
 
             </div>
 
-            <!-- Bottom Right Dev Toggle -->
-            <button onclick="toggleDevPanel()" id="dev-toggle-btn"
-                style="position: absolute; bottom: 16px; right: 24px; color: var(--text-muted); font-size: 0.75rem; padding: 6px 10px; border-radius: 20px; background: #f1f5f9; display: flex; align-items: center; gap: 6px; border: 1px solid var(--border-color); box-shadow: 0 1px 2px rgba(0,0,0,0.05); z-index: 50; transition: all 0.2s;">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path
-                        d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z">
-                    </path>
-                    <polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline>
-                    <line x1="12" y1="22.08" x2="12" y2="12"></line>
-                </svg>
-                Dev Tools
-            </button>
-
-        </div>
-
-        <!-- Developer Tools Panel (Hidden by default) -->
-        <div class="dev-container" id="ui-dev-panel"
-            style="padding: 24px; background-color: var(--bg-canvas); border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03); margin-top: 24px; margin-bottom: 32px;">
-
-            <div
-                style="font-size: 0.85rem; font-weight: 700; color: #475569; letter-spacing: 0.5px; margin-bottom: 16px; display: flex; justify-content: space-between;">
-                DEV / FIXTURE TOOLS
-            </div>
-
-            <div style="display: flex; gap: 24px; align-items: flex-start;">
-
-                <!-- Left Column Controls -->
-                <div style="flex: 1; max-width: 300px;">
-                    <div style="font-size: 0.75rem; font-weight: 600; color: #64748b; margin-bottom: 8px;">SESSION ID
-                    </div>
-                    <div
-                        style="border: 1px solid #cbd5e1; border-radius: 6px; padding: 10px; font-family: monospace; font-size: 0.85rem; margin-bottom: 24px;">
-                        live_20260225T221853Z_3d6e53cb
-                    </div>
-
-                    <div style="font-size: 0.75rem; font-weight: 600; color: #64748b; margin-bottom: 8px;">FIXTURE (DEV)
-                    </div>
-                    <div
-                        style="border: 1px solid #cbd5e1; border-radius: 6px; padding: 0; margin-bottom: 16px; position: relative;">
-                        <select
-                            style="width: 100%; border: none; background: transparent; padding: 10px; font-family: inherit; font-size: 0.9rem; appearance: none; cursor: pointer;">
-                            <option>Panel discussion (120s) - v1</option>
-                        </select>
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-                            style="position: absolute; right: 12px; top: 12px; width: 16px; height: 16px; pointer-events: none;">
-                            <path d="M6 9l6 6 6-6" />
-                        </svg>
-                    </div>
-
-                    <div style="display: flex; gap: 12px;">
-                        <button
-                            style="flex: 1; padding: 8px; border: 1px solid #cbd5e1; background: white; border-radius: 6px; font-weight: 500; cursor: pointer;">Play
-                            fixture</button>
-                        <button
-                            style="flex: 1; padding: 8px; border: 1px solid #cbd5e1; background: white; border-radius: 6px; font-weight: 500; cursor: pointer;">Inject
-                            fixture</button>
-                    </div>
-                </div>
-
-                <!-- Right Column Status Cards -->
-                <div style="flex: 2; display: flex; flex-direction: column; gap: 16px;">
-
-                    <div
-                        style="background-color: #f8f6f2; border: 1px solid #e5e3de; border-radius: 8px; padding: 16px;">
-                        <div style="font-size: 0.75rem; font-weight: 600; color: #64748b; margin-bottom: 8px;">STATUS /
-                            PROCESSING</div>
-                        <div style="font-size: 0.9rem; line-height: 1.5; color: #334155;">
-                            Processing state: Ready Chunks 10/10 (pending 0, failed 0) Transcript rev 32 Recording
-                            120.0s 2108 chars Chunk triggers: max_duration=10
-                        </div>
-                    </div>
-
-                    <div
-                        style="background-color: #f8f6f2; border: 1px solid #e5e3de; border-radius: 8px; padding: 16px;">
-                        <div style="font-size: 0.75rem; font-weight: 600; color: #64748b; margin-bottom: 8px;">FIXTURE
-                            QUALITY</div>
-                        <div style="font-size: 0.9rem; line-height: 1.5; color: #334155;">
-                            Upload Similarity Score: 92/100 (panel_120s_v1) Words: live 423 / ref 441 (0.959x), edit
-                            distance 34 Run: 10/10 chunks ready (failed 0, pending 0) | recording 120.0s | stop->ready
-                            0.01s Chunk reasons: max_duration=10 Dedup: chunks_applied=0 words_trimmed_total=0 ASR
-                            transcribe time: 4.88s (4.1% of recording) ASR pipeline time: 8.78s (7.3% of recording)
-                            Health: poll_errors=0 chunk_errors=0 finalization=ready
-                        </div>
-                    </div>
-
-                </div>
-
-            </div>
         </div>
     </main>
 
     <script>
-        let devPanelOpen = true; // start open to match screenshot
-
-        function toggleDevPanel() {
-            devPanelOpen = !devPanelOpen;
-            const panel = document.getElementById('ui-dev-panel');
-
-            if (devPanelOpen) {
-                panel.style.display = 'block';
-            } else {
-                panel.style.display = 'none';
-            }
-        }
-
         // Simple script to toggle states for the mockup presentation
         function setState(state) {
             // Update mockup control buttons
@@ -717,7 +487,6 @@
                 btnFinish.style.display = 'none';
                 exports.style.display = 'none';
 
-                controls.style.padding = '16px 24px';
                 timer.textContent = '00:00';
             }
             else if (state === 'listening') {
@@ -733,8 +502,6 @@
                 btnPause.style.display = 'inline-flex';
                 btnFinish.style.display = 'inline-flex';
                 exports.style.display = 'none';
-
-                controls.style.padding = '16px 24px';
 
                 // Simulate time passing
                 timer.textContent = '00:31';
@@ -752,8 +519,6 @@
                 btnPause.style.display = 'none';
                 btnFinish.style.display = 'none';
                 exports.style.display = 'flex';
-
-                controls.style.padding = '24px 32px'; // Wider for exports
             }
         }
     </script>

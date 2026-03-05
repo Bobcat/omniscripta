@@ -20,6 +20,7 @@ def _load_server_config() -> dict[str, Any]:
     "compute_type": "float16",
     "batch_size": 3,
     "chunk_size": 30,
+    "chunk_size_live": 10,
     "beam_size": 5,
     "align_model": "",
     "diarize_model": "",
