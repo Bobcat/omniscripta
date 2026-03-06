@@ -22,10 +22,10 @@
     "calibration_seconds": [60, 180, 300, 480, 600, 1200, 1800, 2700, 3600],
     
     "rolling": {
-      "poll_interval_ms": 250,
+      "poll_interval_ms": 120,
       "min_infer_audio_ms": 1000,
       "single_segment_commit_min_ms": 12000,
-      "force_commit_repeats": 8,
+      "force_commit_repeats": 3,
       "max_uncommitted_ms": 15000,
       "hard_clip_keep_tail_ms": 5000,
       "max_decode_window_ms": 12000,
