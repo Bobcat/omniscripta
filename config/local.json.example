@@ -1,0 +1,35 @@
+{
+  "_comment": "Kopieer dit naar local.json en pas aan voor jouw workspace. local.json staat in .gitignore.",
+  
+  "service": {
+    "port": 8001
+  },
+  
+  "asr_pool": {
+    "base_url": "http://127.0.0.1:18090",
+    "status_url": "http://127.0.0.1:18090/asr/v1/pool",
+    "runner_slots": 1,
+    "work_root": "/home/gunnar/projects/transcribe-dev/data/asr_pool",
+    
+    "timeouts": {
+      "interactive": 60
+    }
+  },
+  
+  "live": {
+    "rolling": {
+      "poll_interval_ms": 250,
+      "min_infer_audio_ms": 1000,
+      "force_commit_repeats": 3
+    },
+    "auto_gain_control": false
+  },
+  
+  "janitor": {
+    "jobs_base": "data/demo_jobs"
+  },
+  
+  "frontend_dev": {
+    "api_base": "http://127.0.0.1:8001"
+  }
+}

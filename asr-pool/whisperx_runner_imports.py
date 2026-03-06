@@ -129,10 +129,6 @@ def _run(args_obj: dict[str, Any], out_json: Path) -> int:
     torch_num_threads=torch_num_threads,
     torch_num_interop_threads=torch_num_interop_threads,
   )
-  thread_info["env"] = {
-    "OMP_NUM_THREADS": (os.getenv("OMP_NUM_THREADS") or "").strip(),
-    "MKL_NUM_THREADS": (os.getenv("MKL_NUM_THREADS") or "").strip(),
-  }
 
   print(f"INFO whisperx_file={getattr(whisperx, '__file__', '<unknown>')}", flush=True)
   print(

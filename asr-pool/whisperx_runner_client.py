@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -10,24 +11,11 @@ from pathlib import Path
 from typing import Any
 
 from whisperx_runner_env import _build_runner_env, _load_server_config, _resolve_whisperx_python
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+  sys.path.insert(0, str(_REPO_ROOT))
 
-
-def _env_bool(name: str, default: bool) -> bool:
-  raw = str(os.getenv(name, "") or "").strip().lower()
-  if not raw:
-    return bool(default)
-  if raw in {"1", "true", "yes", "on", "y"}:
-    return True
-  if raw in {"0", "false", "no", "off", "n"}:
-    return False
-  return bool(default)
-
-
-def _env_float(name: str, default: float) -> float:
-  try:
-    return float(os.getenv(name, "").strip() or default)
-  except Exception:
-    return float(default)
+from shared.app_config import get_bool, get_float, get_str
 
 
 def _fingerprint_cfg(cfg: dict[str, Any]) -> str:
@@ -74,10 +62,10 @@ class _AsrPoolWarmRunnerClient:
       if proc is None or proc.poll() is not None or proc.stdin is None:
         raise PersistentRunnerClientError("Persistent runner is not available")
 
-      prewarm_timeout_s = max(5.0, _env_float("TRANSCRIBE_ASR_POOL_WARM_PREWARM_TIMEOUT_S", 180.0))
-      poll_s = max(0.02, _env_float("TRANSCRIBE_ASR_POOL_WARM_RESPONSE_POLL_S", 0.05))
-      prewarm_language = str(os.getenv("TRANSCRIBE_ASR_POOL_WARM_PREWARM_LANGUAGE", "en") or "en").strip() or "en"
-      prewarm_align_enabled = _env_bool("TRANSCRIBE_ASR_POOL_ALIGN_ENABLED", False)
+      prewarm_timeout_s = max(5.0, get_float("asr_pool.warm.prewarm_timeout_s", 180.0, min_value=0.0))
+      poll_s = max(0.02, get_float("asr_pool.warm.response_poll_s", 0.05, min_value=0.0))
+      prewarm_language = get_str("asr_pool.warm.prewarm_language", "en").strip() or "en"
+      prewarm_align_enabled = get_bool("asr_pool.warm.prewarm_align_enabled", False)
 
       ipc_dir = (Path("/tmp") / "transcribe_asr_pool_runner" / "_ipc").resolve()
       ipc_dir.mkdir(parents=True, exist_ok=True)
@@ -203,7 +191,7 @@ class _AsrPoolWarmRunnerClient:
       self._shutdown_locked(reason=reason)
 
   def maybe_shutdown_idle(self) -> None:
-    idle_s = max(0.0, _env_float("TRANSCRIBE_ASR_POOL_WARM_IDLE_S", 120.0))
+    idle_s = max(0.0, get_float("asr_pool.warm.idle_s", 120.0, min_value=0.0))
     if idle_s <= 0:
       return
     with self._lock:
@@ -215,8 +203,8 @@ class _AsrPoolWarmRunnerClient:
         self._shutdown_locked(reason="idle_timeout")
 
   def transcribe(self, *, job: Any, request: dict[str, Any], progress_path: Path | None = None) -> dict[str, Any]:
-    request_timeout_s = max(1.0, _env_float("TRANSCRIBE_ASR_POOL_WARM_REQUEST_TIMEOUT_S", 120.0))
-    poll_s = max(0.02, _env_float("TRANSCRIBE_ASR_POOL_WARM_RESPONSE_POLL_S", 0.05))
+    request_timeout_s = max(1.0, get_float("asr_pool.warm.request_timeout_s", 120.0, min_value=0.0))
+    poll_s = max(0.02, get_float("asr_pool.warm.response_poll_s", 0.05, min_value=0.0))
     with self._lock:
       self._ensure_runner_locked()
       proc = self._proc

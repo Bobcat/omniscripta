@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import socket
+import sys
 import threading
 import time
 from pathlib import Path
@@ -25,45 +26,98 @@ from pipeline_live_chunk import run_live_chunk_job
 from progress_predictor import build_prediction, phase_order_for_job
 from phase_whisperx import run_whisperx_phase_remote
 
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+  sys.path.insert(0, str(_REPO_ROOT))
+from shared.app_config import get_str, get_float, get_setting
 
-SLEEP_IDLE_SECONDS = 2.0
+SLEEP_IDLE_SECONDS = get_float("worker.sleep_idle_seconds", 2.0)
 
 def _repo_root() -> Path:
   # worker/worker_daemon.py -> worker -> repo root
   return Path(__file__).resolve().parents[1]
 
 
-DEFAULT_SERVICE_CONFIG_PATH = _repo_root() / "config" / "service.json"
-SERVICE_CONFIG_PATH = Path(os.getenv("TRANSCRIBE_SERVICE_CONFIG", str(DEFAULT_SERVICE_CONFIG_PATH)))
-DEFAULT_PROGRESS_DB_DIR = _repo_root() / "data" / "progress_db"
-PROGRESS_DB_DIR = Path(os.getenv("TRANSCRIBE_PROGRESS_DB_DIR", str(DEFAULT_PROGRESS_DB_DIR)))
-RUNS_V1_PATH = Path(os.getenv("TRANSCRIBE_PROGRESS_RUNS_PATH", str(PROGRESS_DB_DIR / "runs_v1.jsonl")))
+def _resolve_cfg_path(path_value: str, *, fallback_rel: str) -> Path:
+  raw = str(path_value or "").strip() or fallback_rel
+  p = Path(raw)
+  return p if p.is_absolute() else (_repo_root() / p)
+
+
+PROGRESS_DB_DIR = _resolve_cfg_path(
+  get_str("worker.progress_db_dir", "data/progress_db"),
+  fallback_rel="data/progress_db",
+)
+_runs_path_cfg = get_str("worker.progress_runs_path", "").strip()
+if _runs_path_cfg:
+  RUNS_V1_PATH = _resolve_cfg_path(_runs_path_cfg, fallback_rel="data/progress_db/runs_v1.jsonl")
+else:
+  RUNS_V1_PATH = (PROGRESS_DB_DIR / "runs_v1.jsonl").resolve()
 
 
 def _load_service_config() -> dict:
-  # Minimal defaults; override via config/service.json (or TRANSCRIBE_SERVICE_CONFIG) if present.
+  # Unified config source (settings.json + local.json via shared.app_config).
   cfg = {
     "snip": {
-      "minutes_default": 5
+      "minutes_default": 15
     },
     "topics": {
-      "chunk_minutes": 25,
+      "chunk_minutes": 15,
       "ctx_len": 16384,
       "ctx_safety": 0.85,
       "prompt_overhead_tokens_est": 1200,
-      "token_estimator": "chars_div4"
-    }
+      "token_estimator": "chars_div4",
+      "enabled": True,
+      "prompt_id": "topics_v1",
+      "prompt_path": "prompts/simple_prompt5.txt",
+      "model": "matatonic_Mistral-Small-24B-Instruct-2501-4.0bpw-exl2",
+      "generation": {
+        "max_tokens": 2048,
+        "temperature": 0.01,
+        "top_p": 1,
+        "top_k": 1,
+        "typical": 1,
+        "min_p": 0,
+        "tfs": 1,
+        "top_a": 0,
+        "smoothing_factor": 0,
+        "repetition_penalty": 1,
+        "penalty_range": 1024,
+        "frequency_penalty": 0,
+        "presence_penalty": 0,
+        "dry_multiplier": 0,
+        "mirostat_mode": 0,
+        "xtc_threshold": 0.1,
+        "xtc_probability": 0,
+        "stream": False,
+      },
+    },
+    "tabby": {
+      "base_url": "http://127.0.0.1:5001",
+      "api_key_env": "TABBY_API_KEY",
+      "timeout_s": 600,
+      "retries": 2,
+      "retry_sleep_s": 2,
+    },
   }
-  try:
-    p = Path(SERVICE_CONFIG_PATH)
-    if p.exists():
-      data = json.loads(p.read_text(encoding="utf-8"))
-      if isinstance(data, dict):
-        # shallow-ish merge for now
-        cfg.update(data)
-  except Exception:
-    # Keep defaults if config is invalid/unreadable
-    pass
+
+  for key in ("snip", "topics", "tabby"):
+    raw = get_setting(key, {})
+    if isinstance(raw, dict):
+      if key == "topics":
+        merged_topics = dict(cfg["topics"])
+        merged_topics.update(raw)
+        if isinstance(cfg["topics"].get("generation"), dict):
+          base_gen = dict(cfg["topics"]["generation"])
+          override_gen = raw.get("generation")
+          if isinstance(override_gen, dict):
+            base_gen.update(override_gen)
+          merged_topics["generation"] = base_gen
+        cfg["topics"] = merged_topics
+      else:
+        merged = dict(cfg[key])
+        merged.update(raw)
+        cfg[key] = merged
   return cfg
 
 
@@ -104,24 +158,21 @@ def _phase_seconds_from_rows(rows: list[tuple[str, float]]) -> dict[str, float]:
 
 
 def _host_id() -> str:
-  raw = (os.getenv("TRANSCRIBE_HOST_ID") or "").strip()
+  raw = get_str("worker.host_id", "").strip()
   if raw:
     return raw
   return (socket.gethostname().split(".")[0] or "unknown-host").strip() or "unknown-host"
 
 
 def _worker_instance() -> str:
-  raw = (os.getenv("TRANSCRIBE_WORKER_INSTANCE") or "").strip()
+  raw = get_str("worker.instance", "").strip()
   if raw:
     return raw
-  unit = (os.getenv("SYSTEMD_UNIT") or "").strip()
-  if "@" in unit:
-    return unit.split("@", 1)[1].split(".", 1)[0] or "1"
   return "1"
 
 
 def _hardware_key(host_id: str) -> str:
-  raw = (os.getenv("TRANSCRIBE_HARDWARE_KEY") or "").strip()
+  raw = get_str("worker.hardware_key", "").strip()
   if raw:
     return raw
   if host_id == "dc1":

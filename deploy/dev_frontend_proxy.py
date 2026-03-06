@@ -1,18 +1,24 @@
-import os
 import selectors
 import socket
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
+from pathlib import Path
+import sys
 from urllib.error import HTTPError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
-FRONTEND_DIR = os.getenv("TRANSCRIBE_FRONTEND_DIR", "/home/gunnar/projects/transcribe-dev/static")
-API_BASE = os.getenv("TRANSCRIBE_API_BASE", "http://127.0.0.1:8001").rstrip("/")
-HOST = os.getenv("TRANSCRIBE_FRONTEND_HOST", "127.0.0.1")
-PORT = int(os.getenv("TRANSCRIBE_FRONTEND_PORT", "8010"))
-WS_PROXY_BUFFER_BYTES = int(os.getenv("TRANSCRIBE_FRONTEND_WS_BUFFER_BYTES", "65536"))
-WS_PROXY_IDLE_TIMEOUT_S = float(os.getenv("TRANSCRIBE_FRONTEND_WS_IDLE_TIMEOUT_S", "1800"))
-LIVE_AUTO_GAIN_CONTROL = os.getenv("TRANSCRIBE_LIVE_AUTO_GAIN_CONTROL", "0").strip().lower() in ("1", "true", "yes", "on")
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+from shared.app_config import get_bool, get_float, get_int, get_str
+
+FRONTEND_DIR = get_str("frontend_dev.frontend_dir", "/home/gunnar/projects/transcribe-dev/static")
+API_BASE = get_str("frontend_dev.api_base", "http://127.0.0.1:8001").rstrip("/")
+HOST = get_str("frontend_dev.host", "127.0.0.1")
+PORT = get_int("frontend_dev.port", 8010, min_value=1)
+WS_PROXY_BUFFER_BYTES = get_int("frontend_dev.ws_buffer_bytes", 65536, min_value=1024)
+WS_PROXY_IDLE_TIMEOUT_S = get_float("frontend_dev.ws_idle_timeout_s", 1800.0, min_value=30.0)
+LIVE_AUTO_GAIN_CONTROL = get_bool("live.auto_gain_control", False)
 
 _api_parts = urlparse(API_BASE)
 _api_host = _api_parts.hostname or "127.0.0.1"

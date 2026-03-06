@@ -9,10 +9,6 @@ ExecStartPre=/usr/bin/mkdir -p /home/gunnar/projects/transcribe-dev/data/demo_jo
 ExecStart=/srv/transcribe/worker/.venv/bin/python /home/gunnar/projects/transcribe-dev/worker/worker_daemon.py
 Restart=always
 RestartSec=2
-Environment=TRANSCRIBE_JOBS_BASE=/home/gunnar/projects/transcribe-dev/data/demo_jobs
-Environment=TRANSCRIBE_SERVICE_CONFIG=/home/gunnar/projects/transcribe-dev/config/service.json
-Environment=TRANSCRIBE_WHISPERX_CONFIG=/home/gunnar/projects/transcribe-dev/config/whisperx.json
-Environment=TRANSCRIBE_PERF_CACHE=/home/gunnar/projects/transcribe-dev/config/perf_cache.json
 EnvironmentFile=-%h/.config/transcribe/dev.env
 Nice=10
 IOSchedulingClass=idle

@@ -98,7 +98,7 @@ def run_topics_llm(
   """
   Phase 41: Call Tabby (PC1) per chunk and write artifacts.
 
-  Required config (in config/service.json):
+  Required config (in app config):
     "topics": {
       "prompt_path": "/path/to/simple_prompt5.txt",
       "model": "matatonic_Mistral-Small-24B-Instruct-2501-4.0bpw-exl2",
@@ -125,11 +125,11 @@ def run_topics_llm(
     # Resolve relative paths from repo root so configs can use e.g. "prompts/simple_prompt5.txt".
     prompt_path = (Path(__file__).resolve().parents[1] / prompt_path).resolve()
   if not prompt_path.exists():
-    raise RuntimeError("topics.prompt_path missing or not found in service.json")
+    raise RuntimeError("topics.prompt_path missing or not found in config")
 
   model = str(topics_cfg.get("model", "")).strip()
   if not model:
-    raise RuntimeError("topics.model missing in service.json")
+    raise RuntimeError("topics.model missing in config")
 
   generation = _default_generation_params()
   user_gen = topics_cfg.get("generation")
@@ -138,7 +138,7 @@ def run_topics_llm(
 
   base_url = str(tabby_cfg.get("base_url", "")).strip()
   if not base_url:
-    raise RuntimeError("tabby.base_url missing in service.json")
+    raise RuntimeError("tabby.base_url missing in config")
 
   api_key_env = str(tabby_cfg.get("api_key_env", "TABBY_API_KEY"))
   api_key = os.getenv(api_key_env, "").strip()

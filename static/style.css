@@ -2762,6 +2762,8 @@
     .live-final-text {
       width: 100%;
       min-height: 0;
+      max-height: 100%;
+      overflow-y: auto;
       white-space: normal;
       word-break: break-word;
     }
@@ -3414,6 +3416,7 @@
       font-size: 0.94rem;
       line-height: 1.55;
       color: var(--text);
+      overflow-y: auto;
       white-space: normal;
       word-break: break-word;
     }

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import sys
 import time
 from collections import deque
@@ -16,7 +15,13 @@ from fastapi import Depends, FastAPI, Header, Request
 from fastapi.responses import JSONResponse
 
 
-ROOT_PATH = os.getenv("TRANSCRIBE_ASR_POOL_ROOT_PATH", "")
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from shared.app_config import get_str, get_int, get_float, get_bool
+
+ROOT_PATH = get_str("asr_pool.root_path", "")
 app = FastAPI(root_path=ROOT_PATH)
 
 
@@ -55,38 +60,12 @@ def _parse_utc_unix(value: str | None) -> float | None:
         return None
 
 
-_REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
-
 from shared.asr.blob_store import AsrBlobError, resolve_blob_ref_to_local_path
 from asr_contract import (
     AsrRequestError,
     build_error_response,
     prepare_request,
 )
-
-
-def _cfg_int(name: str, default: int, *, min_value: int = 0) -> int:
-    try:
-        return max(min_value, int(str(os.getenv(name, str(default))).strip() or str(default)))
-    except Exception:
-        return max(min_value, int(default))
-
-
-def _cfg_str(name: str, default: str) -> str:
-    return str(os.getenv(name, default) or default).strip()
-
-
-def _cfg_bool(name: str, default: bool) -> bool:
-    raw = str(os.getenv(name, "") or "").strip().lower()
-    if not raw:
-        return bool(default)
-    if raw in {"1", "true", "yes", "on", "y"}:
-        return True
-    if raw in {"0", "false", "no", "off", "n"}:
-        return False
-    return bool(default)
 
 
 def _error(
@@ -130,49 +109,50 @@ class _Record:
 
 class AsrPoolService:
     def __init__(self) -> None:
-        self._runner_slots = _cfg_int("TRANSCRIBE_ASR_POOL_RUNNER_SLOTS", 2, min_value=1)
+        # Use config system with env fallback
+        self._runner_slots = get_int("asr_pool.runner_slots", 2, min_value=1)
         self._queue_limits = {
-            "interactive": _cfg_int("TRANSCRIBE_ASR_POOL_QUEUE_LIMIT_INTERACTIVE", 8, min_value=1),
-            "normal": _cfg_int("TRANSCRIBE_ASR_POOL_QUEUE_LIMIT_NORMAL", 20, min_value=1),
-            "background": _cfg_int("TRANSCRIBE_ASR_POOL_QUEUE_LIMIT_BACKGROUND", 50, min_value=1),
+            "interactive": get_int("asr_pool.queue_limits.interactive", 8, min_value=1),
+            "normal": get_int("asr_pool.queue_limits.normal", 20, min_value=1),
+            "background": get_int("asr_pool.queue_limits.background", 50, min_value=1),
         }
         self._timeouts_s = {
-            "interactive": _cfg_int("TRANSCRIBE_ASR_POOL_TIMEOUT_INTERACTIVE_S", 30, min_value=1),
-            "normal": _cfg_int("TRANSCRIBE_ASR_POOL_TIMEOUT_NORMAL_S", 120, min_value=1),
-            "background": _cfg_int("TRANSCRIBE_ASR_POOL_TIMEOUT_BACKGROUND_S", 300, min_value=1),
+            "interactive": get_int("asr_pool.timeouts.interactive", 30, min_value=1),
+            "normal": get_int("asr_pool.timeouts.normal", 120, min_value=1),
+            "background": get_int("asr_pool.timeouts.background", 300, min_value=1),
         }
-        self._warm_start_enabled = _cfg_bool("TRANSCRIBE_ASR_POOL_WARM_START_ENABLED", True)
-        self._warm_start_timeout_s = _cfg_int("TRANSCRIBE_ASR_POOL_WARM_START_TIMEOUT_S", 180, min_value=1)
-        self._watchdog_enabled = _cfg_bool("TRANSCRIBE_ASR_POOL_WATCHDOG_ENABLED", True)
+        self._warm_start_enabled = get_bool("asr_pool.warm_start_enabled", True)
+        self._warm_start_timeout_s = get_int("asr_pool.warm_start_timeout_s", 180, min_value=1)
+        self._watchdog_enabled = get_bool("asr_pool.watchdog_enabled", True)
         self._watchdog_interval_s = max(
             0.2,
-            float(_cfg_int("TRANSCRIBE_ASR_POOL_WATCHDOG_INTERVAL_MS", 2000, min_value=200)) / 1000.0,
+            get_float("asr_pool.watchdog_interval_ms", 2000, min_value=200) / 1000.0,
         )
-        self._watchdog_recover_timeout_s = _cfg_int(
-            "TRANSCRIBE_ASR_POOL_WATCHDOG_RECOVER_TIMEOUT_S",
+        self._watchdog_recover_timeout_s = get_int(
+            "asr_pool.watchdog_recover_timeout_s",
             30,
             min_value=1,
         )
-        self._records_max = _cfg_int("TRANSCRIBE_ASR_POOL_RECORDS_MAX", 10000, min_value=100)
+        self._records_max = get_int("asr_pool.records.max", 10000, min_value=100)
         self._records_ttl_s = {
-            "completed": _cfg_int("TRANSCRIBE_ASR_POOL_RECORDS_TTL_COMPLETED_S", 900, min_value=10),
-            "failed": _cfg_int("TRANSCRIBE_ASR_POOL_RECORDS_TTL_FAILED_S", 1800, min_value=10),
-            "cancelled": _cfg_int("TRANSCRIBE_ASR_POOL_RECORDS_TTL_CANCELLED_S", 600, min_value=10),
+            "completed": get_int("asr_pool.records.ttl_completed_s", 900, min_value=10),
+            "failed": get_int("asr_pool.records.ttl_failed_s", 1800, min_value=10),
+            "cancelled": get_int("asr_pool.records.ttl_cancelled_s", 600, min_value=10),
         }
-        self._records_prune_interval_s = _cfg_int("TRANSCRIBE_ASR_POOL_RECORDS_PRUNE_INTERVAL_S", 30, min_value=1)
+        self._records_prune_interval_s = get_int("asr_pool.records.prune_interval_s", 30, min_value=1)
         self._records_pruned_total = 0
         self._records_pruned_ttl_total = 0
         self._records_pruned_overflow_total = 0
         self._records_last_prune_utc = ""
         self._records_last_prune_reason = ""
         self._records_last_prune_count = 0
-        self._work_root = (
-            Path(_cfg_str("TRANSCRIBE_ASR_POOL_WORK_ROOT", str((_repo_root() / "data" / "asr_pool").resolve())))
-            .expanduser()
-            .resolve()
-        )
+        work_root_cfg = get_str("asr_pool.work_root", "")
+        if work_root_cfg:
+            self._work_root = Path(work_root_cfg).expanduser().resolve()
+        else:
+            self._work_root = (_repo_root() / "data" / "asr_pool").resolve()
         self._work_root.mkdir(parents=True, exist_ok=True)
-        self._interactive_burst_max = _cfg_int("TRANSCRIBE_ASR_POOL_INTERACTIVE_BURST_MAX", 8, min_value=1)
+        self._interactive_burst_max = get_int("asr_pool.interactive_burst_max", 8, min_value=1)
         self._warm_clients: list[Any] = []
         try:
             from whisperx_runner_client import _AsrPoolWarmRunnerClient
@@ -195,7 +175,7 @@ class AsrPoolService:
         self._noninteractive_next = "normal"
         self._watchdog_restart_count: list[int] = [0 for _ in range(max(0, int(self._runner_slots)))]
         self._last_records_prune_mono = 0.0
-        self._stage_poll_interval_s = max(0.05, float(_cfg_int("TRANSCRIBE_ASR_POOL_STAGE_POLL_MS", 150, min_value=50)) / 1000.0)
+        self._stage_poll_interval_s = max(0.05, get_float("asr_pool.stage_poll_ms", 150, min_value=50) / 1000.0)
 
     async def start(self) -> None:
         should_prewarm = False
@@ -1008,7 +988,7 @@ class AsrPoolService:
 
 
 POOL = AsrPoolService()
-ASR_TOKEN = _cfg_str("TRANSCRIBE_ASR_POOL_TOKEN", "")
+ASR_TOKEN = get_str("asr_pool.token", "")
 
 
 def _auth_guard(x_asr_token: str | None = Header(default=None)) -> None:

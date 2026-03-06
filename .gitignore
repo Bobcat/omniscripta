@@ -4,8 +4,8 @@ __pycache__/
 .venv/
 .venvs/
 
-# Runtime config (track real JSON configs)
-config/*.json.example
+# Runtime config
+config/local.json
 *.env
 
 # Data / job outputs / logs

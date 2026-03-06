@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import random
 import sys
 import time
@@ -17,35 +16,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from shared.asr.blob_store import cleanup_blob_store_if_due, upload_local_path_as_blob_ref
 from shared.asr.schema import ASR_SCHEMA_VERSION
-
-
-def _env_str(name: str, default: str) -> str:
-  return str(os.getenv(name, default) or default).strip()
-
-
-def _env_int(name: str, default: int, *, min_value: int = 0) -> int:
-  try:
-    return max(min_value, int(str(os.getenv(name, str(default))).strip() or str(default)))
-  except Exception:
-    return max(min_value, int(default))
-
-
-def _env_float(name: str, default: float, *, min_value: float = 0.0) -> float:
-  try:
-    return max(float(min_value), float(str(os.getenv(name, str(default))).strip() or str(default)))
-  except Exception:
-    return max(float(min_value), float(default))
-
-
-def _env_bool(name: str, default: bool) -> bool:
-  raw = str(os.getenv(name, "") or "").strip().lower()
-  if not raw:
-    return bool(default)
-  if raw in {"1", "true", "yes", "on", "y"}:
-    return True
-  if raw in {"0", "false", "no", "off", "n"}:
-    return False
-  return bool(default)
+from shared.app_config import get_str, get_int, get_float, get_bool
 
 
 def _build_error_response(
@@ -74,41 +45,41 @@ def _build_error_response(
 
 
 def _pool_base_url() -> str:
-  raw = _env_str("TRANSCRIBE_ASR_POOL_BASE_URL", "http://127.0.0.1:8090")
+  raw = get_str("asr_pool.base_url", "http://127.0.0.1:8090")
   return raw.rstrip("/")
 
 
 def _priority_timeout_s(priority: str) -> int:
   p = str(priority or "").strip().lower()
   if p == "interactive":
-    return _env_int("TRANSCRIBE_ASR_REMOTE_TIMEOUT_INTERACTIVE_S", 60, min_value=1)
+    return get_int("asr_remote.timeout_interactive_s", 60, min_value=1)
   if p == "background":
-    return _env_int("TRANSCRIBE_ASR_REMOTE_TIMEOUT_BACKGROUND_S", 420, min_value=1)
-  return _env_int("TRANSCRIBE_ASR_REMOTE_TIMEOUT_NORMAL_S", 180, min_value=1)
+    return get_int("asr_remote.timeout_background_s", 420, min_value=1)
+  return get_int("asr_remote.timeout_normal_s", 180, min_value=1)
 
 
 def _poll_interval_s() -> float:
-  return _env_float("TRANSCRIBE_ASR_REMOTE_POLL_INTERVAL_S", 0.2, min_value=0.05)
+  return get_float("asr_remote.poll_interval_s", 0.2, min_value=0.05)
 
 
 def _http_timeout_s() -> float:
-  return _env_float("TRANSCRIBE_ASR_REMOTE_HTTP_TIMEOUT_S", 10.0, min_value=1.0)
+  return get_float("asr_remote.http_timeout_s", 10.0, min_value=1.0)
 
 
 def _retry_attempts() -> int:
-  return _env_int("TRANSCRIBE_ASR_REMOTE_RETRY_ATTEMPTS", 3, min_value=1)
+  return get_int("asr_remote.retry_attempts", 3, min_value=1)
 
 
 def _retry_base_delay_s() -> float:
-  return _env_float("TRANSCRIBE_ASR_REMOTE_RETRY_BASE_DELAY_S", 0.2, min_value=0.0)
+  return get_float("asr_remote.retry_base_delay_s", 0.2, min_value=0.0)
 
 
 def _retry_max_delay_s() -> float:
-  return _env_float("TRANSCRIBE_ASR_REMOTE_RETRY_MAX_DELAY_S", 2.0, min_value=0.05)
+  return get_float("asr_remote.retry_max_delay_s", 2.0, min_value=0.05)
 
 
 def _retry_jitter_s() -> float:
-  return _env_float("TRANSCRIBE_ASR_REMOTE_RETRY_JITTER_S", 0.1, min_value=0.0)
+  return get_float("asr_remote.retry_jitter_s", 0.1, min_value=0.0)
 
 
 def _json_or_empty(raw: bytes) -> dict[str, Any]:
@@ -281,7 +252,7 @@ def transcribe_with_remote_pool(
   request_id = str(req.get("request_id") or "").strip()
   priority = str(req.get("priority") or "normal").strip().lower() or "normal"
   pool_base_url = _pool_base_url()
-  token = _env_str("TRANSCRIBE_ASR_POOL_TOKEN", "")
+  token = get_str("asr_pool.token", "")
   timeout_s = _priority_timeout_s(priority)
   poll_interval_s = _poll_interval_s()
   http_timeout_s = _http_timeout_s()
@@ -295,7 +266,7 @@ def transcribe_with_remote_pool(
   status_http_calls = 0
   cancel_attempts_used = 0
 
-  if _env_bool("TRANSCRIBE_ASR_REMOTE_BLOB_ENABLED", True):
+  if get_bool("asr_remote.blob_enabled", True):
     audio = dict(req.get("audio") or {})
     local_path = str(audio.get("local_path") or "").strip()
     if local_path:

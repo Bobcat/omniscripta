@@ -1,46 +1,64 @@
 from __future__ import annotations
 
-import json
 import os
 import sys
 from pathlib import Path
 from typing import Any
 
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+  sys.path.insert(0, str(_REPO_ROOT))
 
-DEFAULT_SERVER_CFG_PATH = Path("/srv/transcribe/config/whisperx.json")
-SERVER_CFG_PATH = Path(os.getenv("TRANSCRIBE_WHISPERX_CONFIG", str(DEFAULT_SERVER_CFG_PATH)))
+from shared.app_config import get_bool, get_int, get_setting, get_str
+
 WHISPERX_ENV_FILE = Path.home() / ".config" / "whisperx" / "env"
 DEFAULT_WHISPERX_VENV = Path.home() / "whisperx" / ".venv"
 
 
 def _load_server_config() -> dict[str, Any]:
   cfg: dict[str, Any] = {
-    "model": "large-v3",
-    "device": "cuda",
-    "compute_type": "float16",
-    "batch_size": 3,
-    "chunk_size": 30,
-    "chunk_size_live": 10,
-    "live_chunk_backend": "whisperx",
-    "beam_size": 5,
-    "align_model": "",
-    "diarize_model": "",
-    "omp_num_threads": None,
-    "mkl_num_threads": None,
-    "torch_num_threads": None,
-    "torch_num_interop_threads": None,
-    "whisperx_venv": str(DEFAULT_WHISPERX_VENV),
+    "model": get_str("asr_pool.whisperx.model", "large-v3"),
+    "device": get_str("asr_pool.whisperx.device", "cuda"),
+    "compute_type": get_str("asr_pool.whisperx.compute_type", "int8"),
+    "batch_size": get_int("asr_pool.whisperx.batch_size", 1, min_value=1),
+    "chunk_size": get_int("asr_pool.whisperx.chunk_size", 20, min_value=1),
+    "chunk_size_live": get_int("asr_pool.whisperx.chunk_size_live", 10, min_value=1),
+    "live_chunk_backend": get_str("asr_pool.whisperx.live_chunk_backend", "whisperx"),
+    "beam_size": get_int("asr_pool.whisperx.beam_size", 5, min_value=1),
+    "align_model": get_str("asr_pool.whisperx.align_model", ""),
+    "diarize_model": get_str("asr_pool.whisperx.diarize_model", ""),
+    "whisperx_venv": get_str("asr_pool.whisperx.venv", str(DEFAULT_WHISPERX_VENV)),
   }
-  if SERVER_CFG_PATH.exists():
+  raw_threads = get_setting("asr_pool.whisperx.threads", {})
+  if isinstance(raw_threads, dict):
     try:
-      on_disk = json.loads(SERVER_CFG_PATH.read_text(encoding="utf-8"))
-      if isinstance(on_disk, dict):
-        cfg.update(on_disk)
+      cfg["omp_num_threads"] = int(raw_threads.get("omp")) if raw_threads.get("omp") is not None else None
     except Exception:
-      pass
-  env_live_chunk_backend = str(os.getenv("TRANSCRIBE_LIVE_CHUNK_BACKEND", "") or "").strip()
-  if env_live_chunk_backend:
-    cfg["live_chunk_backend"] = env_live_chunk_backend
+      cfg["omp_num_threads"] = None
+    try:
+      cfg["mkl_num_threads"] = int(raw_threads.get("mkl")) if raw_threads.get("mkl") is not None else None
+    except Exception:
+      cfg["mkl_num_threads"] = None
+    try:
+      cfg["torch_num_threads"] = int(raw_threads.get("torch")) if raw_threads.get("torch") is not None else None
+    except Exception:
+      cfg["torch_num_threads"] = None
+    try:
+      cfg["torch_num_interop_threads"] = int(raw_threads.get("torch_interop")) if raw_threads.get("torch_interop") is not None else None
+    except Exception:
+      cfg["torch_num_interop_threads"] = None
+  else:
+    cfg["omp_num_threads"] = None
+    cfg["mkl_num_threads"] = None
+    cfg["torch_num_threads"] = None
+    cfg["torch_num_interop_threads"] = None
+
+  cfg["live_chunk_backend"] = str(cfg["live_chunk_backend"] or "whisperx").strip().lower() or "whisperx"
+  if cfg["live_chunk_backend"] not in {"whisperx", "faster_whisper_direct"}:
+    cfg["live_chunk_backend"] = "whisperx"
+
+  # Keep this flag available in cfg for diagnostics parity.
+  cfg["vad_filter"] = bool(get_bool("asr_pool.whisperx.vad_filter", True))
   return cfg
 
 

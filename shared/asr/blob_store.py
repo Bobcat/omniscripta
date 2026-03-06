@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from shared.app_config import get_int, get_str
 
 _BLOB_REF_PREFIX = "fs://"
 _SAFE_TOKEN_RE = re.compile(r"[^a-zA-Z0-9._-]+")
@@ -37,19 +38,8 @@ def _repo_root() -> Path:
   return Path(__file__).resolve().parents[2]
 
 
-def _env_str(name: str, default: str) -> str:
-  return str(os.getenv(name, default) or default).strip()
-
-
-def _env_int(name: str, default: int, *, min_value: int = 0) -> int:
-  try:
-    return max(min_value, int(str(os.getenv(name, str(default))).strip() or str(default)))
-  except Exception:
-    return max(min_value, int(default))
-
-
 def _blob_root() -> Path:
-  raw = _env_str("TRANSCRIBE_ASR_BLOB_ROOT", str((_repo_root() / "data" / "asr_blobs").resolve()))
+  raw = get_str("asr_blob.root", str((_repo_root() / "data" / "asr_blobs").resolve()))
   p = Path(raw).expanduser()
   if not p.is_absolute():
     p = (_repo_root() / p).resolve()
@@ -172,9 +162,9 @@ def resolve_blob_ref_to_local_path(blob_ref: str) -> Path:
 
 
 def cleanup_blob_store_if_due() -> None:
-  interval_s = _env_int("TRANSCRIBE_ASR_BLOB_CLEANUP_INTERVAL_S", 120, min_value=0)
-  ttl_s = _env_int("TRANSCRIBE_ASR_BLOB_TTL_S", 3600, min_value=0)
-  max_scan = _env_int("TRANSCRIBE_ASR_BLOB_CLEANUP_MAX_SCAN_FILES", 5000, min_value=1)
+  interval_s = get_int("asr_blob.cleanup_interval_s", 120, min_value=0)
+  ttl_s = get_int("asr_blob.ttl_s", 3600, min_value=0)
+  max_scan = get_int("asr_blob.cleanup_max_scan_files", 5000, min_value=1)
   if interval_s <= 0 or ttl_s <= 0:
     return
   now_mono = time.monotonic()
@@ -216,4 +206,3 @@ def cleanup_blob_store_if_due() -> None:
   except Exception:
     # Cleanup must never break ASR path.
     return
-

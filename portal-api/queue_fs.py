@@ -4,11 +4,17 @@ import json
 import os
 import secrets
 import shutil
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from shared.app_config import get_str
 
 def _repo_root() -> Path:
     # portal-api/queue_fs.py -> portal-api -> repo root
@@ -16,13 +22,9 @@ def _repo_root() -> Path:
 
 
 def _jobs_base() -> Path:
-    # Allow override for e.g. local dev: TRANSCRIBE_JOBS_BASE=/tmp/demo_jobs
-    raw = (os.getenv("TRANSCRIBE_JOBS_BASE") or "").strip()
-    if raw:
-        p = Path(raw)
-        return p if p.is_absolute() else (_repo_root() / p)
-
-    return _repo_root() / "data" / "demo_jobs"
+    raw = get_str("janitor.jobs_base", "data/demo_jobs").strip()
+    p = Path(raw)
+    return p if p.is_absolute() else (_repo_root() / p)
 
 
 BASE = _jobs_base()

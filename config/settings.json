@@ -1,0 +1,205 @@
+{
+  "_comment": "Standaard applicatie instellingen. Niet wijzigen - gebruik local.json voor overrides.",
+  
+  "service": {
+    "host": "127.0.0.1",
+    "port": 8001,
+    "root_path": "/api"
+  },
+  
+  "live": {
+    "session_ttl_s": 900,
+    "session_preconnect_ttl_s": 30,
+    "max_sessions": 1,
+    "archive_ttl_s": 3600,
+    "max_archives": 256,
+    "audio_sample_rate_hz": 16000,
+    "audio_channels": 1,
+    "drain_wait_s": 20.0,
+    "post_close_wait_s": 60.0,
+    "asr_language": "en",
+    "auto_gain_control": false,
+    "calibration_seconds": [60, 180, 300, 480, 600, 1200, 1800, 2700, 3600],
+    
+    "rolling": {
+      "poll_interval_ms": 250,
+      "min_infer_audio_ms": 1000,
+      "single_segment_commit_min_ms": 12000,
+      "force_commit_repeats": 8,
+      "max_uncommitted_ms": 15000,
+      "hard_clip_keep_tail_ms": 5000,
+      "max_decode_window_ms": 12000,
+      "buffer_trim_threshold_ms": 30000,
+      "buffer_trim_drop_ms": 20000,
+      "require_single_inflight": true
+    }
+  },
+  
+  "asr_pool": {
+    "base_url": "http://127.0.0.1:8090",
+    "status_url": "http://127.0.0.1:8090/asr/v1/pool",
+    "token": "",
+    "root_path": "",
+    "work_root": "data/asr_pool",
+    "runner_slots": 2,
+    "warm_start_enabled": true,
+    "warm_start_timeout_s": 180,
+    "warm_prewarm_timeout_s": 180,
+    "watchdog_enabled": true,
+    "watchdog_interval_ms": 2000,
+    "watchdog_recover_timeout_s": 60,
+    "stage_poll_ms": 150,
+    "warm_request_timeout_s": 900,
+    
+    "queue_limits": {
+      "interactive": 8,
+      "normal": 20,
+      "background": 50
+    },
+    
+    "timeouts": {
+      "interactive": 30,
+      "normal": 120,
+      "background": 300
+    },
+    
+    "records": {
+      "max": 10000,
+      "ttl_completed_s": 900,
+      "ttl_failed_s": 1800,
+      "ttl_cancelled_s": 600,
+      "prune_interval_s": 30
+    },
+    
+    "interactive_burst_max": 8,
+
+    "whisperx": {
+      "model": "large-v3",
+      "device": "cuda",
+      "compute_type": "int8",
+      "batch_size": 1,
+      "chunk_size": 20,
+      "chunk_size_live": 10,
+      "live_chunk_backend": "whisperx",
+      "beam_size": 5,
+      "align_model": "jonatasgrosman/wav2vec2-large-xlsr-53-dutch",
+      "diarize_model": "pyannote/speaker-diarization-3.1",
+      "venv": "/home/gunnar/whisperx/.venv",
+      "vad_filter": true,
+      "threads": {
+        "omp": 8,
+        "mkl": 8,
+        "torch": 8,
+        "torch_interop": 1
+      }
+    },
+    
+    "warm": {
+      "prewarm_timeout_s": 180.0,
+      "response_poll_s": 0.05,
+      "prewarm_language": "en",
+      "prewarm_align_enabled": false,
+      "idle_s": 120.0,
+      "request_timeout_s": 120.0
+    }
+  },
+  
+  "janitor": {
+    "enabled": true,
+    "jobs_base": "data/demo_jobs",
+    "live_kinds": ["live_chunk"],
+    "min_age_s": 3600,
+    "max_per_state": 3000,
+    "dry_run": false,
+    "allow_nonstandard_base": false,
+    "verbose_items": false,
+    "verbose_items_max": 20
+  },
+  
+  "worker": {
+    "sleep_idle_seconds": 2.0,
+    "progress_db_dir": "data/progress_db",
+    "progress_runs_path": "data/progress_db/runs_v1.jsonl",
+    "host_id": "",
+    "instance": "1",
+    "hardware_key": ""
+  },
+
+  "snip": {
+    "minutes_default": 15
+  },
+
+  "tabby": {
+    "base_url": "http://127.0.0.1:5001",
+    "api_key_env": "TABBY_API_KEY",
+    "timeout_s": 600,
+    "retries": 2,
+    "retry_sleep_s": 2
+  },
+
+  "topics": {
+    "chunk_minutes": 15,
+    "ctx_len": 16384,
+    "ctx_safety": 0.85,
+    "prompt_overhead_tokens_est": 1200,
+    "token_estimator": "chars_div4",
+    "enabled": true,
+    "prompt_id": "topics_v1",
+    "prompt_path": "prompts/simple_prompt5.txt",
+    "model": "matatonic_Mistral-Small-24B-Instruct-2501-4.0bpw-exl2",
+    "generation": {
+      "max_tokens": 2048,
+      "temperature": 0.01,
+      "top_p": 1,
+      "top_k": 1,
+      "typical": 1,
+      "min_p": 0,
+      "tfs": 1,
+      "top_a": 0,
+      "smoothing_factor": 0,
+      "repetition_penalty": 1,
+      "penalty_range": 1024,
+      "frequency_penalty": 0,
+      "presence_penalty": 0,
+      "dry_multiplier": 0,
+      "mirostat_mode": 0,
+      "xtc_threshold": 0.1,
+      "xtc_probability": 0,
+      "stream": false
+    }
+  },
+  
+  "live_chunk": {
+    "asr_profile": "live_fast",
+    "align_enabled": false
+  },
+  
+  "asr_remote": {
+    "timeout_interactive_s": 60,
+    "timeout_background_s": 420,
+    "timeout_normal_s": 180,
+    "poll_interval_s": 0.2,
+    "http_timeout_s": 10.0,
+    "retry_attempts": 3,
+    "retry_base_delay_s": 0.2,
+    "retry_max_delay_s": 2.0,
+    "retry_jitter_s": 0.1,
+    "blob_enabled": true
+  },
+  
+  "asr_blob": {
+    "root": "data/asr_blobs",
+    "cleanup_interval_s": 120,
+    "ttl_s": 3600,
+    "cleanup_max_scan_files": 5000
+  },
+  
+  "frontend_dev": {
+    "frontend_dir": "/home/gunnar/projects/transcribe-dev/static",
+    "api_base": "http://127.0.0.1:8001",
+    "host": "127.0.0.1",
+    "port": 8010,
+    "ws_buffer_bytes": 65536,
+    "ws_idle_timeout_s": 1800.0
+  }
+}

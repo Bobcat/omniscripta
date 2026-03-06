@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import shutil
 import sys
 import time
@@ -11,30 +10,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from shared.app_config import get_bool, get_int, get_list, get_str
+
 
 def _repo_root() -> Path:
-    return Path(__file__).resolve().parents[1]
-
-
-def _parse_bool(value: str | None, default: bool) -> bool:
-    if value is None:
-        return bool(default)
-    raw = str(value).strip().lower()
-    if raw in {"1", "true", "yes", "on"}:
-        return True
-    if raw in {"0", "false", "no", "off"}:
-        return False
-    return bool(default)
-
-
-def _parse_int(value: str | None, default: int, *, min_value: int | None = None) -> int:
-    try:
-        out = int(str(value).strip()) if value is not None else int(default)
-    except Exception:
-        out = int(default)
-    if min_value is not None and out < min_value:
-        out = int(min_value)
-    return int(out)
+    return _REPO_ROOT
 
 
 def _safe_read_json(path: Path) -> dict[str, Any]:
@@ -106,19 +90,20 @@ def _log(event: str, **fields: Any) -> None:
 
 
 def main() -> int:
-    env_jobs_base = (os.getenv("TRANSCRIBE_JOBS_BASE") or "").strip()
-    default_jobs_base = (Path(env_jobs_base) if env_jobs_base else (_repo_root() / "data" / "demo_jobs")).resolve()
-    default_enabled = _parse_bool(os.getenv("TRANSCRIBE_JOBS_JANITOR_ENABLED"), False)
-    default_dry_run = _parse_bool(os.getenv("TRANSCRIBE_JOBS_JANITOR_DRY_RUN"), True)
-    default_allow_nonstandard_base = _parse_bool(
-        os.getenv("TRANSCRIBE_JOBS_JANITOR_ALLOW_NONSTANDARD_BASE"),
-        False,
-    )
-    default_min_age_s = _parse_int(os.getenv("TRANSCRIBE_JOBS_JANITOR_MIN_AGE_S"), 3600, min_value=0)
-    default_max_per_state = _parse_int(os.getenv("TRANSCRIBE_JOBS_JANITOR_MAX_PER_STATE"), 3000, min_value=0)
-    default_live_kinds = (os.getenv("TRANSCRIBE_JOBS_JANITOR_LIVE_KINDS") or "live_chunk").strip()
-    default_verbose_items = _parse_bool(os.getenv("TRANSCRIBE_JOBS_JANITOR_VERBOSE_ITEMS"), False)
-    default_verbose_items_max = _parse_int(os.getenv("TRANSCRIBE_JOBS_JANITOR_VERBOSE_ITEMS_MAX"), 20, min_value=0)
+    cfg_jobs_base = get_str("janitor.jobs_base", "data/demo_jobs").strip()
+    default_jobs_base = (
+        Path(cfg_jobs_base) if Path(cfg_jobs_base).is_absolute() else (_repo_root() / cfg_jobs_base)
+    ).resolve()
+    default_enabled = bool(get_bool("janitor.enabled", False))
+    default_dry_run = bool(get_bool("janitor.dry_run", True))
+    default_allow_nonstandard_base = bool(get_bool("janitor.allow_nonstandard_base", False))
+    default_min_age_s = int(get_int("janitor.min_age_s", 3600, min_value=0))
+    default_max_per_state = int(get_int("janitor.max_per_state", 3000, min_value=0))
+    default_live_kinds = ",".join(
+        [str(x).strip() for x in get_list("janitor.live_kinds", ["live_chunk"]) if str(x).strip()]
+    ) or "live_chunk"
+    default_verbose_items = bool(get_bool("janitor.verbose_items", False))
+    default_verbose_items_max = int(get_int("janitor.verbose_items_max", 20, min_value=0))
 
     parser = argparse.ArgumentParser(description="Cleanup demo_jobs done/error directories for live chunk jobs only.")
     parser.add_argument("--jobs-base", default=str(default_jobs_base))

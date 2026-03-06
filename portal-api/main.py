@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import mimetypes
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,84 +30,64 @@ from live_sessions import LiveSessionManager
 from live_engine_rolling_context import run_live_session_ws_rolling_context
 from queue_fs import init_job_in_inbox, JobPaths, BASE as BASE_JOBS
 
-ROOT_PATH = os.getenv("TRANSCRIBE_ROOT_PATH", "/api")
+# Add repo root to path for shared imports
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+from shared.app_config import get_str, get_int, get_float, get_bool, get_setting
+
+# Configuration via new config system (env vars still work as override)
+ROOT_PATH = get_str("service.root_path", "/api")
 app = FastAPI(root_path=ROOT_PATH)
 LIVE_RECORDINGS_ROOT = (Path(__file__).resolve().parents[1] / "data" / "live_recordings").resolve()
 LIVE_BENCHMARK_EXPORT_ROOT = (Path(__file__).resolve().parents[1] / "data" / "live_benchmark_exports").resolve()
 
 
 DEFAULT_CALIBRATION_SNIPPET_SECONDS = [60, 180, 300, 480, 600, 1200, 1800, 2700, 3600]
-LIVE_SESSION_TTL_S = int(os.getenv("TRANSCRIBE_LIVE_SESSION_TTL_S", "900"))
-LIVE_SESSION_PRECONNECT_TTL_S = int(os.getenv("TRANSCRIBE_LIVE_PRECONNECT_TTL_S", "30"))
-LIVE_MAX_SESSIONS = int(os.getenv("TRANSCRIBE_LIVE_MAX_SESSIONS", "1"))
-LIVE_ARCHIVE_TTL_S = int(os.getenv("TRANSCRIBE_LIVE_ARCHIVE_TTL_S", "3600"))
-LIVE_MAX_ARCHIVES = int(os.getenv("TRANSCRIBE_LIVE_MAX_ARCHIVES", "256"))
-LIVE_AUDIO_SAMPLE_RATE_HZ = int(os.getenv("TRANSCRIBE_LIVE_SAMPLE_RATE_HZ", "16000"))
-LIVE_AUDIO_CHANNELS = int(os.getenv("TRANSCRIBE_LIVE_CHANNELS", "1"))
+LIVE_SESSION_TTL_S = get_int("live.session_ttl_s", 900, min_value=60)
+LIVE_SESSION_PRECONNECT_TTL_S = get_int("live.session_preconnect_ttl_s", 30, min_value=5)
+LIVE_MAX_SESSIONS = get_int("live.max_sessions", 1, min_value=1)
+LIVE_ARCHIVE_TTL_S = get_int("live.archive_ttl_s", 3600, min_value=60)
+LIVE_MAX_ARCHIVES = get_int("live.max_archives", 256, min_value=1)
+LIVE_AUDIO_SAMPLE_RATE_HZ = get_int("live.audio_sample_rate_hz", 16000, min_value=8000)
+LIVE_AUDIO_CHANNELS = get_int("live.audio_channels", 1, min_value=1)
 LIVE_AUDIO_SAMPLE_WIDTH_BYTES = 2
 LIVE_AUDIO_BYTES_PER_SECOND = int(max(1, LIVE_AUDIO_SAMPLE_RATE_HZ * LIVE_AUDIO_CHANNELS * LIVE_AUDIO_SAMPLE_WIDTH_BYTES))
 
-
 LIVE_ENGINE = "rolling_context"
-try:
-    LIVE_DRAIN_WAIT_S = max(
-        0.0,
-        float(str(os.getenv("TRANSCRIBE_LIVE_DRAIN_WAIT_S", "20.0")).strip() or "20.0"),
-    )
-except Exception:
-    LIVE_DRAIN_WAIT_S = 20.0
-try:
-    LIVE_POST_CLOSE_WAIT_S = max(
-        0.0,
-        float(str(os.getenv("TRANSCRIBE_LIVE_POST_CLOSE_WAIT_S", "60.0")).strip() or "60.0"),
-    )
-except Exception:
-    LIVE_POST_CLOSE_WAIT_S = 60.0
-LIVE_ASR_LANGUAGE = (str(os.getenv("TRANSCRIBE_LIVE_ASR_LANGUAGE", "en")) or "en").strip() or "en"
-LIVE_ROLLING_POLL_INTERVAL_MS = max(
-    100,
-    int(str(os.getenv("TRANSCRIBE_LIVE_ROLLING_POLL_INTERVAL_MS", "250")).strip() or "250"),
-)
-LIVE_ROLLING_MIN_INFER_AUDIO_MS = max(
-    200,
-    int(str(os.getenv("TRANSCRIBE_LIVE_ROLLING_MIN_INFER_AUDIO_MS", "1000")).strip() or "1000"),
-)
+LIVE_DRAIN_WAIT_S = get_float("live.drain_wait_s", 20.0, min_value=0.0)
+LIVE_POST_CLOSE_WAIT_S = get_float("live.post_close_wait_s", 60.0, min_value=0.0)
+LIVE_ASR_LANGUAGE = get_str("live.asr_language", "en")
+
+# Rolling context settings
+LIVE_ROLLING_POLL_INTERVAL_MS = get_int("live.rolling.poll_interval_ms", 250, min_value=100)
+LIVE_ROLLING_MIN_INFER_AUDIO_MS = get_int("live.rolling.min_infer_audio_ms", 1000, min_value=200)
 LIVE_ROLLING_SINGLE_COMMIT_MIN_MS = max(
     LIVE_ROLLING_MIN_INFER_AUDIO_MS,
-    int(str(os.getenv("TRANSCRIBE_LIVE_ROLLING_SINGLE_COMMIT_MIN_MS", "12000")).strip() or "12000"),
+    get_int("live.rolling.single_segment_commit_min_ms", 12000, min_value=1000)
 )
-LIVE_ROLLING_FORCE_COMMIT_REPEATS = max(
-    1,
-    int(str(os.getenv("TRANSCRIBE_LIVE_ROLLING_FORCE_COMMIT_REPEATS", "8")).strip() or "8"),
-)
+LIVE_ROLLING_FORCE_COMMIT_REPEATS = get_int("live.rolling.force_commit_repeats", 8, min_value=1)
 LIVE_ROLLING_MAX_UNCOMMITTED_MS = max(
     LIVE_ROLLING_MIN_INFER_AUDIO_MS,
-    int(str(os.getenv("TRANSCRIBE_LIVE_ROLLING_MAX_UNCOMMITTED_MS", "15000")).strip() or "15000"),
+    get_int("live.rolling.max_uncommitted_ms", 15000, min_value=1000)
 )
 LIVE_ROLLING_HARD_CLIP_KEEP_TAIL_MS = max(
     LIVE_ROLLING_MIN_INFER_AUDIO_MS,
-    int(str(os.getenv("TRANSCRIBE_LIVE_ROLLING_HARD_CLIP_KEEP_TAIL_MS", "5000")).strip() or "5000"),
+    get_int("live.rolling.hard_clip_keep_tail_ms", 5000, min_value=1000)
 )
 LIVE_ROLLING_MAX_DECODE_WINDOW_MS = max(
     LIVE_ROLLING_MIN_INFER_AUDIO_MS,
-    int(str(os.getenv("TRANSCRIBE_LIVE_ROLLING_MAX_DECODE_WINDOW_MS", "12000")).strip() or "12000"),
+    get_int("live.rolling.max_decode_window_ms", 12000, min_value=1000)
 )
 LIVE_ROLLING_BUFFER_TRIM_THRESHOLD_MS = max(
     LIVE_ROLLING_MAX_DECODE_WINDOW_MS,
-    int(str(os.getenv("TRANSCRIBE_LIVE_ROLLING_BUFFER_TRIM_THRESHOLD_MS", "30000")).strip() or "30000"),
+    get_int("live.rolling.buffer_trim_threshold_ms", 30000, min_value=5000)
 )
 LIVE_ROLLING_BUFFER_TRIM_DROP_MS = max(
     LIVE_ROLLING_MIN_INFER_AUDIO_MS,
-    int(str(os.getenv("TRANSCRIBE_LIVE_ROLLING_BUFFER_TRIM_DROP_MS", "20000")).strip() or "20000"),
+    get_int("live.rolling.buffer_trim_drop_ms", 20000, min_value=1000)
 )
-LIVE_ROLLING_REQUIRE_SINGLE_INFLIGHT = str(
-    os.getenv("TRANSCRIBE_LIVE_ROLLING_REQUIRE_SINGLE_INFLIGHT", "1")
-).strip().lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
-}
+LIVE_ROLLING_REQUIRE_SINGLE_INFLIGHT = get_bool("live.rolling.require_single_inflight", True)
 LIVE_SESSIONS = LiveSessionManager(
     default_ttl_seconds=LIVE_SESSION_TTL_S,
     preconnect_ttl_seconds=LIVE_SESSION_PRECONNECT_TTL_S,
@@ -476,16 +457,6 @@ def _ws_url_for_request(request: Request, ws_path: str) -> str:
     return f"{scheme}://{host}{ws_path}"
 
 
-def _resolve_json_config_path(env_key: str, default_rel: str) -> Path:
-    raw = (os.getenv(env_key) or "").strip()
-    if raw:
-        p = Path(raw)
-        if p.is_absolute():
-            return p
-        return (_repo_root() / p).resolve()
-    return (_repo_root() / default_rel).resolve()
-
-
 def _iso_utc(ts: float) -> str:
     return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -530,45 +501,37 @@ def _redact_sensitive(value: Any) -> Any:
     return value
 
 
-def _read_config_source(*, source_id: str, title: str, path: Path) -> Dict[str, Any]:
-    item: Dict[str, Any] = {
+def _virtual_config_source(*, source_id: str, title: str, data: Dict[str, Any]) -> Dict[str, Any]:
+    return {
         "id": source_id,
         "title": title,
-        "path": str(path),
-        "exists": path.exists(),
+        "path": "<config:settings/local>",
+        "exists": True,
         "size_bytes": None,
         "mtime_utc": None,
-        "parse_ok": False,
-        "data": None,
+        "parse_ok": True,
+        "data": _redact_sensitive(data),
         "error": None,
     }
-    if not path.exists():
-        item["error"] = "file_not_found"
-        return item
-    try:
-        st = path.stat()
-        item["size_bytes"] = int(st.st_size)
-        item["mtime_utc"] = _iso_utc(st.st_mtime)
-    except Exception:
-        pass
-    try:
-        obj = json.loads(path.read_text(encoding="utf-8"))
-        item["data"] = _redact_sensitive(obj)
-        item["parse_ok"] = True
-    except Exception as e:
-        item["error"] = f"{type(e).__name__}: {e}"
-    return item
 
 
 @app.get("/demo/settings")
 def get_demo_settings() -> Dict[str, Any]:
-    service_path = _resolve_json_config_path("TRANSCRIBE_SERVICE_CONFIG", "config/service.json")
-    whisperx_path = _resolve_json_config_path("TRANSCRIBE_WHISPERX_CONFIG", "config/whisperx.json")
+    snip = get_setting("snip", {})
+    topics = get_setting("topics", {})
+    tabby = get_setting("tabby", {})
+    whisperx = get_setting("asr_pool.whisperx", {})
+    service_data = {
+        "snip": dict(snip) if isinstance(snip, dict) else {},
+        "topics": dict(topics) if isinstance(topics, dict) else {},
+        "tabby": dict(tabby) if isinstance(tabby, dict) else {},
+    }
+    whisperx_data = dict(whisperx) if isinstance(whisperx, dict) else {}
     return {
         "generated_at_utc": _iso_utc(datetime.now(timezone.utc).timestamp()),
         "sources": [
-            _read_config_source(source_id="service", title="service.json", path=service_path),
-            _read_config_source(source_id="whisperx", title="whisperx.json", path=whisperx_path),
+            _virtual_config_source(source_id="service", title="service.config", data=service_data),
+            _virtual_config_source(source_id="whisperx", title="asr_pool.whisperx", data=whisperx_data),
         ],
     }
 
@@ -677,23 +640,22 @@ def _param_from_request_or_referer(request: Request, key: str) -> str:
     return ""
 
 
-def _parse_calibration_seconds_env() -> list[int]:
-    raw = str(os.getenv("TRANSCRIBE_CALIBRATION_SECONDS", "") or "").strip()
-    if not raw:
-        return list(DEFAULT_CALIBRATION_SNIPPET_SECONDS)
+def _parse_calibration_seconds() -> list[int]:
+    from shared.app_config import get_list
 
-    vals: list[int] = []
-    for part in raw.split(","):
-        p = part.strip()
-        if not p:
-            continue
-        try:
-            v = int(p)
-        except ValueError:
-            continue
-        if v > 0 and v not in vals:
-            vals.append(v)
-    return vals or list(DEFAULT_CALIBRATION_SNIPPET_SECONDS)
+    raw_list = get_list("live.calibration_seconds", [])
+    if raw_list:
+        vals: list[int] = []
+        for item in raw_list:
+            try:
+                v = int(item)
+                if v > 0 and v not in vals:
+                    vals.append(v)
+            except (ValueError, TypeError):
+                continue
+        return vals or list(DEFAULT_CALIBRATION_SNIPPET_SECONDS)
+
+    return list(DEFAULT_CALIBRATION_SNIPPET_SECONDS)
 
 
 def _calibration_requested(request: Request) -> bool:
@@ -762,7 +724,7 @@ def create_demo_job(
         base_options["snippet_seconds"] = int(snippet_seconds_override)
 
     calibration_enabled = _calibration_requested(request)
-    calibration_seconds = _parse_calibration_seconds_env() if calibration_enabled else []
+    calibration_seconds = _parse_calibration_seconds() if calibration_enabled else []
 
     staging_dir = (BASE_JOBS / "_staging_uploads").resolve()
     staging_dir.mkdir(parents=True, exist_ok=True)

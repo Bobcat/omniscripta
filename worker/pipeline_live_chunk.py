@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import json
-import os
 import shutil
+import sys
 import time
 import wave
 from datetime import datetime, timezone
@@ -12,16 +12,10 @@ from typing import Any
 from phase_whisperx import run_whisperx_phase_remote
 from worker_status_io import _append_log, _utc_iso, _write_status
 
-
-def _env_bool(name: str, default: bool) -> bool:
-  raw = str(os.getenv(name, "") or "").strip().lower()
-  if not raw:
-    return bool(default)
-  if raw in {"1", "true", "yes", "on", "y"}:
-    return True
-  if raw in {"0", "false", "no", "off", "n"}:
-    return False
-  return bool(default)
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+  sys.path.insert(0, str(_REPO_ROOT))
+from shared.app_config import get_str, get_bool
 
 
 def _chunk_snippet_seconds(input_path: Path, opts: dict[str, Any]) -> int:
@@ -61,7 +55,7 @@ def run_live_chunk_job(*, job: Any, job_cfg: dict[str, Any]) -> None:
 
   language = str(opts.get("language", "en") or "en")
   snippet_seconds = _chunk_snippet_seconds(input_path, opts)
-  align_enabled = _env_bool("TRANSCRIBE_LIVE_CHUNK_ALIGN_ENABLED", False)
+  align_enabled = get_bool("live_chunk.align_enabled", False)
   initial_prompt = str(opts.get("initial_prompt") or "")
   if not initial_prompt.strip():
     initial_prompt = ""
@@ -88,7 +82,7 @@ def run_live_chunk_job(*, job: Any, job_cfg: dict[str, Any]) -> None:
   raw_request = {
     "schema_version": "asr_v1",
     "request_id": str(getattr(job, "job_id", "") or "live_chunk"),
-    "profile_id": str(os.getenv("TRANSCRIBE_LIVE_CHUNK_ASR_PROFILE", "live_fast") or "live_fast"),
+    "profile_id": get_str("live_chunk.asr_profile", "live_fast"),
     "priority": "interactive",
     "audio": {
       "local_path": str(input_path),
