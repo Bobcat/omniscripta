@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+import inspect
 import io
 import json
 import os
@@ -14,6 +15,14 @@ from pathlib import Path
 from typing import Any
 
 from whisperx_runner_imports import _apply_torch_thread_tuning, _as_positive_int, _cleanup_torch
+
+
+LIVE_CHUNK_BACKEND_WHISPERX = "whisperx"
+LIVE_CHUNK_BACKEND_FASTER_WHISPER_DIRECT = "faster_whisper_direct"
+LIVE_CHUNK_BACKEND_ALLOWED = {
+  LIVE_CHUNK_BACKEND_WHISPERX,
+  LIVE_CHUNK_BACKEND_FASTER_WHISPER_DIRECT,
+}
 
 
 def _write_json_atomic(path: Path, obj: dict[str, Any]) -> None:
@@ -121,6 +130,108 @@ class PersistentWhisperxRunner:
       int(self.cfg.get("beam_size", 5) or 5),
       int(self.cfg.get("chunk_size", 30) or 30),
     )
+
+  def _resolve_live_chunk_backend(self) -> tuple[str, str]:
+    raw = str(self.cfg.get("live_chunk_backend") or "").strip().lower()
+    if not raw:
+      return LIVE_CHUNK_BACKEND_WHISPERX, "default_whisperx"
+    if raw in LIVE_CHUNK_BACKEND_ALLOWED:
+      return raw, "configured"
+    return LIVE_CHUNK_BACKEND_WHISPERX, "invalid_config_fallback_whisperx"
+
+  def _transcribe_live_chunk_direct_faster_whisper(
+    self,
+    *,
+    audio_arr: Any,
+    language: str,
+    initial_prompt: str | None,
+    beam_size_override: int | None,
+  ) -> tuple[dict[str, Any], dict[str, Any]]:
+    if self.asr_model is None:
+      raise RuntimeError("ASR model not loaded")
+    fw_model = getattr(self.asr_model, "model", None)
+    if fw_model is None:
+      raise RuntimeError("ASR model has no direct faster-whisper backend")
+
+    requested_kwargs: dict[str, Any] = {
+      "language": str(language or "en"),
+      "condition_on_previous_text": False,
+      "vad_filter": True,
+      "beam_size": int(beam_size_override if beam_size_override is not None else int(self.cfg.get("beam_size", 5) or 5)),
+      "initial_prompt": initial_prompt,
+    }
+    try:
+      sig = inspect.signature(fw_model.transcribe)
+      accepted = set(sig.parameters.keys())
+    except Exception:
+      accepted = set()
+
+    call_kwargs: dict[str, Any] = {
+      k: v
+      for k, v in requested_kwargs.items()
+      if v is not None and (not accepted or k in accepted)
+    }
+    dropped_kwargs = [
+      k
+      for k, v in requested_kwargs.items()
+      if v is not None and accepted and k not in accepted
+    ]
+
+    # Experimental direct path note:
+    # This bypasses WhisperX's transcribe pipeline conveniences before decode:
+    # - no WhisperX VAD preprocess + merge_chunks
+    # - no WhisperX tokenizer/language lifecycle in transcribe()
+    # - no WhisperX postprocess conventions (it returns richer segment objects that we flatten)
+    fw_output = fw_model.transcribe(audio_arr, **call_kwargs)
+    if isinstance(fw_output, tuple) and len(fw_output) >= 2:
+      fw_segments_iter, fw_info = fw_output[0], fw_output[1]
+    else:
+      fw_segments_iter, fw_info = fw_output, None
+
+    audio_duration_s = 0.0
+    try:
+      audio_duration_s = float(len(audio_arr)) / 16000.0
+    except Exception:
+      audio_duration_s = 0.0
+
+    segments: list[dict[str, Any]] = []
+    for seg in fw_segments_iter:
+      try:
+        raw_text = str(getattr(seg, "text", "") or "").strip()
+        if not raw_text:
+          continue
+        t0 = float(getattr(seg, "start", 0.0) or 0.0)
+        t1 = float(getattr(seg, "end", t0) or t0)
+        if audio_duration_s > 0.0:
+          t0 = max(0.0, min(t0, audio_duration_s))
+          t1 = max(t0, min(t1, audio_duration_s))
+        segments.append(
+          {
+            "text": raw_text,
+            "start": round(float(t0), 3),
+            "end": round(float(t1), 3),
+          }
+        )
+      except Exception:
+        continue
+
+    out_language = str(language or "en")
+    try:
+      if fw_info is not None:
+        out_language = str(getattr(fw_info, "language", out_language) or out_language)
+    except Exception:
+      pass
+
+    meta = {
+      "accepted_kwargs": sorted(call_kwargs.keys()),
+      "dropped_kwargs": sorted(dropped_kwargs),
+      "segments_returned_count": int(len(segments)),
+      "initial_prompt_applied": bool(initial_prompt) and ("initial_prompt" in call_kwargs),
+      "initial_prompt_unsupported": bool(initial_prompt) and ("initial_prompt" not in call_kwargs),
+      "beam_size_override_applied": (beam_size_override is not None) and ("beam_size" in call_kwargs),
+      "beam_size_override_unsupported": (beam_size_override is not None) and ("beam_size" not in call_kwargs),
+    }
+    return {"segments": segments, "language": out_language}, meta
 
   def _ensure_asr_model(self, *, language: str) -> tuple[bool, float]:
     self._import_deps()
@@ -396,7 +507,19 @@ class PersistentWhisperxRunner:
       speaker_mode = "none"
     elif speaker_mode not in {"auto", "fixed"}:
       speaker_mode = "auto"
-    upload_mode = str(profile_id or "").strip().lower() == "upload_full"
+    normalized_profile_id = str(profile_id or "").strip().lower()
+    upload_mode = normalized_profile_id == "upload_full"
+    live_chunk_mode = (normalized_profile_id in {"live_chunk", "live_fast"}) or bool(resolved.get("live_chunk_mode"))
+    configured_live_chunk_backend, live_chunk_backend_cfg_reason = self._resolve_live_chunk_backend()
+    if live_chunk_mode and configured_live_chunk_backend == LIVE_CHUNK_BACKEND_FASTER_WHISPER_DIRECT:
+      selected_live_chunk_backend = LIVE_CHUNK_BACKEND_FASTER_WHISPER_DIRECT
+      selected_live_chunk_backend_reason = live_chunk_backend_cfg_reason
+    elif live_chunk_mode:
+      selected_live_chunk_backend = LIVE_CHUNK_BACKEND_WHISPERX
+      selected_live_chunk_backend_reason = live_chunk_backend_cfg_reason
+    else:
+      selected_live_chunk_backend = LIVE_CHUNK_BACKEND_WHISPERX
+      selected_live_chunk_backend_reason = "non_live_chunk_profile"
 
     timings: dict[str, float] = {}
     t_total = time.monotonic()
@@ -422,42 +545,56 @@ class PersistentWhisperxRunner:
       initial_prompt_unsupported = False
       beam_override_applied = False
       beam_override_unsupported = False
+      direct_backend_meta: dict[str, Any] = {}
+      transcribe_kwargs: dict[str, Any] = {
+        "batch_size": int(self.cfg.get("batch_size", 3) or 3),
+        "chunk_size": int(self.cfg.get("chunk_size", 30) or 30),
+        "print_progress": False,
+        "verbose": False,
+      }
+      if upload_mode:
+        try:
+          upload_batch_size = int(self.cfg.get("upload_batch_size", 4) or 4)
+        except Exception:
+          upload_batch_size = 4
+        if upload_batch_size > 0:
+          transcribe_kwargs["batch_size"] = max(1, min(int(transcribe_kwargs["batch_size"]), int(upload_batch_size)))
+      else:
+        # Live/interactive: use smaller chunk_size for better latency with short audio windows
+        transcribe_kwargs["chunk_size"] = int(self.cfg.get("chunk_size_live", 10) or 10)
+
       _write_progress(progress_path, stage="transcribe")
       with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
         audio_arr = whisperx.load_audio(str(local_path))
-        try:
-          current_opts = getattr(self.asr_model, "options", None)  # type: ignore[union-attr]
-          if current_opts is not None:
-            replace_kwargs: dict[str, Any] = {"initial_prompt": initial_prompt}
-            if beam_size_override is not None:
-              replace_kwargs["beam_size"] = int(beam_size_override)
-            self.asr_model.options = dataclass_replace(current_opts, **replace_kwargs)  # type: ignore[union-attr]
-            initial_prompt_applied = bool(initial_prompt is not None)
-            beam_override_applied = bool(beam_size_override is not None)
-          elif initial_prompt is not None:
-            initial_prompt_unsupported = True
-        except Exception:
-          if initial_prompt is not None:
-            initial_prompt_unsupported = True
-          if beam_size_override is not None:
-            beam_override_unsupported = True
-        transcribe_kwargs: dict[str, Any] = {
-          "batch_size": int(self.cfg.get("batch_size", 3) or 3),
-          "chunk_size": int(self.cfg.get("chunk_size", 30) or 30),
-          "print_progress": False,
-          "verbose": False,
-        }
-        if upload_mode:
-          try:
-            upload_batch_size = int(self.cfg.get("upload_batch_size", 4) or 4)
-          except Exception:
-            upload_batch_size = 4
-          if upload_batch_size > 0:
-            transcribe_kwargs["batch_size"] = max(1, min(int(transcribe_kwargs["batch_size"]), int(upload_batch_size)))
+        if selected_live_chunk_backend == LIVE_CHUNK_BACKEND_FASTER_WHISPER_DIRECT:
+          result, direct_backend_meta = self._transcribe_live_chunk_direct_faster_whisper(
+            audio_arr=audio_arr,
+            language=language,
+            initial_prompt=initial_prompt,
+            beam_size_override=beam_size_override,
+          )
+          initial_prompt_applied = bool(direct_backend_meta.get("initial_prompt_applied"))
+          initial_prompt_unsupported = bool(direct_backend_meta.get("initial_prompt_unsupported"))
+          beam_override_applied = bool(direct_backend_meta.get("beam_size_override_applied"))
+          beam_override_unsupported = bool(direct_backend_meta.get("beam_size_override_unsupported"))
         else:
-          # Live/interactive: use smaller chunk_size for better latency with short audio windows
-          transcribe_kwargs["chunk_size"] = int(self.cfg.get("chunk_size_live", 10) or 10)
-        result = self.asr_model.transcribe(audio_arr, **transcribe_kwargs)  # type: ignore[union-attr]
+          try:
+            current_opts = getattr(self.asr_model, "options", None)  # type: ignore[union-attr]
+            if current_opts is not None:
+              replace_kwargs: dict[str, Any] = {"initial_prompt": initial_prompt}
+              if beam_size_override is not None:
+                replace_kwargs["beam_size"] = int(beam_size_override)
+              self.asr_model.options = dataclass_replace(current_opts, **replace_kwargs)  # type: ignore[union-attr]
+              initial_prompt_applied = bool(initial_prompt is not None)
+              beam_override_applied = bool(beam_size_override is not None)
+            elif initial_prompt is not None:
+              initial_prompt_unsupported = True
+          except Exception:
+            if initial_prompt is not None:
+              initial_prompt_unsupported = True
+            if beam_size_override is not None:
+              beam_override_unsupported = True
+          result = self.asr_model.transcribe(audio_arr, **transcribe_kwargs)  # type: ignore[union-attr]
         # Debug: log segment details for confidence analysis
         try:
           segments = result.get("segments") or []
@@ -576,13 +713,22 @@ class PersistentWhisperxRunner:
         except Exception:
           pass
 
+      segments_returned_count = int(len(result.get("segments") or []))
       runtime = {
-        "backend": "whisperx",
+        "backend": (
+          "faster_whisper_direct"
+          if selected_live_chunk_backend == LIVE_CHUNK_BACKEND_FASTER_WHISPER_DIRECT
+          else "whisperx"
+        ),
         "runner_kind": "persistent_local",
         "runner_reused": bool(model_reused),
         "device": str(self.cfg.get("device") or ""),
         "model": str(self.cfg.get("model") or ""),
         "upload_mode": bool(upload_mode),
+        "live_chunk_mode": bool(live_chunk_mode),
+        "live_chunk_backend_selected": str(selected_live_chunk_backend),
+        "live_chunk_backend_reason": str(selected_live_chunk_backend_reason),
+        "segments_returned_count": int(segments_returned_count),
         "effective_batch_size": int(transcribe_kwargs.get("batch_size") or 0),
         "diarize_applied": bool(diarize_applied),
         "initial_prompt_applied": bool(initial_prompt_applied),
@@ -593,6 +739,16 @@ class PersistentWhisperxRunner:
         runtime["aligner_reused"] = bool(aligner_reused)
       if diarizer_reused is not None:
         runtime["diarizer_reused"] = bool(diarizer_reused)
+      if direct_backend_meta:
+        runtime["live_chunk_backend_direct_meta"] = dict(direct_backend_meta)
+
+      warnings: list[str] = []
+      if initial_prompt_unsupported:
+        warnings.append("initial_prompt_unsupported_by_asr_pipeline")
+      if beam_override_unsupported:
+        warnings.append("beam_size_override_unsupported_by_asr_pipeline")
+      if selected_live_chunk_backend == LIVE_CHUNK_BACKEND_FASTER_WHISPER_DIRECT:
+        warnings.append("live_chunk_backend_faster_whisper_direct_experimental")
 
       return {
         "schema_version": "asr_v1",
@@ -603,10 +759,7 @@ class PersistentWhisperxRunner:
         "result": result_obj,
         "timings": timings,
         "runtime": runtime,
-        "warnings": (
-          (["initial_prompt_unsupported_by_asr_pipeline"] if initial_prompt_unsupported else [])
-          + (["beam_size_override_unsupported_by_asr_pipeline"] if beam_override_unsupported else [])
-        ),
+        "warnings": warnings,
       }
     finally:
       _write_progress(progress_path, stage="done")

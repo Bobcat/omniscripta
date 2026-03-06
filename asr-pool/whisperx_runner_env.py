@@ -21,6 +21,7 @@ def _load_server_config() -> dict[str, Any]:
     "batch_size": 3,
     "chunk_size": 30,
     "chunk_size_live": 10,
+    "live_chunk_backend": "whisperx",
     "beam_size": 5,
     "align_model": "",
     "diarize_model": "",
@@ -37,6 +38,9 @@ def _load_server_config() -> dict[str, Any]:
         cfg.update(on_disk)
     except Exception:
       pass
+  env_live_chunk_backend = str(os.getenv("TRANSCRIBE_LIVE_CHUNK_BACKEND", "") or "").strip()
+  if env_live_chunk_backend:
+    cfg["live_chunk_backend"] = env_live_chunk_backend
   return cfg
 
 

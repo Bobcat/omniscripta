@@ -4,6 +4,8 @@
   "compute_type": "int8",
   "batch_size": 1,
   "chunk_size": 20,
+  "chunk_size_live": 10,
+  "live_chunk_backend": "whisperx",
   "beam_size": 5,
   "align_model": "jonatasgrosman/wav2vec2-large-xlsr-53-dutch",
   "diarize_model": "pyannote/speaker-diarization-3.1",
