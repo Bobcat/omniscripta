@@ -86,6 +86,13 @@ def _is_wave_path(path: Path) -> bool:
   return str(path.suffix or "").strip().lower() in {".wav", ".wave"}
 
 
+def _normalize_optional_language(value: Any) -> str | None:
+  if value is None:
+    return None
+  text = str(value).strip()
+  return text or None
+
+
 class PersistentWhisperxRunner:
   def __init__(self, cfg: dict[str, Any]) -> None:
     self.cfg = dict(cfg or {})
@@ -94,7 +101,7 @@ class PersistentWhisperxRunner:
     self.get_writer = None
     self.asr_model = None
     self.asr_key = None
-    self.aligners: dict[tuple[str, str | None], tuple[Any, dict[str, Any]]] = {}
+    self.aligners: dict[tuple[str | None, str | None], tuple[Any, dict[str, Any]]] = {}
     self.diarizers: dict[tuple[str | None, str], Any] = {}
     self._imported = False
 
@@ -121,12 +128,12 @@ class PersistentWhisperxRunner:
     except Exception:
       pass
 
-  def _asr_cache_key(self, *, language: str) -> tuple[Any, ...]:
+  def _asr_cache_key(self, *, language: str | None) -> tuple[Any, ...]:
     return (
       str(self.cfg.get("model") or "large-v3"),
       str(self.cfg.get("device") or "cuda"),
       str(self.cfg.get("compute_type") or "float16"),
-      str(language or "en"),
+      (str(language) if language is not None else "__auto__"),
       int(self.cfg.get("beam_size", 5) or 5),
       int(self.cfg.get("chunk_size", 30) or 30),
     )
@@ -143,7 +150,7 @@ class PersistentWhisperxRunner:
     self,
     *,
     audio_arr: Any,
-    language: str,
+    language: str | None,
     initial_prompt: str | None,
     beam_size_override: int | None,
   ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -154,12 +161,13 @@ class PersistentWhisperxRunner:
       raise RuntimeError("ASR model has no direct faster-whisper backend")
 
     requested_kwargs: dict[str, Any] = {
-      "language": str(language or "en"),
       "condition_on_previous_text": False,
       "vad_filter": True,
       "beam_size": int(beam_size_override if beam_size_override is not None else int(self.cfg.get("beam_size", 5) or 5)),
       "initial_prompt": initial_prompt,
     }
+    if language is not None:
+      requested_kwargs["language"] = str(language)
     try:
       sig = inspect.signature(fw_model.transcribe)
       accepted = set(sig.parameters.keys())
@@ -215,10 +223,12 @@ class PersistentWhisperxRunner:
       except Exception:
         continue
 
-    out_language = str(language or "en")
+    out_language = _normalize_optional_language(language)
     try:
       if fw_info is not None:
-        out_language = str(getattr(fw_info, "language", out_language) or out_language)
+        fw_language = _normalize_optional_language(getattr(fw_info, "language", None))
+        if fw_language is not None:
+          out_language = fw_language
     except Exception:
       pass
 
@@ -233,7 +243,7 @@ class PersistentWhisperxRunner:
     }
     return {"segments": segments, "language": out_language}, meta
 
-  def _ensure_asr_model(self, *, language: str) -> tuple[bool, float]:
+  def _ensure_asr_model(self, *, language: str | None) -> tuple[bool, float]:
     self._import_deps()
     key = self._asr_cache_key(language=language)
     if self.asr_model is not None and self.asr_key == key:
@@ -257,7 +267,7 @@ class PersistentWhisperxRunner:
       str(self.cfg.get("model", "large-v3") or "large-v3"),
       device=str(self.cfg.get("device", "cuda") or "cuda"),
       compute_type=str(self.cfg.get("compute_type", "float16") or "float16"),
-      language=str(language or "en"),
+      language=language,
       asr_options={"beam_size": int(self.cfg.get("beam_size", 5) or 5)},
       vad_options={"chunk_size": int(self.cfg.get("chunk_size", 30) or 30)},
     )
@@ -267,7 +277,7 @@ class PersistentWhisperxRunner:
   def _ensure_aligner(self, *, language: str) -> tuple[Any, dict[str, Any], bool, float]:
     self._import_deps()
     align_model = str(self.cfg.get("align_model") or "").strip() or None
-    key = (str(language or "en"), align_model)
+    key = (language, align_model)
     if key in self.aligners:
       aligner, meta = self.aligners[key]
       return aligner, dict(meta or {}), True, 0.0
@@ -275,7 +285,7 @@ class PersistentWhisperxRunner:
     whisperx = self.whisperx
     assert whisperx is not None
     aligner, meta = whisperx.load_align_model(
-      str(language or "en"),
+      language,
       str(self.cfg.get("device", "cuda") or "cuda"),
       model_name=align_model,
     )
@@ -354,19 +364,20 @@ class PersistentWhisperxRunner:
     except Exception:
       pass
 
-  def prewarm(self, *, language: str, align_enabled: bool = False) -> dict[str, Any]:
+  def prewarm(self, *, language: str | None, align_enabled: bool = False) -> dict[str, Any]:
     timings: dict[str, float] = {}
     t0 = time.monotonic()
-    model_reused, prepare_s = self._ensure_asr_model(language=str(language or "en"))
+    resolved_language = _normalize_optional_language(language)
+    model_reused, prepare_s = self._ensure_asr_model(language=resolved_language)
     timings["prepare_s"] = round(float(prepare_s), 6)
     aligner_reused: bool | None = None
-    if bool(align_enabled):
-      _aligner, _meta, aligner_reused, aligner_load_s = self._ensure_aligner(language=str(language or "en"))
+    if bool(align_enabled) and resolved_language is not None:
+      _aligner, _meta, aligner_reused, aligner_load_s = self._ensure_aligner(language=resolved_language)
       timings["aligner_prepare_s"] = round(float(max(0.0, aligner_load_s)), 6)
     timings["total_s"] = round(float(max(0.0, time.monotonic() - t0)), 6)
     return {
       "ok": True,
-      "language": str(language or "en"),
+      "language": resolved_language,
       "align_enabled": bool(align_enabled),
       "runner_reused": bool(model_reused),
       "aligner_reused": (None if aligner_reused is None else bool(aligner_reused)),
@@ -489,7 +500,7 @@ class PersistentWhisperxRunner:
           "warnings": [],
         }
 
-    language = str(resolved.get("language") or "en")
+    language = _normalize_optional_language(resolved.get("language"))
     align_enabled = bool(resolved.get("align_enabled", True))
     diarize_enabled = bool(resolved.get("diarize_enabled", False))
     speaker_mode = str(resolved.get("speaker_mode") or "none").strip().lower() or "none"
@@ -546,6 +557,7 @@ class PersistentWhisperxRunner:
       beam_override_applied = False
       beam_override_unsupported = False
       direct_backend_meta: dict[str, Any] = {}
+      align_skipped_missing_language = False
       transcribe_kwargs: dict[str, Any] = {
         "batch_size": int(self.cfg.get("batch_size", 3) or 3),
         "chunk_size": int(self.cfg.get("chunk_size", 30) or 30),
@@ -611,9 +623,11 @@ class PersistentWhisperxRunner:
 
       aligned: dict[str, Any]
       t0 = time.monotonic()
-      align_language = str(result.get("language") or language or "en")
+      align_language = _normalize_optional_language(result.get("language"))
+      if align_language is None:
+        align_language = language
       aligner_reused = None
-      if align_enabled:
+      if align_enabled and align_language is not None:
         _write_progress(progress_path, stage="align")
         aligner, align_meta, aligner_reused, aligner_load_s = self._ensure_aligner(language=align_language)
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
@@ -636,6 +650,8 @@ class PersistentWhisperxRunner:
       else:
         aligned = {"segments": result.get("segments") or []}
         aligned["language"] = align_language
+        if align_enabled and align_language is None:
+          align_skipped_missing_language = True
         timings["align_s"] = round(max(0.0, float(time.monotonic() - t0)), 6)
 
       # Diarization (warm runner path supports it).
@@ -743,6 +759,8 @@ class PersistentWhisperxRunner:
         runtime["live_chunk_backend_direct_meta"] = dict(direct_backend_meta)
 
       warnings: list[str] = []
+      if align_skipped_missing_language:
+        warnings.append("align_skipped_missing_language")
       if initial_prompt_unsupported:
         warnings.append("initial_prompt_unsupported_by_asr_pipeline")
       if beam_override_unsupported:
@@ -786,7 +804,7 @@ def _handle_command(runner: PersistentWhisperxRunner, cmd_obj: dict[str, Any]) -
     response_path = Path(str(cmd_obj.get("response_path") or ""))
     if not response_path:
       return True
-    language = str(cmd_obj.get("language") or "en")
+    language = _normalize_optional_language(cmd_obj.get("language"))
     align_enabled = bool(cmd_obj.get("align_enabled", False))
     try:
       out = runner.prewarm(language=language, align_enabled=align_enabled)

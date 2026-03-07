@@ -26,6 +26,13 @@ def _safe_session_id(session_id: str) -> str:
     return "".join(ch if (ch.isalnum() or ch in {"-", "_", "."}) else "_" for ch in text)
 
 
+def _normalize_optional_language(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
 def _find_job_dir(job_id: str, *, jobs_base: Path) -> Path | None:
     for state in ("inbox", "running", "done", "error"):
         d = jobs_base / state / str(job_id)
@@ -123,7 +130,7 @@ class EnqueuedChunkJob:
     job_id: str
     job_dir: str
     chunk_wav_path: str
-    language: str
+    language: str | None
     initial_prompt_chars: int = 0
     initial_prompt_words: int = 0
 
@@ -134,7 +141,7 @@ class EnqueuedChunkJob:
             "job_id": str(self.job_id),
             "job_dir": str(self.job_dir),
             "chunk_wav_path": str(self.chunk_wav_path),
-            "language": str(self.language),
+            "language": self.language,
             "initial_prompt_chars": int(max(0, self.initial_prompt_chars)),
             "initial_prompt_words": int(max(0, self.initial_prompt_words)),
         }
@@ -173,7 +180,7 @@ class LiveChunkBatchBridge:
         chunks_root: Path | None = None,
         sample_rate_hz: int = DEFAULT_SAMPLE_RATE_HZ,
         channels: int = DEFAULT_CHANNELS,
-        language: str = "en",
+        language: str | None = None,
     ) -> None:
         self.jobs_base = (jobs_base if jobs_base is not None else JOBS_BASE).resolve()
         self.chunks_root = (
@@ -181,7 +188,7 @@ class LiveChunkBatchBridge:
         ).resolve()
         self.sample_rate_hz = int(max(1, sample_rate_hz))
         self.channels = int(max(1, channels))
-        self.language = str(language or "en")
+        self.language = _normalize_optional_language(language)
 
     def enqueue_chunk_pcm16(
         self,
@@ -215,10 +222,11 @@ class LiveChunkBatchBridge:
 
         prompt_text = str(initial_prompt or "").strip()
         prompt_words = len([tok for tok in prompt_text.split() if tok])
+        resolved_language = _normalize_optional_language(language if language is not None else self.language)
         job = init_job_in_inbox(
             orig_filename=chunk_wav.name,
             options={
-                "language": str(language or self.language),
+                "language": resolved_language,
                 "beam_size": (int(max(1, asr_beam_size)) if asr_beam_size is not None else None),
                 "speaker_mode": "none",
                 "expected_speakers": None,
@@ -250,7 +258,7 @@ class LiveChunkBatchBridge:
             job_id=str(job.job_id),
             job_dir=str(job.dir),
             chunk_wav_path=str(chunk_upload_path),
-            language=str(language or self.language),
+            language=resolved_language,
             initial_prompt_chars=len(prompt_text),
             initial_prompt_words=prompt_words,
         )

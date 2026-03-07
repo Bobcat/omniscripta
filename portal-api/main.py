@@ -57,7 +57,17 @@ LIVE_AUDIO_BYTES_PER_SECOND = int(max(1, LIVE_AUDIO_SAMPLE_RATE_HZ * LIVE_AUDIO_
 LIVE_ENGINE = "rolling_context"
 LIVE_DRAIN_WAIT_S = get_float("live.drain_wait_s", 20.0, min_value=0.0)
 LIVE_POST_CLOSE_WAIT_S = get_float("live.post_close_wait_s", 60.0, min_value=0.0)
-LIVE_ASR_LANGUAGE = get_str("live.asr_language", "en")
+
+
+def _get_optional_setting_str(path: str) -> str | None:
+    raw = get_setting(path, None)
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    return text or None
+
+
+LIVE_ASR_LANGUAGE = _get_optional_setting_str("live.asr_language")
 
 # Rolling context settings
 LIVE_ROLLING_POLL_INTERVAL_MS = get_int("live.rolling.poll_interval_ms", 250, min_value=100)

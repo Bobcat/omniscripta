@@ -15,7 +15,14 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
   sys.path.insert(0, str(_REPO_ROOT))
 
-from shared.app_config import get_bool, get_float, get_str
+from shared.app_config import get_bool, get_float, get_setting
+
+
+def _normalize_optional_language(value: Any) -> str | None:
+  if value is None:
+    return None
+  text = str(value).strip()
+  return text or None
 
 
 def _fingerprint_cfg(cfg: dict[str, Any]) -> str:
@@ -64,7 +71,7 @@ class _AsrPoolWarmRunnerClient:
 
       prewarm_timeout_s = max(5.0, get_float("asr_pool.warm.prewarm_timeout_s", 180.0, min_value=0.0))
       poll_s = max(0.02, get_float("asr_pool.warm.response_poll_s", 0.05, min_value=0.0))
-      prewarm_language = get_str("asr_pool.warm.prewarm_language", "en").strip() or "en"
+      prewarm_language = _normalize_optional_language(get_setting("asr_pool.warm.prewarm_language", None))
       prewarm_align_enabled = get_bool("asr_pool.warm.prewarm_align_enabled", False)
 
       ipc_dir = (Path("/tmp") / "transcribe_asr_pool_runner" / "_ipc").resolve()
@@ -74,9 +81,10 @@ class _AsrPoolWarmRunnerClient:
       cmd_obj = {
         "cmd": "prewarm",
         "response_path": str(response_path),
-        "language": prewarm_language,
         "align_enabled": bool(prewarm_align_enabled),
       }
+      if prewarm_language is not None:
+        cmd_obj["language"] = prewarm_language
       try:
         proc.stdin.write(json.dumps(cmd_obj) + "\n")
         proc.stdin.flush()

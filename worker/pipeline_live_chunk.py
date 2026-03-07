@@ -18,6 +18,13 @@ if str(_REPO_ROOT) not in sys.path:
 from shared.app_config import get_str, get_bool
 
 
+def _normalize_optional_language(value: Any) -> str | None:
+  if value is None:
+    return None
+  text = str(value).strip()
+  return text or None
+
+
 def _chunk_snippet_seconds(input_path: Path, opts: dict[str, Any]) -> int:
   try:
     t0_ms = int(opts.get("live_chunk_t0_ms", 0) or 0)
@@ -53,7 +60,7 @@ def run_live_chunk_job(*, job: Any, job_cfg: dict[str, Any]) -> None:
   if not input_path.exists():
     raise RuntimeError(f"Upload missing: {input_path}")
 
-  language = str(opts.get("language", "en") or "en")
+  language = _normalize_optional_language(opts.get("language"))
   snippet_seconds = _chunk_snippet_seconds(input_path, opts)
   align_enabled = get_bool("live_chunk.align_enabled", False)
   initial_prompt = str(opts.get("initial_prompt") or "")
@@ -92,7 +99,6 @@ def run_live_chunk_job(*, job: Any, job_cfg: dict[str, Any]) -> None:
       "duration_ms": int(snippet_seconds * 1000),
     },
     "options": {
-      "language": language,
       "align_enabled": bool(align_enabled),
     },
     "context": {
@@ -111,6 +117,8 @@ def run_live_chunk_job(*, job: Any, job_cfg: dict[str, Any]) -> None:
       "word_timestamps": False,
     },
   }
+  if language is not None:
+    raw_request["options"]["language"] = language
   if initial_prompt:
     raw_request["options"]["initial_prompt"] = initial_prompt
   if beam_size is not None:

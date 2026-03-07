@@ -17,7 +17,7 @@
     "audio_channels": 1,
     "drain_wait_s": 20.0,
     "post_close_wait_s": 60.0,
-    "asr_language": "en",
+    "asr_language": null,
     "auto_gain_control": false,
     "calibration_seconds": [60, 180, 300, 480, 600, 1200, 1800, 2700, 3600],
     
@@ -82,8 +82,8 @@
       "chunk_size_live": 10,
       "live_chunk_backend": "whisperx",
       "beam_size": 5,
-      "align_model": "jonatasgrosman/wav2vec2-large-xlsr-53-dutch",
-      "diarize_model": "pyannote/speaker-diarization-3.1",
+      "xxxalign_model": "jonatasgrosman/wav2vec2-large-xlsr-53-dutch",
+      "xxxdiarize_model": "pyannote/speaker-diarization-3.1",
       "venv": "/home/gunnar/whisperx/.venv",
       "vad_filter": true,
       "threads": {
@@ -97,10 +97,10 @@
     "warm": {
       "prewarm_timeout_s": 180.0,
       "response_poll_s": 0.05,
-      "prewarm_language": "en",
+      "prewarm_language": null,
       "prewarm_align_enabled": false,
       "idle_s": 120.0,
-      "request_timeout_s": 120.0
+      "request_timeout_s": 300.0
     }
   },
   

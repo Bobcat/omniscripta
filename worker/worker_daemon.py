@@ -312,7 +312,11 @@ def _build_progress_tracker(
   last_progress = 0.0
   last_write_t = 0.0
   phase_overrun_active = False
-  total_expected_all = max(0.1, sum(max(0.0, float(phase_expected_s.get(p, 0.0))) for p in phase_order))
+  phase_expected_runtime: dict[str, float] = {
+    p: max(0.1, float(phase_expected_s.get(p, 0.0)))
+    for p in phase_order
+  }
+  total_expected_all = max(0.1, sum(max(0.0, float(phase_expected_runtime.get(p, 0.0))) for p in phase_order))
   hints = eta_hints
   cleaned: list[str] = []
   for raw in hints:
@@ -336,8 +340,30 @@ def _build_progress_tracker(
     total = 0.0
     for p in phase_order:
       if p in completed_actual:
-        total += max(0.0, float(phase_expected_s.get(p, 0.0)))
+        total += max(0.0, float(phase_expected_runtime.get(p, 0.0)))
     return total
+
+  def _maybe_expand_phase_budget(phase_key: str | None, *, elapsed_s: float) -> None:
+    nonlocal total_expected_all
+    if not phase_key:
+      return
+    cur = max(0.1, float(phase_expected_runtime.get(phase_key, 0.1)))
+    safe_elapsed = max(0.0, float(elapsed_s))
+    # If a phase materially overruns, expand its runtime budget so the
+    # progress bar keeps moving smoothly instead of plateauing.
+    if safe_elapsed <= (cur * 1.05):
+      return
+    target = max(cur, safe_elapsed * 1.10)
+    # Keep expansion bounded to avoid runaway estimates on pathological hangs.
+    cap = max(cur * 8.0, 300.0)
+    nxt = min(cap, target)
+    if nxt <= cur:
+      return
+    phase_expected_runtime[phase_key] = float(nxt)
+    total_expected_all = max(
+      0.1,
+      sum(max(0.0, float(phase_expected_runtime.get(p, 0.0))) for p in phase_order),
+    )
 
   def _set_phase_overrun_hint(active: bool) -> None:
     nonlocal phase_overrun_active
@@ -358,18 +384,22 @@ def _build_progress_tracker(
 
     done_actual = _sum_completed()
     elapsed_current = max(0.0, now - current_phase_started_t) if current_phase_key else 0.0
-    expected_current = max(0.1, float(phase_expected_s.get(current_phase_key or "", 0.0)))
+    expected_current_base = max(0.1, float(phase_expected_runtime.get(current_phase_key or "", 0.0)))
+    if current_phase_key:
+      _maybe_expand_phase_budget(current_phase_key, elapsed_s=elapsed_current)
+      expected_current_base = max(0.1, float(phase_expected_runtime.get(current_phase_key or "", expected_current_base)))
+    expected_current = expected_current_base
     remaining_keys = _after_current(current_phase_key)
-    remaining_after = sum(max(0.0, float(phase_expected_s.get(p, 0.0))) for p in remaining_keys)
+    remaining_after = sum(max(0.0, float(phase_expected_runtime.get(p, 0.0))) for p in remaining_keys)
 
     # Upload path runs one remote ASR call that internally includes align/diarize/finalize.
     # Treat this as one combined budget while the worker-visible phase is whisperx_transcribe.
     if current_phase_key == "whisperx_transcribe":
       proxied_keys = {"whisperx_align", "whisperx_diarize", "whisperx_finalize"}
-      proxy_extra = sum(max(0.0, float(phase_expected_s.get(p, 0.0))) for p in remaining_keys if p in proxied_keys)
+      proxy_extra = sum(max(0.0, float(phase_expected_runtime.get(p, 0.0))) for p in remaining_keys if p in proxied_keys)
       if proxy_extra > 0.0:
         expected_current = max(expected_current, expected_current + proxy_extra)
-        remaining_after = sum(max(0.0, float(phase_expected_s.get(p, 0.0))) for p in remaining_keys if p not in proxied_keys)
+        remaining_after = sum(max(0.0, float(phase_expected_runtime.get(p, 0.0))) for p in remaining_keys if p not in proxied_keys)
     overrun_factor = 1.1
     if current_phase_key == "whisperx_transcribe":
       # Remote ASR can include hidden sub-stages; avoid noisy overrun hints for this phase.
@@ -439,18 +469,17 @@ def _build_progress_tracker(
       # Let long-running current phases consume remaining expected budget so
       # progress does not appear frozen when remote ASR bundles multiple
       # sub-stages behind one worker-visible phase.
-      max_phase_budget = max(expected_current, expected_current + remaining_after)
-      phase_frac_cap = max(0.995, max_phase_budget / expected_current)
-      phase_frac = min(phase_frac_cap, max(0.0, elapsed_current / expected_current))
+      progress_phase_expected = expected_current_base
+      phase_frac = min(0.995, max(0.0, elapsed_current / progress_phase_expected))
       if current_phase_key == "llm_topics" and current_chunk_total > 1 and 1 <= current_chunk_idx <= current_chunk_total:
         chunk_base = max(0.0, float(current_chunk_idx - 1) / float(current_chunk_total))
         chunk_ceiling = min(0.995, float(current_chunk_idx) / float(current_chunk_total))
         chunk_span = max(0.0001, chunk_ceiling - chunk_base)
-        expected_chunk = max(0.1, expected_current / float(current_chunk_total))
+        expected_chunk = max(0.1, progress_phase_expected / float(current_chunk_total))
         elapsed_chunk = max(0.0, now - current_chunk_started_t) if current_chunk_started_t > 0.0 else 0.0
         chunk_frac = min(0.995, max(0.0, elapsed_chunk / expected_chunk))
         phase_frac = min(chunk_ceiling, chunk_base + (chunk_frac * chunk_span))
-      raw_progress = (completed_expected + (phase_frac * expected_current)) / total_expected_all
+      raw_progress = (completed_expected + (phase_frac * progress_phase_expected)) / total_expected_all
     else:
       raw_progress = completed_expected / total_expected_all
 
@@ -651,7 +680,12 @@ def main() -> int:
       disp = f"{snippet_seconds//60} min" if snippet_seconds > 0 and (snippet_seconds % 60) == 0 else f"{snippet_seconds} s"
       progress_start_phase("snipping", f"Creating snippet ({disp})…", "snipping")
       snip_t0 = time.monotonic()
-      snippet_path = _make_snippet(input_path, job.snippet_dir, seconds=snippet_seconds)
+      snip_hb_stop, snip_hb_thread = _start_progress_heartbeat_thread(progress_heartbeat, interval_s=0.5)
+      try:
+        snippet_path = _make_snippet(input_path, job.snippet_dir, seconds=snippet_seconds)
+      finally:
+        snip_hb_stop.set()
+        snip_hb_thread.join(timeout=1.0)
       snip_elapsed = time.monotonic() - snip_t0
       record_phase_timing("snipping", snip_elapsed)
       progress_finish_phase("snipping", snip_elapsed)
@@ -717,11 +751,10 @@ def main() -> int:
       except Exception:
         pass
 
-      progress_start_phase("whisperx_transcribe", "Transcribing…", "whisperx_transcribe")
       asr_hb_stop, asr_hb_thread = _start_progress_heartbeat_thread(progress_heartbeat, interval_s=0.5)
-      wx_live_stage_keys: set[str] = set()
+      wx_live_stage_keys: set[str] = {"whisperx_prepare"}
       wx_live_finished_keys: set[str] = set()
-      wx_live_current_phase_key: str | None = "whisperx_transcribe"
+      wx_live_current_phase_key: str | None = "whisperx_prepare"
       wx_live_current_started_t = time.monotonic()
       wx_stage_map: dict[str, tuple[str, str]] = {
         "prepare": ("whisperx_prepare", "Preparing WhisperX…"),

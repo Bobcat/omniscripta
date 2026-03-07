@@ -32,6 +32,13 @@ def _safe_float(value: Any) -> float | None:
         return None
 
 
+def _normalize_optional_language(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
 def _ms_to_byte_offset(ms: int, *, bytes_per_second: int, sample_width_bytes: int) -> int:
     raw = int(round((max(0.0, float(ms)) / 1000.0) * float(max(1, bytes_per_second))))
     align = int(max(1, sample_width_bytes))
@@ -66,7 +73,7 @@ async def run_live_session_ws_rolling_context(
     LIVE_AUDIO_BYTES_PER_SECOND = int(_cfg(config, "LIVE_AUDIO_BYTES_PER_SECOND"))
     LIVE_DRAIN_WAIT_S = float(_cfg(config, "LIVE_DRAIN_WAIT_S"))
     LIVE_POST_CLOSE_WAIT_S = float(_cfg(config, "LIVE_POST_CLOSE_WAIT_S"))
-    LIVE_ASR_LANGUAGE = str(_cfg(config, "LIVE_ASR_LANGUAGE"))
+    LIVE_ASR_LANGUAGE = _normalize_optional_language(_cfg(config, "LIVE_ASR_LANGUAGE"))
     LIVE_ROLLING_POLL_INTERVAL_MS = int(_cfg(config, "LIVE_ROLLING_POLL_INTERVAL_MS"))
     LIVE_ROLLING_MIN_INFER_AUDIO_MS = int(_cfg(config, "LIVE_ROLLING_MIN_INFER_AUDIO_MS"))
     LIVE_ROLLING_SINGLE_COMMIT_MIN_MS = int(_cfg(config, "LIVE_ROLLING_SINGLE_COMMIT_MIN_MS"))
@@ -996,7 +1003,7 @@ async def run_live_session_ws_rolling_context(
                     "buffer_trim_threshold_ms": int(buffer_trim_threshold_ms),
                     "buffer_trim_drop_ms": int(buffer_trim_drop_ms),
                     "require_single_inflight": bool(LIVE_ROLLING_REQUIRE_SINGLE_INFLIGHT),
-                    "language": str(LIVE_ASR_LANGUAGE),
+                    "language": LIVE_ASR_LANGUAGE,
                 },
             )
         except Exception as e:

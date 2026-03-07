@@ -3478,21 +3478,103 @@
     }
 
     @media (max-width: 640px) {
-      .live-bottom-bar {
-        flex-wrap: wrap;
+      /* Mobile viewport fix - use dvh for dynamic viewport height */
+      body.mobile .live-wrap,
+      .live-wrap {
+        min-height: 100dvh !important;
+        height: 100dvh !important;
+        max-height: 100dvh !important;
       }
 
-      .live-bottom-bar .controls-left,
-      .live-bottom-bar .controls-right {
-        flex: 1 1 100%;
-        justify-content: center;
+      body.mobile .live-main,
+      .live-main {
+        height: 100dvh !important;
+        max-height: 100dvh !important;
+        display: flex !important;
+        flex-direction: column !important;
+      }
+
+      /* Ensure header is visible and fixed */
+      body.mobile .live-header,
+      .live-header {
+        display: flex !important;
+        flex: 0 0 auto !important;
+        min-height: 44px !important;
+        max-height: 44px !important;
+        padding: 8px 12px !important;
+        visibility: visible !important;
+        opacity: 1 !important;
+        position: relative !important;
+        z-index: 100 !important;
+      }
+
+      /* Single row bottom bar on mobile - fixed at bottom */
+      body.mobile .live-bottom-bar,
+      .live-bottom-bar {
+        flex-wrap: nowrap !important;
+        flex: 0 0 auto !important;
+        padding: 6px 8px !important;
+        gap: 4px !important;
+        min-height: 48px !important;
+        max-height: 48px !important;
+        position: relative !important;
+        z-index: 100 !important;
+      }
+
+      .live-bottom-bar .controls-left {
+        flex: 0 0 auto;
       }
 
       .live-bottom-bar .controls-center {
-        order: -1;
-        flex: 1 1 100%;
+        flex: 1 1 auto;
+        order: 0;
+        margin-bottom: 0;
         justify-content: center;
-        margin-bottom: 8px;
+      }
+
+      .live-bottom-bar .controls-right {
+        flex: 0 0 auto;
+        justify-content: flex-end;
+      }
+
+      /* Compact buttons */
+      .live-bottom-bar button {
+        padding: 6px 10px;
+        font-size: 0.85rem;
+      }
+
+      /* Dev toggle: compact on mobile */
+      .btn-dev-toggle {
+        padding: 4px 8px !important;
+        font-size: 1.1rem !important;
+      }
+
+      /* Hide text on mobile */
+      .btn-dev-toggle .dev-toggle-text {
+        display: none;
+      }
+
+      /* Compact export buttons */
+      .live-float-finished button {
+        padding: 6px 8px;
+        font-size: 0.8rem;
+      }
+
+      /* Content area takes remaining space */
+      body.mobile .live-content-area,
+      .live-content-area {
+        flex: 1 1 auto !important;
+        min-height: 0 !important;
+        max-height: calc(100dvh - 44px - 48px) !important;
+        overflow-y: auto !important;
+        position: relative !important;
+      }
+
+      /* Ensure placeholder and final text are visible */
+      body.mobile .live-placeholder,
+      .live-placeholder {
+        min-height: auto !important;
+        height: auto !important;
       }
 
       .live-dev-section {
@@ -3501,5 +3583,14 @@
 
       .live-event-log {
         height: 140px;
+      }
+
+      .live-status-badge {
+        font-size: 0.75rem;
+        padding: 4px 8px;
+      }
+
+      .timer-top {
+        font-size: 1rem;
       }
     }
