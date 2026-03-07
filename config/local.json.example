@@ -21,8 +21,7 @@
       "poll_interval_ms": 250,
       "min_infer_audio_ms": 1000,
       "force_commit_repeats": 3
-    },
-    "auto_gain_control": false
+    }
   },
   
   "janitor": {

@@ -511,37 +511,58 @@ def _redact_sensitive(value: Any) -> Any:
     return value
 
 
-def _virtual_config_source(*, source_id: str, title: str, data: Dict[str, Any]) -> Dict[str, Any]:
+def _file_config_source(*, source_id: str, title: str, path: Path) -> Dict[str, Any]:
+    exists = path.exists()
+    size_bytes: int | None = None
+    mtime_utc: str | None = None
+    if exists:
+        try:
+            stat = path.stat()
+            size_bytes = int(stat.st_size)
+            mtime_utc = _iso_utc(float(stat.st_mtime))
+        except Exception:
+            size_bytes = None
+            mtime_utc = None
+
+    parse_ok = False
+    data: Dict[str, Any] = {}
+    error: str | None = None
+    if not exists:
+        error = "File not found"
+    else:
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                data = raw
+                parse_ok = True
+            else:
+                error = "JSON root must be an object"
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+
     return {
         "id": source_id,
         "title": title,
-        "path": "<config:settings/local>",
-        "exists": True,
-        "size_bytes": None,
-        "mtime_utc": None,
-        "parse_ok": True,
+        "path": str(path),
+        "exists": exists,
+        "size_bytes": size_bytes,
+        "mtime_utc": mtime_utc,
+        "parse_ok": parse_ok,
         "data": _redact_sensitive(data),
-        "error": None,
+        "error": error,
     }
 
 
 @app.get("/demo/settings")
 def get_demo_settings() -> Dict[str, Any]:
-    snip = get_setting("snip", {})
-    topics = get_setting("topics", {})
-    tabby = get_setting("tabby", {})
-    whisperx = get_setting("asr_pool.whisperx", {})
-    service_data = {
-        "snip": dict(snip) if isinstance(snip, dict) else {},
-        "topics": dict(topics) if isinstance(topics, dict) else {},
-        "tabby": dict(tabby) if isinstance(tabby, dict) else {},
-    }
-    whisperx_data = dict(whisperx) if isinstance(whisperx, dict) else {}
+    config_dir = (_REPO_ROOT / "config").resolve()
+    settings_path = (config_dir / "settings.json").resolve()
+    local_path = (config_dir / "local.json").resolve()
     return {
         "generated_at_utc": _iso_utc(datetime.now(timezone.utc).timestamp()),
         "sources": [
-            _virtual_config_source(source_id="service", title="service.config", data=service_data),
-            _virtual_config_source(source_id="whisperx", title="asr_pool.whisperx", data=whisperx_data),
+            _file_config_source(source_id="settings_json", title="settings.json", path=settings_path),
+            _file_config_source(source_id="local_json", title="local.json", path=local_path),
         ],
     }
 

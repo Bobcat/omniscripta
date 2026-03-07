@@ -10,7 +10,7 @@ from urllib.request import Request, urlopen
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
-from shared.app_config import get_bool, get_float, get_int, get_str
+from shared.app_config import get_float, get_int, get_str
 
 FRONTEND_DIR = get_str("frontend_dev.frontend_dir", "/home/gunnar/projects/transcribe-dev/static")
 API_BASE = get_str("frontend_dev.api_base", "http://127.0.0.1:8001").rstrip("/")
@@ -18,8 +18,6 @@ HOST = get_str("frontend_dev.host", "127.0.0.1")
 PORT = get_int("frontend_dev.port", 8010, min_value=1)
 WS_PROXY_BUFFER_BYTES = get_int("frontend_dev.ws_buffer_bytes", 65536, min_value=1024)
 WS_PROXY_IDLE_TIMEOUT_S = get_float("frontend_dev.ws_idle_timeout_s", 1800.0, min_value=30.0)
-LIVE_AUTO_GAIN_CONTROL = get_bool("live.auto_gain_control", False)
-
 _api_parts = urlparse(API_BASE)
 _api_host = _api_parts.hostname or "127.0.0.1"
 _api_port = int(_api_parts.port or (443 if _api_parts.scheme == "https" else 80))
@@ -146,23 +144,9 @@ class Handler(SimpleHTTPRequestHandler):
     def do_GET(self):
         if self._is_ws_upgrade():
             return self._proxy_api_websocket()
-        if self.path == "/api/config":
-            return self._serve_config()
         if self.path.startswith("/api/"):
             return self._proxy_api_http()
         return super().do_GET()
-
-    def _serve_config(self):
-        import json
-        config = {
-            "live_auto_gain_control": LIVE_AUTO_GAIN_CONTROL
-        }
-        payload = json.dumps(config).encode("utf-8")
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
 
     def do_POST(self):
         if self.path.startswith("/api/"):
