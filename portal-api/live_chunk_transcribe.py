@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import wave
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,8 +13,10 @@ from queue_fs import BASE as JOBS_BASE, init_job_in_inbox
 DEFAULT_SAMPLE_RATE_HZ = 16000
 DEFAULT_CHANNELS = 1
 DEFAULT_SAMPLE_WIDTH_BYTES = 2
-
-
+_SPEAKER_PREFIX_RE = re.compile(
+    r"^\s*\[?\s*((?:speaker[_ ]?\d+|spk[_ ]?\d+))\s*\]?\s*[:\-]",
+    re.IGNORECASE,
+)
 def _repo_root() -> Path:
     # portal-api/live_chunk_transcribe.py -> portal-api -> repo root
     return Path(__file__).resolve().parents[1]
@@ -103,9 +106,13 @@ def _parse_srt_segments(srt_text: str, *, t0_offset_ms: int = 0) -> list[dict[st
         t0_ms = _srt_ts_to_ms(a) + int(max(0, t0_offset_ms))
         t1_ms = _srt_ts_to_ms(b) + int(max(0, t0_offset_ms))
         txt_lines = lines[time_line_idx + 1 :]
-        seg_text = " ".join(s.strip() for s in txt_lines if s.strip()).strip()
+        seg_text = "\n".join(s.rstrip() for s in txt_lines if s.strip()).strip()
         if not seg_text:
             continue
+        speaker = ""
+        m = _SPEAKER_PREFIX_RE.match(seg_text)
+        if m:
+            speaker = str(m.group(1) or "").strip().upper().replace(" ", "_")
         seg_index += 1
         out.append(
             {
@@ -113,6 +120,7 @@ def _parse_srt_segments(srt_text: str, *, t0_offset_ms: int = 0) -> list[dict[st
                 "text": seg_text,
                 "t0_ms": int(max(0, t0_ms)),
                 "t1_ms": int(max(t0_ms, t1_ms)),
+                "speaker": speaker,
             }
         )
     return out
@@ -181,6 +189,10 @@ class LiveChunkBatchBridge:
         sample_rate_hz: int = DEFAULT_SAMPLE_RATE_HZ,
         channels: int = DEFAULT_CHANNELS,
         language: str | None = None,
+        diarize_enabled: bool = False,
+        diarize_speaker_mode: str = "fixed",
+        diarize_min_speakers: int | None = 1,
+        diarize_max_speakers: int | None = 4,
     ) -> None:
         self.jobs_base = (jobs_base if jobs_base is not None else JOBS_BASE).resolve()
         self.chunks_root = (
@@ -189,6 +201,23 @@ class LiveChunkBatchBridge:
         self.sample_rate_hz = int(max(1, sample_rate_hz))
         self.channels = int(max(1, channels))
         self.language = _normalize_optional_language(language)
+        self.diarize_enabled = bool(diarize_enabled)
+        mode = str(diarize_speaker_mode or "fixed").strip().lower()
+        self.diarize_speaker_mode = mode if mode in {"none", "auto", "fixed"} else "fixed"
+        try:
+            self.diarize_min_speakers = None if diarize_min_speakers is None else int(max(1, int(diarize_min_speakers)))
+        except Exception:
+            self.diarize_min_speakers = None
+        try:
+            self.diarize_max_speakers = None if diarize_max_speakers is None else int(max(1, int(diarize_max_speakers)))
+        except Exception:
+            self.diarize_max_speakers = None
+        if (
+            self.diarize_min_speakers is not None
+            and self.diarize_max_speakers is not None
+            and self.diarize_max_speakers < self.diarize_min_speakers
+        ):
+            self.diarize_max_speakers = int(self.diarize_min_speakers)
 
     def enqueue_chunk_pcm16(
         self,
@@ -223,15 +252,23 @@ class LiveChunkBatchBridge:
         prompt_text = str(initial_prompt or "").strip()
         prompt_words = len([tok for tok in prompt_text.split() if tok])
         resolved_language = _normalize_optional_language(language if language is not None else self.language)
+        speaker_mode = self.diarize_speaker_mode if self.diarize_enabled else "none"
+        if speaker_mode == "none":
+            min_speakers = None
+            max_speakers = None
+        else:
+            min_speakers = self.diarize_min_speakers
+            max_speakers = self.diarize_max_speakers
         job = init_job_in_inbox(
             orig_filename=chunk_wav.name,
             options={
                 "language": resolved_language,
                 "beam_size": (int(max(1, asr_beam_size)) if asr_beam_size is not None else None),
-                "speaker_mode": "none",
+                "speaker_mode": speaker_mode,
+                "diarize_enabled": bool(self.diarize_enabled),
                 "expected_speakers": None,
-                "min_speakers": None,
-                "max_speakers": None,
+                "min_speakers": min_speakers,
+                "max_speakers": max_speakers,
                 # Keep chunk jobs focused/fast; worker may ignore unknown keys.
                 "live_chunk_mode": True,
                 "live_session_id": str(session_id),

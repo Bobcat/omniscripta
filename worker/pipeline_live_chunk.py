@@ -63,6 +63,14 @@ def run_live_chunk_job(*, job: Any, job_cfg: dict[str, Any]) -> None:
   language = _normalize_optional_language(opts.get("language"))
   snippet_seconds = _chunk_snippet_seconds(input_path, opts)
   align_enabled = get_bool("live_chunk.align_enabled", False)
+  speaker_mode_raw = str(opts.get("speaker_mode", "none") or "none").strip().lower()
+  if speaker_mode_raw in {"off", "disabled", "no_speaker", "nospeaker", "no-speaker"}:
+    speaker_mode_raw = "none"
+  if speaker_mode_raw not in {"none", "auto", "fixed"}:
+    speaker_mode_raw = "auto"
+  diarize_enabled = bool(opts.get("diarize_enabled", False)) and speaker_mode_raw != "none"
+  min_speakers = opts.get("min_speakers")
+  max_speakers = opts.get("max_speakers")
   initial_prompt = str(opts.get("initial_prompt") or "")
   if not initial_prompt.strip():
     initial_prompt = ""
@@ -100,6 +108,8 @@ def run_live_chunk_job(*, job: Any, job_cfg: dict[str, Any]) -> None:
     },
     "options": {
       "align_enabled": bool(align_enabled),
+      "diarize_enabled": bool(diarize_enabled),
+      "speaker_mode": str(speaker_mode_raw),
     },
     "context": {
       "source_kind": "live_chunk",
@@ -124,6 +134,17 @@ def run_live_chunk_job(*, job: Any, job_cfg: dict[str, Any]) -> None:
   if beam_size is not None:
     try:
       raw_request["options"]["beam_size"] = max(1, int(beam_size))
+    except Exception:
+      pass
+  if speaker_mode_raw == "fixed":
+    try:
+      if min_speakers is not None:
+        raw_request["options"]["min_speakers"] = max(1, int(min_speakers))
+    except Exception:
+      pass
+    try:
+      if max_speakers is not None:
+        raw_request["options"]["max_speakers"] = max(1, int(max_speakers))
     except Exception:
       pass
   preview_seq = opts.get("preview_seq")

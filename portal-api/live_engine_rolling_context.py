@@ -74,6 +74,10 @@ async def run_live_session_ws_rolling_context(
     LIVE_DRAIN_WAIT_S = float(_cfg(config, "LIVE_DRAIN_WAIT_S"))
     LIVE_POST_CLOSE_WAIT_S = float(_cfg(config, "LIVE_POST_CLOSE_WAIT_S"))
     LIVE_ASR_LANGUAGE = _normalize_optional_language(_cfg(config, "LIVE_ASR_LANGUAGE"))
+    LIVE_DIARIZE_ENABLED = bool(_cfg(config, "LIVE_DIARIZE_ENABLED"))
+    LIVE_DIARIZE_SPEAKER_MODE = str(_cfg(config, "LIVE_DIARIZE_SPEAKER_MODE") or "fixed").strip().lower()
+    LIVE_DIARIZE_MIN_SPEAKERS = int(max(1, int(_cfg(config, "LIVE_DIARIZE_MIN_SPEAKERS"))))
+    LIVE_DIARIZE_MAX_SPEAKERS = int(max(1, int(_cfg(config, "LIVE_DIARIZE_MAX_SPEAKERS"))))
     LIVE_ROLLING_POLL_INTERVAL_MS = int(_cfg(config, "LIVE_ROLLING_POLL_INTERVAL_MS"))
     LIVE_ROLLING_MIN_INFER_AUDIO_MS = int(_cfg(config, "LIVE_ROLLING_MIN_INFER_AUDIO_MS"))
     LIVE_ROLLING_SINGLE_COMMIT_MIN_MS = int(_cfg(config, "LIVE_ROLLING_SINGLE_COMMIT_MIN_MS"))
@@ -219,6 +223,10 @@ async def run_live_session_ws_rolling_context(
                 "buffer_trim_threshold_ms": int(buffer_trim_threshold_ms),
                 "buffer_trim_drop_ms": int(buffer_trim_drop_ms),
                 "require_single_inflight": bool(LIVE_ROLLING_REQUIRE_SINGLE_INFLIGHT),
+                "diarize_enabled": bool(LIVE_DIARIZE_ENABLED),
+                "diarize_speaker_mode": str(LIVE_DIARIZE_SPEAKER_MODE),
+                "diarize_min_speakers": int(LIVE_DIARIZE_MIN_SPEAKERS),
+                "diarize_max_speakers": int(LIVE_DIARIZE_MAX_SPEAKERS),
             },
             "call_audit_summary": {
                 "calls_done": calls_done,
@@ -413,8 +421,7 @@ async def run_live_session_ws_rolling_context(
         if not live_result:
             return {}
         has_content = (
-            bool(str(live_result.get("final_text") or "").strip())
-            or bool(live_result.get("final_segments"))
+            bool(live_result.get("final_segments"))
             or int(live_result.get("chunks_total") or 0) > 0
             or int(max(0, recording_duration_ms)) > 0
         )
@@ -423,7 +430,6 @@ async def run_live_session_ws_rolling_context(
         LIVE_SESSIONS.archive_transcript(
             session_id,
             close_reason=str(close_reason or stop_reason or "closed"),
-            final_text=str(live_result.get("final_text") or ""),
             final_segments=[
                 dict(seg)
                 for seg in (live_result.get("final_segments") or [])
@@ -732,6 +738,7 @@ async def run_live_session_ws_rolling_context(
                                 "text": seg_text,
                                 "t0_ms": int(seg_t0),
                                 "t1_ms": int(seg_t1),
+                                "speaker": str(raw_seg.get("speaker") or "").strip(),
                             }
                         )
                     if not normalized_commit_segments:
@@ -741,6 +748,7 @@ async def run_live_session_ws_rolling_context(
                                 "text": commit_text,
                                 "t0_ms": int(commit_t0_ms),
                                 "t1_ms": int(commit_t1_ms),
+                                "speaker": "",
                             }
                         ]
                     else:
@@ -982,6 +990,10 @@ async def run_live_session_ws_rolling_context(
                 sample_rate_hz=LIVE_AUDIO_SAMPLE_RATE_HZ,
                 channels=LIVE_AUDIO_CHANNELS,
                 language=LIVE_ASR_LANGUAGE,
+                diarize_enabled=LIVE_DIARIZE_ENABLED,
+                diarize_speaker_mode=LIVE_DIARIZE_SPEAKER_MODE,
+                diarize_min_speakers=LIVE_DIARIZE_MIN_SPEAKERS,
+                diarize_max_speakers=LIVE_DIARIZE_MAX_SPEAKERS,
             )
             recording_state = "recording"
             recording_path = str(rec_snap.wav_path)
@@ -1004,6 +1016,10 @@ async def run_live_session_ws_rolling_context(
                     "buffer_trim_drop_ms": int(buffer_trim_drop_ms),
                     "require_single_inflight": bool(LIVE_ROLLING_REQUIRE_SINGLE_INFLIGHT),
                     "language": LIVE_ASR_LANGUAGE,
+                    "diarize_enabled": bool(LIVE_DIARIZE_ENABLED),
+                    "diarize_speaker_mode": str(LIVE_DIARIZE_SPEAKER_MODE),
+                    "diarize_min_speakers": int(LIVE_DIARIZE_MIN_SPEAKERS),
+                    "diarize_max_speakers": int(LIVE_DIARIZE_MAX_SPEAKERS),
                 },
             )
         except Exception as e:
@@ -1169,7 +1185,6 @@ async def run_live_session_ws_rolling_context(
                         reason=stop_reason,
                         transcript_revision=int(max(0, int(live_result.get("transcript_revision") or 0))),
                         final_segments_count=len(live_result.get("final_segments") or []),
-                        final_text=str(live_result.get("final_text") or ""),
                         final_transcript_url=_rooted_path(f"/demo/live/sessions/{session_id}/final"),
                     )
                 )

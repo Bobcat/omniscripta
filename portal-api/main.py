@@ -68,6 +68,10 @@ def _get_optional_setting_str(path: str) -> str | None:
 
 
 LIVE_ASR_LANGUAGE = _get_optional_setting_str("live.asr_language")
+LIVE_DIARIZE_ENABLED = get_bool("live.diarize_enabled", False)
+LIVE_DIARIZE_SPEAKER_MODE = get_str("live.diarize_speaker_mode", "fixed")
+LIVE_DIARIZE_MIN_SPEAKERS = get_int("live.diarize_min_speakers", 1, min_value=1)
+LIVE_DIARIZE_MAX_SPEAKERS = get_int("live.diarize_max_speakers", 4, min_value=1)
 
 # Rolling context settings
 LIVE_ROLLING_POLL_INTERVAL_MS = get_int("live.rolling.poll_interval_ms", 250, min_value=100)
@@ -115,6 +119,10 @@ def _live_engine_rolling_context_config() -> dict[str, Any]:
         "LIVE_DRAIN_WAIT_S": LIVE_DRAIN_WAIT_S,
         "LIVE_POST_CLOSE_WAIT_S": LIVE_POST_CLOSE_WAIT_S,
         "LIVE_ASR_LANGUAGE": LIVE_ASR_LANGUAGE,
+        "LIVE_DIARIZE_ENABLED": LIVE_DIARIZE_ENABLED,
+        "LIVE_DIARIZE_SPEAKER_MODE": LIVE_DIARIZE_SPEAKER_MODE,
+        "LIVE_DIARIZE_MIN_SPEAKERS": LIVE_DIARIZE_MIN_SPEAKERS,
+        "LIVE_DIARIZE_MAX_SPEAKERS": LIVE_DIARIZE_MAX_SPEAKERS,
         "LIVE_ROLLING_POLL_INTERVAL_MS": LIVE_ROLLING_POLL_INTERVAL_MS,
         "LIVE_ROLLING_MIN_INFER_AUDIO_MS": LIVE_ROLLING_MIN_INFER_AUDIO_MS,
         "LIVE_ROLLING_SINGLE_COMMIT_MIN_MS": LIVE_ROLLING_SINGLE_COMMIT_MIN_MS,
@@ -211,11 +219,9 @@ def get_live_session_result(session_id: str) -> Dict[str, Any]:
     result = dict(result)
     effective_engine = str(result.get("live_engine") or LIVE_ENGINE)
     result["live_engine"] = effective_engine
-    final_text = str(result.get("final_text") or "")
     final_segments = result.get("final_segments")
     has_segments = isinstance(final_segments, list) and any(isinstance(s, dict) for s in final_segments)
     has_recording_wav = _live_recording_wav_path_from_result(result) is not None
-    can_export = bool(final_text.strip()) or has_segments
     finalization_state = str(result.get("finalization_state") or "").strip().lower()
     ready_states = {"ready", "finalized", "recording_finalized"}
     if effective_engine == "rolling_context":
@@ -227,10 +233,8 @@ def get_live_session_result(session_id: str) -> Dict[str, Any]:
         "live_engine": effective_engine,
         "result": result,
         "ready": finalization_state in ready_states,
-        "can_export_txt": bool(can_export),
         "can_export_srt": bool(has_segments),
         "can_export_wav": bool(has_recording_wav),
-        "transcript_txt_url": _rooted_path(f"/demo/live/sessions/{session_id}/transcript.txt") if can_export else None,
         "transcript_srt_url": _rooted_path(f"/demo/live/sessions/{session_id}/transcript.srt") if has_segments else None,
         "recording_wav_url": _rooted_path(f"/demo/live/sessions/{session_id}/recording.wav") if has_recording_wav else None,
     }
@@ -283,7 +287,7 @@ def get_live_session_quality(session_id: str, fixture_id: str | None = None) -> 
     if not resolved_fixture_id:
         raise HTTPException(status_code=409, detail="No fixture metadata for this session")
 
-    final_text = str(result.get("final_text") or "")
+    final_text = _live_result_to_plain_text(result)
     if not final_text.strip():
         raise HTTPException(status_code=409, detail="Transcript text not ready")
 
@@ -312,20 +316,6 @@ def get_live_session_quality(session_id: str, fixture_id: str | None = None) -> 
         envelope=envelope,
     )
     return envelope
-
-
-@app.get("/demo/live/sessions/{session_id}/transcript.txt")
-def get_live_session_transcript_txt(session_id: str) -> Response:
-    try:
-        result = LIVE_SESSIONS.live_result_snapshot(session_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Live session result not found")
-    text = str(result.get("final_text") or "")
-    if not text.strip():
-        raise HTTPException(status_code=409, detail="Transcript text not ready")
-    headers = {"Content-Disposition": f'attachment; filename="{_safe_filename(session_id)}.txt"'}
-    return Response(content=text, media_type="text/plain; charset=utf-8", headers=headers)
-
 
 @app.get("/demo/live/sessions/{session_id}/transcript.srt")
 def get_live_session_transcript_srt(session_id: str) -> Response:
@@ -412,6 +402,21 @@ def _live_result_to_srt_text(result: dict[str, Any]) -> str:
         rows.append(text)
         rows.append("")
     return "\n".join(rows).strip() + ("\n" if rows else "")
+
+
+def _live_result_to_plain_text(result: dict[str, Any]) -> str:
+    segments_any = result.get("final_segments")
+    if not isinstance(segments_any, list):
+        return ""
+    rows: list[str] = []
+    for seg in segments_any:
+        if not isinstance(seg, dict):
+            continue
+        text = str(seg.get("text") or "").strip()
+        if not text:
+            continue
+        rows.append(text)
+    return "\n".join(rows).strip()
 
 
 def _live_recording_wav_path_from_result(result: dict[str, Any]) -> Path | None:
@@ -553,6 +558,72 @@ def _file_config_source(*, source_id: str, title: str, path: Path) -> Dict[str, 
     }
 
 
+def _load_json_object(path: Path) -> Dict[str, Any]:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def _deep_merge_dict(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    out: Dict[str, Any] = dict(base or {})
+    for key, value in (override or {}).items():
+        if str(key).startswith("_"):
+            continue
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = _deep_merge_dict(dict(out.get(key) or {}), value)
+        else:
+            out[key] = value
+    return out
+
+
+def _coerce_live_ui_settings(data: Dict[str, Any]) -> Dict[str, Any]:
+    src = data if isinstance(data, dict) else {}
+    defaults: Dict[str, Any] = {
+        "transcript_presentation_mode": "segment_blocks_diarize_hard_v1",
+        "speaker_labels_default_enabled": True,
+        "transcript_format_rules": {
+            "blockEverySegments": 3,
+            "blockMinChars": 220,
+            "blockMinWords": 35,
+        },
+    }
+    out = _deep_merge_dict(defaults, src)
+    rules = out.get("transcript_format_rules")
+    if not isinstance(rules, dict):
+        rules = dict(defaults["transcript_format_rules"])
+    nrules: Dict[str, Any] = {}
+    int_keys = {"blockEverySegments", "blockMinChars", "blockMinWords"}
+    for k in defaults["transcript_format_rules"].keys():
+        v = rules.get(k, defaults["transcript_format_rules"][k])
+        if k in int_keys:
+            try:
+                nrules[k] = max(0, int(v))
+            except Exception:
+                nrules[k] = int(defaults["transcript_format_rules"][k])
+    return {
+        "transcript_presentation_mode": "segment_blocks_diarize_hard_v1",
+        "speaker_labels_default_enabled": bool(out.get("speaker_labels_default_enabled", True)),
+        "transcript_format_rules": nrules,
+    }
+
+
+def _load_ui_settings() -> Dict[str, Any]:
+    config_dir = (_REPO_ROOT / "config").resolve()
+    base_path = (config_dir / "ui_settings.json").resolve()
+    local_path = (config_dir / "ui_settings.local.json").resolve()
+    base_obj = _load_json_object(base_path) if base_path.exists() else {}
+    local_obj = _load_json_object(local_path) if local_path.exists() else {}
+    merged = _deep_merge_dict(base_obj, local_obj)
+
+    live_obj = merged.get("live")
+    return {
+        "version": str(merged.get("version") or "ui_settings_v1"),
+        "live": _coerce_live_ui_settings(live_obj if isinstance(live_obj, dict) else {}),
+    }
+
+
 @app.get("/demo/settings")
 def get_demo_settings() -> Dict[str, Any]:
     config_dir = (_REPO_ROOT / "config").resolve()
@@ -564,6 +635,18 @@ def get_demo_settings() -> Dict[str, Any]:
             _file_config_source(source_id="settings_json", title="settings.json", path=settings_path),
             _file_config_source(source_id="local_json", title="local.json", path=local_path),
         ],
+    }
+
+
+@app.get("/ui/settings")
+def get_ui_settings() -> Dict[str, Any]:
+    settings = _load_ui_settings()
+    return {
+        "generated_at_utc": _iso_utc(datetime.now(timezone.utc).timestamp()),
+        "version": str(settings.get("version") or "ui_settings_v1"),
+        "settings": {
+            "live": dict(settings.get("live") or {}),
+        },
     }
 
 

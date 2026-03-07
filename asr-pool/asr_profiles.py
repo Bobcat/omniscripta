@@ -34,6 +34,10 @@ _PROFILES: dict[str, dict[str, Any]] = {
     "allowed_overrides": {
       "language",
       "align_enabled",
+      "diarize_enabled",
+      "speaker_mode",
+      "min_speakers",
+      "max_speakers",
       "beam_size",
       "initial_prompt",
     },

@@ -18,6 +18,10 @@
     "drain_wait_s": 20.0,
     "post_close_wait_s": 60.0,
     "asr_language": null,
+    "diarize_enabled": false,
+    "diarize_speaker_mode": "fixed",
+    "diarize_min_speakers": 1,
+    "diarize_max_speakers": 4,
     "calibration_seconds": [60, 180, 300, 480, 600, 1200, 1800, 2700, 3600],
     
     "rolling": {

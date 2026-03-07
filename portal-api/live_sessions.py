@@ -91,7 +91,6 @@ class LiveSession:
     finalization_state: str = "idle"
     batch_job_id: str = ""
     live_transcript_revision: int = 0
-    live_final_text: str = ""
     live_final_segments: list[dict[str, Any]] = field(default_factory=list)
     live_commit_results: list[dict[str, Any]] = field(default_factory=list)
     live_preview_text: str = ""
@@ -110,7 +109,6 @@ class ClosedSessionArchive:
     closed_unix: float
     expires_unix: float
     close_reason: str
-    final_text: str
     final_segments: list[dict[str, Any]]
     transcript_revision: int
     live_engine: str = "rolling_context"
@@ -123,7 +121,6 @@ class ClosedSessionArchive:
     finalization_state: str = ""
     batch_job_id: str = ""
     live_transcript_revision: int = 0
-    live_final_text: str = ""
     live_final_segments: list[dict[str, Any]] = field(default_factory=list)
     live_commit_results: list[dict[str, Any]] = field(default_factory=list)
     live_engine_runtime: dict[str, Any] = field(default_factory=dict)
@@ -527,26 +524,6 @@ class LiveSessionManager:
                     sum(1 for r in sess.live_commit_results if str(r.get("state") or "") == "ready"),
                 )
 
-            appended_final_text = ""
-            for r in sess.live_commit_results:
-                if str(r.get("state") or "") != "ready":
-                    continue
-                try:
-                    row_idx = int(r.get("chunk_index"))
-                except Exception:
-                    row_idx = -1
-                raw_row_text = str(r.get("text") or "")
-                row_text = raw_row_text.strip()
-                if not row_text:
-                    continue
-
-                append_text = str(row_text or "").strip()
-                if not append_text:
-                    continue
-                appended_final_text = append_text if not appended_final_text else f"{appended_final_text}\n{append_text}"
-
-            sess.live_final_text = appended_final_text
-
             appended_segments: list[dict[str, Any]] = []
             if any(r.get("segments") for r in sess.live_commit_results):
                 seg_counter = 0
@@ -572,6 +549,7 @@ class LiveSessionManager:
                                     "text": seg_text,
                                     "t0_ms": seg_t0,
                                     "t1_ms": seg_t1,
+                                    "speaker": str(seg.get("speaker") or "").strip(),
                                 }
                             )
                     else:
@@ -584,6 +562,7 @@ class LiveSessionManager:
                                     "text": row_text,
                                     "t0_ms": row_t0,
                                     "t1_ms": row_t1,
+                                    "speaker": "",
                                 }
                             )
             else:
@@ -602,6 +581,7 @@ class LiveSessionManager:
                             "text": row_text,
                             "t0_ms": row_t0,
                             "t1_ms": row_t1,
+                            "speaker": "",
                         }
                     )
 
@@ -664,7 +644,6 @@ class LiveSessionManager:
         session_id: str,
         *,
         close_reason: str,
-        final_text: str,
         final_segments: list[dict[str, Any]],
         transcript_revision: int,
         recording_path: str = "",
@@ -686,7 +665,6 @@ class LiveSessionManager:
                 closed_unix=now,
                 expires_unix=(now + self._archive_ttl_seconds),
                 close_reason=str(close_reason or ""),
-                final_text=str(final_text or ""),
                 final_segments=[dict(seg) for seg in (final_segments or [])],
                 transcript_revision=int(max(0, transcript_revision)),
                 live_engine=(requested_engine or "rolling_context"),
@@ -699,7 +677,6 @@ class LiveSessionManager:
                 finalization_state=str(finalization_state or ""),
                 batch_job_id=str(batch_job_id or ""),
                 live_transcript_revision=0,
-                live_final_text="",
                 live_final_segments=[],
                 live_commit_results=[],
                 fixture_id="",
@@ -709,7 +686,6 @@ class LiveSessionManager:
             src_sess = self._sessions.get(str(session_id))
             if src_sess is not None:
                 arc.live_transcript_revision = int(max(0, src_sess.live_transcript_revision))
-                arc.live_final_text = str(src_sess.live_final_text or "")
                 arc.live_final_segments = [dict(seg) for seg in src_sess.live_final_segments]
                 arc.live_commit_results = [dict(r) for r in src_sess.live_commit_results]
                 arc.live_engine_runtime = dict(src_sess.live_engine_runtime or {})
@@ -768,7 +744,6 @@ class LiveSessionManager:
             "finalization_state": str(sess.finalization_state or "idle"),
             "batch_job_id": str(sess.batch_job_id or ""),
             "live_transcript_revision": int(max(0, sess.live_transcript_revision)),
-            "live_final_text_chars": len(str(sess.live_final_text or "")),
             "live_final_segments_count": len(sess.live_final_segments),
             "live_commit_results_count": len(sess.live_commit_results),
             "fixture_id": str(sess.fixture_id or ""),
@@ -785,7 +760,6 @@ class LiveSessionManager:
             "closed_at_utc": _utc_iso(arc.closed_unix),
             "expires_at_utc": _utc_iso(arc.expires_unix),
             "transcript_revision": int(arc.transcript_revision),
-            "final_text": str(arc.final_text),
             "final_segments": [dict(seg) for seg in arc.final_segments],
             "final_segments_count": len(arc.final_segments),
             "recording_path": str(arc.recording_path or ""),
@@ -797,7 +771,6 @@ class LiveSessionManager:
             "finalization_state": str(arc.finalization_state or ""),
             "batch_job_id": str(arc.batch_job_id or ""),
             "live_transcript_revision": int(max(0, arc.live_transcript_revision)),
-            "live_final_text_chars": len(str(arc.live_final_text or "")),
             "live_final_segments_count": len(arc.live_final_segments),
             "live_commit_results_count": len(arc.live_commit_results),
             "fixture_id": str(arc.fixture_id or ""),
@@ -855,7 +828,6 @@ class LiveSessionManager:
             "chunks_failed": int(max(0, sess.chunks_failed)),
             "chunks_pending": int(max(0, sess.chunks_total - sess.chunks_done - sess.chunks_failed)),
             "transcript_revision": int(max(0, sess.live_transcript_revision)),
-            "final_text": str(sess.live_final_text or ""),
             "final_segments": [dict(seg) for seg in sess.live_final_segments],
             "final_segments_count": len(sess.live_final_segments),
             "final_covered_ms": int(max(0, final_covered_ms)),
@@ -934,7 +906,6 @@ class LiveSessionManager:
             "chunks_failed": int(max(0, arc.chunks_failed)),
             "chunks_pending": int(max(0, arc.chunks_total - arc.chunks_done - arc.chunks_failed)),
             "transcript_revision": int(max(0, arc.live_transcript_revision or arc.transcript_revision)),
-            "final_text": str(arc.live_final_text or arc.final_text or ""),
             "final_segments": [dict(seg) for seg in final_segments_src],
             "final_segments_count": len(final_segments_src),
             "final_covered_ms": int(max(0, final_covered_ms)),
