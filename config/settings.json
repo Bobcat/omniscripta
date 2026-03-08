@@ -25,7 +25,6 @@
     "calibration_seconds": [60, 180, 300, 480, 600, 1200, 1800, 2700, 3600],
     
     "rolling": {
-      "poll_interval_ms": 120,
       "min_infer_audio_ms": 1000,
       "single_segment_commit_min_ms": 12000,
       "force_commit_repeats": 3,
@@ -34,8 +33,21 @@
       "max_decode_window_ms": 12000,
       "buffer_trim_threshold_ms": 30000,
       "buffer_trim_drop_ms": 20000,
-      "require_single_inflight": true
+      "max_outstanding_per_session": 2,
+      "min_new_audio_ms": 1000
     }
+  },
+
+  "polling_intervals": {
+    "live_rolling_poll_ms": 120,
+    "live_rolling_emit_min_ms": 120,
+    "asr_pool_watchdog_poll_ms": 2000,
+    "asr_pool_stage_poll_ms": 150,
+    "asr_pool_warm_response_poll_s": 0.05,
+    "asr_remote_completions_poll_s": 0.2,
+    "asr_remote_pending_status_poll_s": 1.0,
+    "asr_pool_records_prune_s": 30,
+    "asr_blob_cleanup_s": 120
   },
   
   "asr_pool": {
@@ -49,9 +61,7 @@
     "warm_start_timeout_s": 180,
     "warm_prewarm_timeout_s": 180,
     "watchdog_enabled": true,
-    "watchdog_interval_ms": 2000,
     "watchdog_recover_timeout_s": 60,
-    "stage_poll_ms": 150,
     "warm_request_timeout_s": 900,
     
     "queue_limits": {
@@ -70,8 +80,7 @@
       "max": 10000,
       "ttl_completed_s": 900,
       "ttl_failed_s": 1800,
-      "ttl_cancelled_s": 600,
-      "prune_interval_s": 30
+      "ttl_cancelled_s": 600
     },
     
     "interactive_burst_max": 8,
@@ -85,10 +94,10 @@
       "chunk_size_live": 10,
       "live_chunk_backend": "whisperx",
       "beam_size": 5,
-      "xxxalign_model": "jonatasgrosman/wav2vec2-large-xlsr-53-dutch",
-      "xxxdiarize_model": "pyannote/speaker-diarization-3.1",
+      "align_model": "jonatasgrosman/wav2vec2-large-xlsr-53-dutch",
+      "diarize_model": "pyannote/speaker-diarization-3.1",
       "venv": "/home/gunnar/whisperx/.venv",
-      "vad_filter": true,
+      "xvad_filter": true,
       "threads": {
         "omp": 8,
         "mkl": 8,
@@ -99,7 +108,6 @@
     
     "warm": {
       "prewarm_timeout_s": 180.0,
-      "response_poll_s": 0.05,
       "prewarm_language": null,
       "prewarm_align_enabled": false,
       "idle_s": 120.0,
@@ -120,12 +128,14 @@
   },
   
   "worker": {
-    "sleep_idle_seconds": 2.0,
     "progress_db_dir": "data/progress_db",
     "progress_runs_path": "data/progress_db/runs_v1.jsonl",
     "host_id": "",
     "instance": "1",
-    "hardware_key": ""
+    "hardware_key": "",
+    "live": {
+      "max_outstanding_requests": 2
+    }
   },
 
   "snip": {
@@ -181,7 +191,6 @@
     "timeout_interactive_s": 60,
     "timeout_background_s": 420,
     "timeout_normal_s": 180,
-    "poll_interval_s": 0.2,
     "http_timeout_s": 10.0,
     "retry_attempts": 3,
     "retry_base_delay_s": 0.2,
@@ -192,7 +201,6 @@
   
   "asr_blob": {
     "root": "data/asr_blobs",
-    "cleanup_interval_s": 120,
     "ttl_s": 3600,
     "cleanup_max_scan_files": 5000
   },

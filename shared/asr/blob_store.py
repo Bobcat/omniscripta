@@ -162,7 +162,7 @@ def resolve_blob_ref_to_local_path(blob_ref: str) -> Path:
 
 
 def cleanup_blob_store_if_due() -> None:
-  interval_s = get_int("asr_blob.cleanup_interval_s", 120, min_value=0)
+  interval_s = get_int("polling_intervals.asr_blob_cleanup_s", 120, min_value=0)
   ttl_s = get_int("asr_blob.ttl_s", 3600, min_value=0)
   max_scan = get_int("asr_blob.cleanup_max_scan_files", 5000, min_value=1)
   if interval_s <= 0 or ttl_s <= 0:

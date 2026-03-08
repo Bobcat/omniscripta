@@ -70,7 +70,7 @@ class _AsrPoolWarmRunnerClient:
         raise PersistentRunnerClientError("Persistent runner is not available")
 
       prewarm_timeout_s = max(5.0, get_float("asr_pool.warm.prewarm_timeout_s", 180.0, min_value=0.0))
-      poll_s = max(0.02, get_float("asr_pool.warm.response_poll_s", 0.05, min_value=0.0))
+      poll_s = max(0.02, get_float("polling_intervals.asr_pool_warm_response_poll_s", 0.05, min_value=0.0))
       prewarm_language = _normalize_optional_language(get_setting("asr_pool.warm.prewarm_language", None))
       prewarm_align_enabled = get_bool("asr_pool.warm.prewarm_align_enabled", False)
 
@@ -212,7 +212,7 @@ class _AsrPoolWarmRunnerClient:
 
   def transcribe(self, *, job: Any, request: dict[str, Any], progress_path: Path | None = None) -> dict[str, Any]:
     request_timeout_s = max(1.0, get_float("asr_pool.warm.request_timeout_s", 120.0, min_value=0.0))
-    poll_s = max(0.02, get_float("asr_pool.warm.response_poll_s", 0.05, min_value=0.0))
+    poll_s = max(0.02, get_float("polling_intervals.asr_pool_warm_response_poll_s", 0.05, min_value=0.0))
     with self._lock:
       self._ensure_runner_locked()
       proc = self._proc

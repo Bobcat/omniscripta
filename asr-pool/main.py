@@ -10,8 +10,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from uuid import uuid4
 
-from fastapi import Depends, FastAPI, Header, Request
+from fastapi import Depends, FastAPI, Header, Query, Request
 from fastapi.responses import JSONResponse
 
 
@@ -105,6 +106,9 @@ class _Record:
     retryable: bool | None = None
     response: dict[str, Any] | None = None
     error: dict[str, Any] | None = None
+    consumer_id: str = ""
+    live_session_id: str = ""
+    live_chunk_index: int | None = None
 
 
 class AsrPoolService:
@@ -126,7 +130,7 @@ class AsrPoolService:
         self._watchdog_enabled = get_bool("asr_pool.watchdog_enabled", True)
         self._watchdog_interval_s = max(
             0.2,
-            get_float("asr_pool.watchdog_interval_ms", 2000, min_value=200) / 1000.0,
+            get_float("polling_intervals.asr_pool_watchdog_poll_ms", 2000, min_value=200) / 1000.0,
         )
         self._watchdog_recover_timeout_s = get_int(
             "asr_pool.watchdog_recover_timeout_s",
@@ -138,8 +142,9 @@ class AsrPoolService:
             "completed": get_int("asr_pool.records.ttl_completed_s", 900, min_value=10),
             "failed": get_int("asr_pool.records.ttl_failed_s", 1800, min_value=10),
             "cancelled": get_int("asr_pool.records.ttl_cancelled_s", 600, min_value=10),
+            "superseded": get_int("asr_pool.records.ttl_superseded_s", 600, min_value=10),
         }
-        self._records_prune_interval_s = get_int("asr_pool.records.prune_interval_s", 30, min_value=1)
+        self._records_prune_interval_s = get_int("polling_intervals.asr_pool_records_prune_s", 30, min_value=1)
         self._records_pruned_total = 0
         self._records_pruned_ttl_total = 0
         self._records_pruned_overflow_total = 0
@@ -167,6 +172,14 @@ class AsrPoolService:
             "normal": deque(),
             "background": deque(),
         }
+        self._completion_events: deque[dict[str, Any]] = deque()
+        self._completion_seq_next = 1
+        self._completion_events_max = get_int("asr_pool.completions.max_events", 20000, min_value=1000)
+        # Feed id changes on pool (re)start so consumers can detect that in-memory
+        # completion cursors are no longer valid after a restart.
+        self._completion_feed_id = uuid4().hex
+        self._live_latest_chunk_index: dict[str, int] = {}
+        self._live_queued_request_id: dict[str, str] = {}
         self._lock = asyncio.Lock()
         self._cond = asyncio.Condition(self._lock)
         self._tasks: list[asyncio.Task[None]] = []
@@ -175,13 +188,19 @@ class AsrPoolService:
         self._noninteractive_next = "normal"
         self._watchdog_restart_count: list[int] = [0 for _ in range(max(0, int(self._runner_slots)))]
         self._last_records_prune_mono = 0.0
-        self._stage_poll_interval_s = max(0.05, get_float("asr_pool.stage_poll_ms", 150, min_value=50) / 1000.0)
+        self._stage_poll_interval_s = max(
+            0.05,
+            get_float("polling_intervals.asr_pool_stage_poll_ms", 150, min_value=50) / 1000.0,
+        )
 
     async def start(self) -> None:
         should_prewarm = False
         async with self._lock:
             if self._tasks:
                 return
+            # New process lifetime / feed generation. Workers use this to reset
+            # their completion cursor without trying to recover in-flight jobs.
+            self._completion_feed_id = uuid4().hex
             self._stopping = False
             for idx in range(self._runner_slots):
                 task = asyncio.create_task(self._runner_loop(idx), name=f"asr-pool-runner-{idx}")
@@ -403,6 +422,9 @@ class AsrPoolService:
         priority = str(prepared.get("priority") or "normal").strip().lower() or "normal"
         live_lane = "single"
         queue_key = self._queue_key_for(priority=priority)
+        consumer_id = self._consumer_id_from_request(prepared)
+        live_session_id, live_chunk_index = self._extract_live_metadata(prepared)
+        is_live = bool(live_session_id)
 
         async with self._lock:
             self._maybe_prune_records_unlocked(reason="submit", force=False)
@@ -426,6 +448,82 @@ class AsrPoolService:
                     state=str(existing.state),
                 )
                 return 200, self._to_lifecycle(existing)
+
+            live_key = self._live_key(live_session_id) if is_live else ""
+            if is_live and live_chunk_index is not None:
+                latest_idx = self._live_latest_chunk_index.get(live_key)
+                if latest_idx is not None and int(live_chunk_index) <= int(latest_idx):
+                    rec = _Record(
+                        request_id=request_id,
+                        payload_hash=payload_hash,
+                        request=prepared,
+                        profile_id=str(prepared.get("profile_id") or ""),
+                        priority=priority,
+                        live_lane=live_lane,
+                        queue_key=queue_key,
+                        state="superseded",
+                        submitted_at_utc=_iso_utc(),
+                        consumer_id=str(consumer_id),
+                        live_session_id=str(live_session_id),
+                        live_chunk_index=int(live_chunk_index),
+                    )
+                    self._records[request_id] = rec
+                    self._mark_record_terminal_unlocked(
+                        rec,
+                        state="superseded",
+                        stage="superseded",
+                        error={
+                            "code": "ASR_REQUEST_SUPERSEDED",
+                            "message": "Superseded by newer live request",
+                            "retryable": False,
+                            "details": {
+                                "live_session_id": str(live_session_id),
+                                "live_lane": "single",
+                                "live_chunk_index": int(live_chunk_index),
+                                "latest_live_chunk_index": int(latest_idx),
+                            },
+                        },
+                        retryable=False,
+                    )
+                    self._emit_event(
+                        "submit_superseded_stale",
+                        request_id=str(request_id),
+                        live_session_id=str(live_session_id),
+                        live_lane="single",
+                        live_chunk_index=int(live_chunk_index),
+                        latest_live_chunk_index=int(latest_idx),
+                    )
+                    self._maybe_prune_records_unlocked(reason="submit_superseded_stale", force=False)
+                    return 202, self._to_lifecycle(rec)
+
+                replaced_rid = str(self._live_queued_request_id.get(live_key) or "")
+                if replaced_rid:
+                    replaced = self._records.get(replaced_rid)
+                    if replaced is not None and str(replaced.state) == "queued":
+                        self._remove_from_queue_unlocked(replaced_rid, replaced.queue_key)
+                        self._mark_record_terminal_unlocked(
+                            replaced,
+                            state="superseded",
+                            stage="superseded",
+                            error={
+                                "code": "ASR_REQUEST_SUPERSEDED",
+                                "message": "Superseded by newer live request",
+                                "retryable": False,
+                                "details": {
+                                    "live_session_id": str(live_session_id),
+                                    "live_lane": "single",
+                                    "replaced_by_request_id": str(request_id),
+                                },
+                            },
+                            retryable=False,
+                        )
+                        self._emit_event(
+                            "queued_live_request_superseded",
+                            request_id=str(replaced.request_id),
+                            replaced_by_request_id=str(request_id),
+                            live_session_id=str(live_session_id),
+                            live_lane="single",
+                        )
 
             if self._priority_depth(priority) >= int(self._queue_limits.get(priority, 1)):
                 self._emit_event(
@@ -456,16 +554,27 @@ class AsrPoolService:
                 queue_key=queue_key,
                 state="queued",
                 submitted_at_utc=_iso_utc(),
+                consumer_id=str(consumer_id),
+                live_session_id=str(live_session_id),
+                live_chunk_index=(None if live_chunk_index is None else int(live_chunk_index)),
             )
             self._records[request_id] = rec
             self._queues[queue_key].append(request_id)
+            if is_live and live_chunk_index is not None:
+                prev = self._live_latest_chunk_index.get(live_key)
+                if prev is None or int(live_chunk_index) > int(prev):
+                    self._live_latest_chunk_index[live_key] = int(live_chunk_index)
+                self._live_queued_request_id[live_key] = str(request_id)
             queue_position = int(len(self._queues[queue_key]))
             self._emit_event(
                 "submit_accepted",
                 request_id=str(request_id),
                 profile_id=str(rec.profile_id),
                 priority=str(rec.priority),
+                consumer_id=str(rec.consumer_id or "unknown"),
                 live_lane=str(rec.live_lane),
+                live_session_id=str(rec.live_session_id or ""),
+                live_chunk_index=rec.live_chunk_index,
                 queue_key=str(queue_key),
                 queue_position=int(queue_position),
                 queue_depth=self._queue_depth_snapshot_unlocked(),
@@ -503,9 +612,13 @@ class AsrPoolService:
                     "details": {"request_id": rid},
                 }
             if rec.state == "queued":
-                rec.state = "cancelled"
-                rec.finished_at_utc = _iso_utc()
                 self._remove_from_queue_unlocked(rid, rec.queue_key)
+                self._mark_record_terminal_unlocked(
+                    rec,
+                    state="cancelled",
+                    stage="cancelled",
+                    retryable=None,
+                )
                 self._emit_event(
                     "cancel_queued",
                     request_id=str(rec.request_id),
@@ -531,6 +644,101 @@ class AsrPoolService:
                 "request_id": rec.request_id,
                 "state": rec.state,
                 "message": "cancel accepted",
+            }
+
+    async def completions(self, *, consumer_id: str, since_seq: int, limit: int) -> tuple[int, dict[str, Any]]:
+        cid = str(consumer_id or "").strip()
+        if not cid:
+            return 400, {
+                "code": "ASR_COMPLETIONS_CONSUMER_REQUIRED",
+                "message": "consumer_id is required",
+                "retryable": False,
+                "details": {},
+            }
+        safe_since = int(max(0, int(since_seq)))
+        safe_limit = int(max(1, min(1000, int(limit))))
+        # TODO(v3-followup): add durable cursor/recovery semantics across ASR pool restarts.
+        # v3 intentionally keeps completion feed in-memory only.
+        async with self._lock:
+            self._maybe_prune_records_unlocked(reason="completions", force=False)
+            # Scan from newest to oldest and stop once seq<=since_seq to avoid
+            # repeatedly walking the full history under lock on every poll.
+            rows_window: deque[dict[str, Any]] = deque()
+            for row in reversed(self._completion_events):
+                seq = int(max(0, int(row.get("seq") or 0)))
+                if seq <= safe_since:
+                    break
+                if str(row.get("consumer_id") or "") != cid:
+                    continue
+                rows_window.appendleft(dict(row))
+                if len(rows_window) > safe_limit:
+                    rows_window.pop()
+            rows = list(rows_window)
+            next_seq = safe_since if not rows else int(max(0, int(rows[-1].get("seq") or safe_since)))
+            return 200, {
+                "feed_id": str(self._completion_feed_id),
+                "consumer_id": cid,
+                "since_seq": int(safe_since),
+                "next_seq": int(next_seq),
+                "events": rows,
+            }
+
+    async def pending_status(
+        self,
+        *,
+        consumer_id: str,
+        request_ids: list[str],
+        limit: int,
+    ) -> tuple[int, dict[str, Any]]:
+        cid = str(consumer_id or "").strip()
+        if not cid:
+            return 400, {
+                "code": "ASR_PENDING_STATUS_CONSUMER_REQUIRED",
+                "message": "consumer_id is required",
+                "retryable": False,
+                "details": {},
+            }
+        safe_limit = int(max(1, min(1000, int(limit))))
+        normalized_ids: list[str] = []
+        seen: set[str] = set()
+        for raw in list(request_ids or []):
+            rid = str(raw or "").strip()
+            if not rid:
+                continue
+            if rid in seen:
+                continue
+            seen.add(rid)
+            normalized_ids.append(rid)
+            if len(normalized_ids) >= safe_limit:
+                break
+        # TODO(v3-followup): add durable restart-aware pending query semantics.
+        # v3 intentionally serves pending status from in-memory records only.
+        async with self._lock:
+            self._maybe_prune_records_unlocked(reason="pending_status", force=False)
+            rows: list[dict[str, Any]] = []
+            for rid in normalized_ids:
+                rec = self._records.get(rid)
+                if rec is None:
+                    continue
+                if str(rec.consumer_id or "") != cid:
+                    continue
+                rows.append(
+                    {
+                        "request_id": str(rec.request_id),
+                        "state": str(rec.state),
+                        "stage": str(rec.stage or ""),
+                        "stage_started_at_utc": rec.stage_started_at_utc,
+                        "submitted_at_utc": rec.submitted_at_utc,
+                        "started_at_utc": rec.started_at_utc,
+                        "finished_at_utc": rec.finished_at_utc,
+                        "queue_position": self._to_lifecycle(rec).get("queue_position"),
+                    }
+                )
+            return 200, {
+                "feed_id": str(self._completion_feed_id),
+                "consumer_id": cid,
+                "request_count": int(len(normalized_ids)),
+                "rows": rows,
             }
 
     async def pool_status(self) -> dict[str, Any]:
@@ -573,6 +781,7 @@ class AsrPoolService:
                         "completed": int(self._records_ttl_s["completed"]),
                         "failed": int(self._records_ttl_s["failed"]),
                         "cancelled": int(self._records_ttl_s["cancelled"]),
+                        "superseded": int(self._records_ttl_s["superseded"]),
                     },
                     "prune_interval_s": int(self._records_prune_interval_s),
                     "pruned_total": int(self._records_pruned_total),
@@ -669,6 +878,91 @@ class AsrPoolService:
         except ValueError:
             return
 
+    @staticmethod
+    def _consumer_id_from_request(request: dict[str, Any]) -> str:
+        ctx = dict(request.get("context") or {})
+        raw = str(ctx.get("consumer_id") or "").strip()
+        return raw or "unknown"
+
+    @staticmethod
+    def _extract_live_metadata(request: dict[str, Any]) -> tuple[str, int | None]:
+        ctx = dict(request.get("context") or {})
+        source_kind = str(ctx.get("source_kind") or "").strip().lower()
+        if source_kind != "live_chunk":
+            return "", None
+        session_id = str(ctx.get("live_session_id") or "").strip()
+        if not session_id:
+            return "", None
+        try:
+            chunk_index = int(ctx.get("live_chunk_index"))
+        except Exception:
+            chunk_index = None
+        if chunk_index is not None:
+            chunk_index = int(max(0, chunk_index))
+        return session_id, chunk_index
+
+    @staticmethod
+    def _live_key(session_id: str) -> str:
+        # v3 scope: one live lane only.
+        return f"{str(session_id)}|single"
+
+    def _clear_live_queue_pointer_if_matches(self, rec: _Record) -> None:
+        if not rec.live_session_id:
+            return
+        key = self._live_key(rec.live_session_id)
+        current = str(self._live_queued_request_id.get(key) or "")
+        if current == str(rec.request_id):
+            self._live_queued_request_id.pop(key, None)
+
+    def _completion_event_for_record(self, rec: _Record) -> dict[str, Any]:
+        self._completion_seq_next = int(max(1, int(self._completion_seq_next))) + 1
+        seq = int(self._completion_seq_next - 1)
+        return {
+            "seq": seq,
+            "ts_utc": _iso_utc(),
+            "consumer_id": str(rec.consumer_id or "unknown"),
+            "request_id": str(rec.request_id),
+            "state": str(rec.state),
+            "profile_id": str(rec.profile_id),
+            "priority": str(rec.priority),
+            "live_lane": str(rec.live_lane or "single"),
+            "live_session_id": str(rec.live_session_id or ""),
+            "live_chunk_index": rec.live_chunk_index,
+            "submitted_at_utc": rec.submitted_at_utc,
+            "started_at_utc": rec.started_at_utc,
+            "finished_at_utc": rec.finished_at_utc,
+            "retryable": rec.retryable,
+            "response": rec.response,
+            "error": rec.error,
+            "context": dict((rec.request or {}).get("context") or {}),
+        }
+
+    def _append_completion_event_unlocked(self, rec: _Record) -> None:
+        event = self._completion_event_for_record(rec)
+        self._completion_events.append(event)
+        while len(self._completion_events) > int(self._completion_events_max):
+            self._completion_events.popleft()
+
+    def _mark_record_terminal_unlocked(
+        self,
+        rec: _Record,
+        *,
+        state: str,
+        error: dict[str, Any] | None = None,
+        response: dict[str, Any] | None = None,
+        stage: str | None = None,
+        retryable: bool | None = None,
+    ) -> None:
+        rec.state = str(state)
+        rec.finished_at_utc = _iso_utc()
+        rec.stage = str(stage or state)
+        rec.stage_started_at_utc = rec.finished_at_utc
+        rec.response = dict(response or {}) if response is not None else None
+        rec.error = dict(error or {}) if error is not None else None
+        rec.retryable = retryable
+        self._clear_live_queue_pointer_if_matches(rec)
+        self._append_completion_event_unlocked(rec)
+
     def _to_lifecycle(self, rec: _Record) -> dict[str, Any]:
         queue_position = None
         if rec.state == "queued":
@@ -683,6 +977,10 @@ class AsrPoolService:
             "state": rec.state,
             "profile_id": rec.profile_id,
             "priority": rec.priority,
+            "consumer_id": str(rec.consumer_id or "unknown"),
+            "live_lane": str(rec.live_lane or "single"),
+            "live_session_id": str(rec.live_session_id or ""),
+            "live_chunk_index": rec.live_chunk_index,
             "queue_position": queue_position,
             "submitted_at_utc": rec.submitted_at_utc,
             "started_at_utc": rec.started_at_utc,
@@ -727,7 +1025,7 @@ class AsrPoolService:
         removable_by_ttl: list[str] = []
         for rid, rec in self._records.items():
             state = str(rec.state or "").strip().lower()
-            if state not in {"completed", "failed", "cancelled"}:
+            if state not in {"completed", "failed", "cancelled", "superseded"}:
                 continue
             ttl_s = int(self._records_ttl_s.get(state, 0))
             if ttl_s <= 0:
@@ -746,7 +1044,7 @@ class AsrPoolService:
             terminal_rows: list[tuple[float, str]] = []
             for rid, rec in self._records.items():
                 state = str(rec.state or "").strip().lower()
-                if state not in {"completed", "failed", "cancelled"}:
+                if state not in {"completed", "failed", "cancelled", "superseded"}:
                     continue
                 ref_unix = _parse_utc_unix(rec.finished_at_utc) or _parse_utc_unix(rec.submitted_at_utc) or now_unix
                 terminal_rows.append((float(ref_unix), str(rid)))
@@ -833,6 +1131,7 @@ class AsrPoolService:
                 rec.started_at_utc = _iso_utc()
                 rec.stage = "dispatch"
                 rec.stage_started_at_utc = rec.started_at_utc
+                self._clear_live_queue_pointer_if_matches(rec)
                 request = dict(rec.request)
                 timeout_s = int(self._timeouts_s.get(rec.priority, 120))
                 queue_wait_s = _seconds_between_utc(rec.submitted_at_utc, rec.started_at_utc)
@@ -896,20 +1195,24 @@ class AsrPoolService:
                 rec2 = self._records.get(rid)
                 if rec2 is None:
                     continue
-                rec2.finished_at_utc = _iso_utc()
-                rec2.stage = "completed" if ok else "failed"
-                rec2.stage_started_at_utc = rec2.finished_at_utc
                 if rec2.state == "cancel_requested":
-                    rec2.state = "cancelled"
-                    rec2.response = None
-                    rec2.error = None
-                    rec2.retryable = None
-                    rec2.stage = "cancelled"
+                    self._mark_record_terminal_unlocked(
+                        rec2,
+                        state="cancelled",
+                        stage="cancelled",
+                        retryable=None,
+                    )
                 else:
-                    rec2.response = dict(response)
-                    rec2.error = dict(response.get("error") or {}) if not ok else None
-                    rec2.retryable = bool((rec2.error or {}).get("retryable", False)) if not ok else None
-                    rec2.state = "completed" if ok else "failed"
+                    err_obj = dict(response.get("error") or {}) if not ok else None
+                    retryable = bool((err_obj or {}).get("retryable", False)) if not ok else None
+                    self._mark_record_terminal_unlocked(
+                        rec2,
+                        state=("completed" if ok else "failed"),
+                        stage=("completed" if ok else "failed"),
+                        response=dict(response),
+                        error=err_obj,
+                        retryable=retryable,
+                    )
                 runtime_meta = dict((rec2.response or {}).get("runtime") or {})
                 err = dict(rec2.error or {})
                 exec_s = _seconds_between_utc(rec2.started_at_utc, rec2.finished_at_utc)
@@ -1024,6 +1327,36 @@ async def get_asr_request(request_id: str, _auth: None = Depends(_auth_guard)) -
 @app.post("/asr/v1/requests/{request_id}/cancel")
 async def cancel_asr_request(request_id: str, _auth: None = Depends(_auth_guard)) -> JSONResponse:
     status_code, body = await POOL.cancel(request_id)
+    return JSONResponse(status_code=int(status_code), content=body)
+
+
+@app.get("/asr/v1/completions")
+async def get_asr_completions(
+    consumer_id: str = Query(default=""),
+    since_seq: int = Query(default=0),
+    limit: int = Query(default=100),
+    _auth: None = Depends(_auth_guard),
+) -> JSONResponse:
+    status_code, body = await POOL.completions(
+        consumer_id=str(consumer_id),
+        since_seq=int(since_seq),
+        limit=int(limit),
+    )
+    return JSONResponse(status_code=int(status_code), content=body)
+
+
+@app.get("/asr/v1/pending-status")
+async def get_asr_pending_status(
+    consumer_id: str = Query(default=""),
+    request_id: list[str] = Query(default=[]),
+    limit: int = Query(default=200),
+    _auth: None = Depends(_auth_guard),
+) -> JSONResponse:
+    status_code, body = await POOL.pending_status(
+        consumer_id=str(consumer_id),
+        request_ids=[str(v) for v in list(request_id or [])],
+        limit=int(limit),
+    )
     return JSONResponse(status_code=int(status_code), content=body)
 
 

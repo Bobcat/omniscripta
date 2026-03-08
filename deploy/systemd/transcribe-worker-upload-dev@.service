@@ -1,6 +1,6 @@
-# User unit (systemctl --user). Template so you can run multiple workers: transcribe-worker-dev@1, @2, ...
+# User unit (systemctl --user). Upload-only worker template.
 [Unit]
-Description=Transcribe Dev Worker (%i)
+Description=Transcribe Dev Worker Upload (%i)
 
 [Service]
 Type=simple

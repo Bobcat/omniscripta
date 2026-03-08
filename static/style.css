@@ -2773,6 +2773,27 @@
       white-space: pre-wrap;
     }
 
+    .live-softbreak-gap {
+      display: block;
+      height: 0.32em;
+    }
+
+    .live-softbreak-gap-speaker {
+      height: 0.72em;
+    }
+
+    .live-speaker-label {
+      display: block;
+      font-style: italic;
+      font-size: 1em;
+      color: inherit;
+      font-family: inherit;
+      font-weight: inherit;
+      line-height: inherit;
+      margin: 0;
+      user-select: none;
+    }
+
     .live-final-text-preview {
       color: #8b8f98;
       font-style: italic;

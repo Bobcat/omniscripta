@@ -48,17 +48,6 @@ def _read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _is_speaker_lines_parse_error(status: dict[str, Any], err: str) -> bool:
-    text = str(err or status.get("error") or "").strip().lower()
-    if not text:
-        return False
-    if "speaker_lines" not in text or "parseable" not in text:
-        return False
-    speaker_mode = str(status.get("speaker_mode") or "").strip().lower()
-    subphase = str(status.get("subphase") or "").strip().lower()
-    return speaker_mode in {"none", ""} or subphase == "chunk_speaker_lines"
-
-
 def _pick_srt_result_path(job_dir: Path, status: dict[str, Any]) -> Path | None:
     srt_name = str(status.get("srt_filename") or "").strip()
     whisperx_dir = (job_dir / "whisperx").resolve()
@@ -276,7 +265,8 @@ class LiveChunkBatchBridge:
                 "live_chunk_t0_ms": int(max(0, t0_ms)),
                 "live_chunk_t1_ms": int(max(max(0, t0_ms), t1_ms)),
                 "initial_prompt": prompt_text if prompt_text else None,
-                "live_lane": str(live_lane or "final"),
+                # v3 scope: one hardcoded live lane.
+                "live_lane": str(live_lane or "single"),
                 "preview_seq": (
                     int(max(0, preview_seq)) if preview_seq is not None else None
                 ),
@@ -310,17 +300,18 @@ class LiveChunkBatchBridge:
             raise FileNotFoundError(f"status.json missing for job: {job_id}")
         status = _read_json(status_path)
         state = str(status.get("state") or "")
-        done = state in {"done", "error"}
+        done = state in {"done", "error", "superseded"}
         ok = state == "done"
         err = str(status.get("error") or "")
+        if state == "superseded" and not err:
+            err = "superseded"
         srt_text = ""
         plain = ""
         segments: list[dict[str, Any]] = []
 
         # Primary result path: status == done and points to SRT.
-        # Fallback path: some chunk jobs fail late on speaker_lines parsing while an SRT already exists.
         srt_path: Path | None = None
-        if ok or (done and _is_speaker_lines_parse_error(status, err)):
+        if ok:
             srt_path = _pick_srt_result_path(job_dir, status)
         if srt_path is not None and srt_path.exists():
             srt_text = srt_path.read_text(encoding="utf-8")
@@ -330,19 +321,6 @@ class LiveChunkBatchBridge:
             )
             if not plain:
                 plain = _srt_to_plain_text(srt_text)
-            if (not ok) and done and _is_speaker_lines_parse_error(status, err) and (plain.strip() or segments):
-                ok = True
-                state = "done_fallback_srt"
-                err = ""
-
-        # Some short/empty chunk jobs fail late on speaker_lines generation while transcript output is empty.
-        # For live chunk mode this should not poison the whole session result.
-        if (not ok) and done and _is_speaker_lines_parse_error(status, err):
-            transcript_end = str(status.get("transcript_end") or "").strip()
-            if transcript_end in {"", "00:00:00", "0:00:00"} and not plain.strip() and not segments:
-                ok = True
-                state = "done_empty_chunk"
-                err = ""
 
         return ChunkJobPollResult(
             job_id=str(job_id),

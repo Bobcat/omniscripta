@@ -18,10 +18,13 @@
   
   "live": {
     "rolling": {
-      "poll_interval_ms": 250,
       "min_infer_audio_ms": 1000,
       "force_commit_repeats": 3
     }
+  },
+
+  "polling_intervals": {
+    "live_rolling_poll_ms": 250
   },
   
   "janitor": {

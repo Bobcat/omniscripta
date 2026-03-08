@@ -5,7 +5,7 @@ import random
 import sys
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 from urllib import error as urlerror
 from urllib import parse as urlparse
 from urllib import request as urlrequest
@@ -47,19 +47,6 @@ def _build_error_response(
 def _pool_base_url() -> str:
   raw = get_str("asr_pool.base_url", "http://127.0.0.1:8090")
   return raw.rstrip("/")
-
-
-def _priority_timeout_s(priority: str) -> int:
-  p = str(priority or "").strip().lower()
-  if p == "interactive":
-    return get_int("asr_remote.timeout_interactive_s", 60, min_value=1)
-  if p == "background":
-    return get_int("asr_remote.timeout_background_s", 420, min_value=1)
-  return get_int("asr_remote.timeout_normal_s", 180, min_value=1)
-
-
-def _poll_interval_s() -> float:
-  return get_float("asr_remote.poll_interval_s", 0.2, min_value=0.05)
 
 
 def _http_timeout_s() -> float:
@@ -182,128 +169,82 @@ def _http_json_with_retry(
   return 500, {}, int(max_attempts)
 
 
-def _terminal_response_from_lifecycle(
-  *,
-  request_payload: dict[str, Any],
-  lifecycle: dict[str, Any],
-  pool_base_url: str,
-) -> dict[str, Any] | None:
-  state = str(lifecycle.get("state") or "").strip().lower()
-  if state in {"queued", "running"}:
-    return None
-
-  if state == "completed":
-    response = dict(lifecycle.get("response") or {})
-    if response:
-      runtime = dict(response.get("runtime") or {})
-      runtime["transport"] = "remote"
-      runtime["pool_base_url"] = pool_base_url
-      response["runtime"] = runtime
-      return response
-    return _build_error_response(
-      request=request_payload,
-      code="ASR_REMOTE_MISSING_RESPONSE",
-      message="ASR pool completed without response payload",
-      retryable=True,
-      details={"state": state},
-    )
-
-  if state == "failed":
-    response = dict(lifecycle.get("response") or {})
-    if response:
-      runtime = dict(response.get("runtime") or {})
-      runtime["transport"] = "remote"
-      runtime["pool_base_url"] = pool_base_url
-      response["runtime"] = runtime
-      return response
-    err = dict(lifecycle.get("error") or {})
-    return _build_error_response(
-      request=request_payload,
-      code=str(err.get("code") or "ASR_REMOTE_FAILED"),
-      message=str(err.get("message") or "ASR pool request failed"),
-      retryable=bool(err.get("retryable", True)),
-      details=dict(err.get("details") or {}),
-    )
-
-  if state in {"cancel_requested", "cancelled"}:
-    return _build_error_response(
-      request=request_payload,
-      code="ASR_REMOTE_CANCELLED",
-      message=f"ASR pool request {state}",
-      retryable=True,
-      details={"state": state},
-    )
-
-  return _build_error_response(
-    request=request_payload,
-    code="ASR_REMOTE_UNKNOWN_STATE",
-    message=f"ASR pool returned unknown lifecycle state: {state or '<empty>'}",
-    retryable=True,
-    details={"state": state},
-  )
-
-
-def transcribe_with_remote_pool(
-  *,
-  request_payload: dict[str, Any],
-  on_lifecycle_update: Callable[[dict[str, Any]], None] | None = None,
-) -> dict[str, Any]:
+def _with_consumer_id(request_payload: dict[str, Any], *, consumer_id: str) -> dict[str, Any]:
   req = dict(request_payload or {})
+  ctx = dict(req.get("context") or {})
+  cid = str(consumer_id or "").strip()
+  if cid:
+    ctx["consumer_id"] = cid
+  req["context"] = ctx
+  return req
+
+
+def _prepare_submit_payload(
+  *,
+  request_payload: dict[str, Any],
+  consumer_id: str,
+) -> tuple[dict[str, Any], dict[str, Any] | None, dict[str, Any] | None]:
+  req = _with_consumer_id(dict(request_payload or {}), consumer_id=consumer_id)
   request_id = str(req.get("request_id") or "").strip()
-  priority = str(req.get("priority") or "normal").strip().lower() or "normal"
+  pool_base_url = _pool_base_url()
+  blob_meta: dict[str, Any] | None = None
+  if not get_bool("asr_remote.blob_enabled", True):
+    return req, blob_meta, None
+  audio = dict(req.get("audio") or {})
+  local_path = str(audio.get("local_path") or "").strip()
+  if not local_path:
+    return req, blob_meta, None
+  try:
+    blob_ref, blob_info = upload_local_path_as_blob_ref(
+      local_path=Path(local_path),
+      request_id=(request_id or f"req_{int(time.time() * 1000)}"),
+    )
+    audio.pop("local_path", None)
+    audio["blob_ref"] = str(blob_ref)
+    req["audio"] = audio
+    blob_meta = dict(blob_info or {})
+    cleanup_blob_store_if_due()
+    return req, blob_meta, None
+  except Exception as e:
+    return req, None, _build_error_response(
+      request=req,
+      code="ASR_REMOTE_BLOB_UPLOAD_FAILED",
+      message=f"Failed to upload audio blob for remote ASR: {type(e).__name__}: {e}",
+      retryable=True,
+      details={"exc_type": type(e).__name__, "request_id": request_id, "pool_base_url": pool_base_url},
+    )
+
+
+def submit_remote_pool_request(
+  *,
+  request_payload: dict[str, Any],
+  consumer_id: str,
+) -> dict[str, Any]:
+  req, _blob_meta, prep_error = _prepare_submit_payload(
+    request_payload=request_payload,
+    consumer_id=consumer_id,
+  )
+  if prep_error is not None:
+    return {
+      "ok": False,
+      "request_id": str(req.get("request_id") or ""),
+      "prepared_request": req,
+      "error_response": prep_error,
+      "submit_lifecycle": {},
+      "http_status": 0,
+    }
+
   pool_base_url = _pool_base_url()
   token = get_str("asr_pool.token", "")
-  timeout_s = _priority_timeout_s(priority)
-  poll_interval_s = _poll_interval_s()
   http_timeout_s = _http_timeout_s()
   retry_attempts = _retry_attempts()
   retry_base_delay_s = _retry_base_delay_s()
   retry_max_delay_s = max(retry_base_delay_s, _retry_max_delay_s())
   retry_jitter_s = _retry_jitter_s()
-  blob_meta: dict[str, Any] | None = None
-  submit_attempts_used = 1
-  status_attempts_total = 0
-  status_http_calls = 0
-  cancel_attempts_used = 0
-
-  if get_bool("asr_remote.blob_enabled", True):
-    audio = dict(req.get("audio") or {})
-    local_path = str(audio.get("local_path") or "").strip()
-    if local_path:
-      try:
-        blob_ref, blob_info = upload_local_path_as_blob_ref(
-          local_path=Path(local_path),
-          request_id=(request_id or f"req_{int(time.time() * 1000)}"),
-        )
-        audio.pop("local_path", None)
-        audio["blob_ref"] = str(blob_ref)
-        req["audio"] = audio
-        blob_meta = dict(blob_info or {})
-        cleanup_blob_store_if_due()
-      except Exception as e:
-        return _build_error_response(
-          request=req,
-          code="ASR_REMOTE_BLOB_UPLOAD_FAILED",
-          message=f"Failed to upload audio blob for remote ASR: {type(e).__name__}: {e}",
-          retryable=True,
-          details={"exc_type": type(e).__name__, "request_id": request_id, "pool_base_url": pool_base_url},
-        )
-
-  def _annotate_remote_runtime(response: dict[str, Any]) -> dict[str, Any]:
-    out = dict(response or {})
-    runtime = dict(out.get("runtime") or {})
-    runtime["remote_retry_attempts_config"] = int(retry_attempts)
-    runtime["remote_submit_attempts"] = int(submit_attempts_used)
-    runtime["remote_status_attempts_total"] = int(status_attempts_total)
-    runtime["remote_status_http_calls"] = int(status_http_calls)
-    if cancel_attempts_used > 0:
-      runtime["remote_cancel_attempts"] = int(cancel_attempts_used)
-    out["runtime"] = runtime
-    return out
-
+  request_id = str(req.get("request_id") or "").strip()
   submit_url = urlparse.urljoin(pool_base_url + "/", "asr/v1/requests")
   try:
-    status_code, submit_body, submit_attempts_used = _http_json_with_retry(
+    status_code, submit_body, attempts_used = _http_json_with_retry(
       method="POST",
       url=submit_url,
       token=token,
@@ -315,157 +256,164 @@ def transcribe_with_remote_pool(
       jitter_s=retry_jitter_s,
     )
   except Exception as e:
-    return _build_error_response(
-      request=req,
-      code="ASR_REMOTE_SUBMIT_IO_FAILURE",
-      message=f"ASR pool submit I/O failed: {type(e).__name__}: {e}",
-      retryable=True,
-      details={
-        "pool_base_url": pool_base_url,
-        "request_id": request_id,
-        "attempts": int(retry_attempts),
-        "http_timeout_s": float(http_timeout_s),
-        "exc_type": type(e).__name__,
-      },
-    )
-  if status_code not in {200, 202}:
-    return _build_error_response(
-      request=req,
-      code=str(submit_body.get("code") or "ASR_REMOTE_SUBMIT_FAILED"),
-      message=str(submit_body.get("message") or f"ASR pool submit failed with HTTP {status_code}"),
-      retryable=bool(submit_body.get("retryable", True)),
-      details={
-        "http_status": int(status_code),
-        "pool_base_url": pool_base_url,
-        "request_id": request_id,
-        "submit_attempts": int(submit_attempts_used),
-        **dict(submit_body.get("details") or {}),
-      },
-    )
-
-  terminal = _terminal_response_from_lifecycle(
-    request_payload=req,
-    lifecycle=submit_body,
-    pool_base_url=pool_base_url,
-  )
-  if terminal is not None:
-    if blob_meta is not None and isinstance(terminal, dict):
-      runtime = dict(terminal.get("runtime") or {})
-      runtime["blob_ref_used"] = True
-      runtime["blob_ref"] = str(blob_meta.get("blob_ref") or "")
-      terminal["runtime"] = runtime
-    return _annotate_remote_runtime(terminal)
-
-  rid = str(submit_body.get("request_id") or request_id or "").strip()
-  if not rid:
-    return _build_error_response(
-      request=req,
-      code="ASR_REMOTE_MISSING_REQUEST_ID",
-      message="ASR pool submit response missing request_id",
-      retryable=True,
-      details={"pool_base_url": pool_base_url},
-    )
-  if callable(on_lifecycle_update):
-    try:
-      on_lifecycle_update(dict(submit_body or {}))
-    except Exception:
-      pass
-
-  get_url = urlparse.urljoin(pool_base_url + "/", f"asr/v1/requests/{rid}")
-  cancel_url = urlparse.urljoin(pool_base_url + "/", f"asr/v1/requests/{rid}/cancel")
-  deadline = time.monotonic() + float(timeout_s)
-  last_state = "queued"
-  while time.monotonic() < deadline:
-    time.sleep(poll_interval_s)
-    try:
-      status_code, body, status_attempts_used = _http_json_with_retry(
-        method="GET",
-        url=get_url,
-        token=token,
-        timeout_s=http_timeout_s,
-        payload=None,
-        attempts=retry_attempts,
-        backoff_base_s=retry_base_delay_s,
-        backoff_max_s=retry_max_delay_s,
-        jitter_s=retry_jitter_s,
-      )
-      status_attempts_total += int(status_attempts_used)
-      status_http_calls += 1
-    except Exception as e:
-      return _build_error_response(
+    return {
+      "ok": False,
+      "request_id": str(request_id),
+      "prepared_request": req,
+      "error_response": _build_error_response(
         request=req,
-        code="ASR_REMOTE_STATUS_IO_FAILURE",
-        message=f"ASR pool status I/O failed: {type(e).__name__}: {e}",
+        code="ASR_REMOTE_SUBMIT_IO_FAILURE",
+        message=f"ASR pool submit I/O failed: {type(e).__name__}: {e}",
         retryable=True,
         details={
-          "request_id": rid,
           "pool_base_url": pool_base_url,
+          "request_id": request_id,
           "attempts": int(retry_attempts),
           "http_timeout_s": float(http_timeout_s),
           "exc_type": type(e).__name__,
         },
-      )
-    if status_code != 200:
-      return _build_error_response(
+      ),
+      "submit_lifecycle": {},
+      "http_status": 0,
+    }
+  if status_code not in {200, 202}:
+    return {
+      "ok": False,
+      "request_id": str(request_id),
+      "prepared_request": req,
+      "error_response": _build_error_response(
         request=req,
-        code=str(body.get("code") or "ASR_REMOTE_STATUS_FAILED"),
-        message=str(body.get("message") or f"ASR pool status failed with HTTP {status_code}"),
-        retryable=bool(body.get("retryable", True)),
+        code=str(submit_body.get("code") or "ASR_REMOTE_SUBMIT_FAILED"),
+        message=str(submit_body.get("message") or f"ASR pool submit failed with HTTP {status_code}"),
+        retryable=bool(submit_body.get("retryable", True)),
         details={
           "http_status": int(status_code),
-          "request_id": rid,
           "pool_base_url": pool_base_url,
-          "status_attempts": int(status_attempts_used),
-          **dict(body.get("details") or {}),
+          "request_id": request_id,
+          "submit_attempts": int(attempts_used),
+          **dict(submit_body.get("details") or {}),
         },
-      )
-    last_state = str(body.get("state") or last_state)
-    if callable(on_lifecycle_update):
-      try:
-        on_lifecycle_update(dict(body or {}))
-      except Exception:
-        pass
-    terminal = _terminal_response_from_lifecycle(
-      request_payload=req,
-      lifecycle=body,
-      pool_base_url=pool_base_url,
-    )
-    if terminal is not None:
-      if blob_meta is not None and isinstance(terminal, dict):
-        runtime = dict(terminal.get("runtime") or {})
-        runtime["blob_ref_used"] = True
-        runtime["blob_ref"] = str(blob_meta.get("blob_ref") or "")
-        terminal["runtime"] = runtime
-      return _annotate_remote_runtime(terminal)
+      ),
+      "submit_lifecycle": dict(submit_body or {}),
+      "http_status": int(status_code),
+    }
 
+  rid = str(submit_body.get("request_id") or request_id or "").strip()
+  return {
+    "ok": True,
+    "request_id": rid,
+    "prepared_request": req,
+    "submit_lifecycle": dict(submit_body or {}),
+    "http_status": int(status_code),
+  }
+
+
+def fetch_remote_completions(
+  *,
+  consumer_id: str,
+  since_seq: int,
+  limit: int = 100,
+) -> dict[str, Any]:
+  pool_base_url = _pool_base_url()
+  token = get_str("asr_pool.token", "")
+  http_timeout_s = _http_timeout_s()
+  retry_attempts = _retry_attempts()
+  retry_base_delay_s = _retry_base_delay_s()
+  retry_max_delay_s = max(retry_base_delay_s, _retry_max_delay_s())
+  retry_jitter_s = _retry_jitter_s()
+  query = urlparse.urlencode(
+    {
+      "consumer_id": str(consumer_id or ""),
+      "since_seq": int(max(0, int(since_seq))),
+      "limit": int(max(1, min(1000, int(limit)))),
+    }
+  )
+  url = urlparse.urljoin(pool_base_url + "/", f"asr/v1/completions?{query}")
   try:
-    _status_ignored, _body_ignored, cancel_attempts_used = _http_json_with_retry(
-      method="POST",
-      url=cancel_url,
+    status_code, body, _attempts_used = _http_json_with_retry(
+      method="GET",
+      url=url,
       token=token,
       timeout_s=http_timeout_s,
-      payload={},
+      payload=None,
       attempts=retry_attempts,
       backoff_base_s=retry_base_delay_s,
       backoff_max_s=retry_max_delay_s,
       jitter_s=retry_jitter_s,
     )
-  except Exception:
-    cancel_attempts_used = int(retry_attempts)
-  return _build_error_response(
-    request=req,
-    code="ASR_REMOTE_TIMEOUT",
-    message=f"Timed out waiting for ASR pool response ({timeout_s}s)",
-    retryable=True,
-    details={
-      "request_id": rid,
-      "priority": priority,
-      "pool_base_url": pool_base_url,
-      "last_state": last_state,
-      "timeout_s": int(timeout_s),
-      "submit_attempts": int(submit_attempts_used),
-      "status_attempts_total": int(status_attempts_total),
-      "status_http_calls": int(status_http_calls),
-      "cancel_attempts": int(cancel_attempts_used),
+  except Exception as e:
+    return {
+      "ok": False,
+      "status_code": 0,
+      "body": {
+        "code": "ASR_REMOTE_COMPLETIONS_IO_FAILURE",
+        "message": f"ASR pool completions I/O failed: {type(e).__name__}: {e}",
+        "retryable": True,
+      },
+    }
+  return {
+    "ok": bool(int(status_code) == 200),
+    "status_code": int(status_code),
+    "body": dict(body or {}),
+  }
+
+
+def fetch_remote_pending_status(
+  *,
+  consumer_id: str,
+  request_ids: list[str],
+  limit: int = 200,
+) -> dict[str, Any]:
+  pool_base_url = _pool_base_url()
+  token = get_str("asr_pool.token", "")
+  http_timeout_s = _http_timeout_s()
+  retry_attempts = _retry_attempts()
+  retry_base_delay_s = _retry_base_delay_s()
+  retry_max_delay_s = max(retry_base_delay_s, _retry_max_delay_s())
+  retry_jitter_s = _retry_jitter_s()
+  clean_ids: list[str] = []
+  seen: set[str] = set()
+  for raw in list(request_ids or []):
+    rid = str(raw or "").strip()
+    if not rid or rid in seen:
+      continue
+    seen.add(rid)
+    clean_ids.append(rid)
+    if len(clean_ids) >= int(max(1, min(1000, int(limit)))):
+      break
+  query = urlparse.urlencode(
+    {
+      "consumer_id": str(consumer_id or ""),
+      "limit": int(max(1, min(1000, int(limit)))),
+      "request_id": clean_ids,
     },
+    doseq=True,
   )
+  url = urlparse.urljoin(pool_base_url + "/", f"asr/v1/pending-status?{query}")
+  try:
+    status_code, body, _attempts_used = _http_json_with_retry(
+      method="GET",
+      url=url,
+      token=token,
+      timeout_s=http_timeout_s,
+      payload=None,
+      attempts=retry_attempts,
+      backoff_base_s=retry_base_delay_s,
+      backoff_max_s=retry_max_delay_s,
+      jitter_s=retry_jitter_s,
+    )
+  except Exception as e:
+    return {
+      "ok": False,
+      "status_code": 0,
+      "body": {
+        "code": "ASR_REMOTE_PENDING_STATUS_IO_FAILURE",
+        "message": f"ASR pool pending status I/O failed: {type(e).__name__}: {e}",
+        "retryable": True,
+      },
+    }
+  return {
+    "ok": bool(int(status_code) == 200),
+    "status_code": int(status_code),
+    "body": dict(body or {}),
+  }

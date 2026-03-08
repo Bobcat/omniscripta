@@ -226,7 +226,7 @@
     const s = [state, phase].filter(Boolean).join(" / ");
     // strip accidental "(..%)" suffixes in message if any remain
     const cleanMsg = (msg || "").replace(/\s*\(\d+%\)\s*$/, "");
-    statusLine.textContent = (cleanMsg ? `${s} — ${cleanMsg}` : s) || "idle";
+    statusLine.textContent = (cleanMsg ? `${s} - ${cleanMsg}` : s) || "idle";
   }
 
   function setStatePill(txt){

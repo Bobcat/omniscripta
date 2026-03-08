@@ -167,12 +167,24 @@ def _write_json_atomic(path: Path, obj: Any) -> None:
 
 RUNNING = BASE / "running"
 
-def claim_next_job() -> JobPaths | None:
+def _job_kind_from_job_json(job_dir: Path) -> str:
+    job_path = (job_dir / "job.json").resolve()
+    try:
+        raw = json.loads(job_path.read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    if not isinstance(raw, dict):
+        return ""
+    return str(raw.get("job_kind") or "").strip().lower()
+
+
+def claim_next_job(*, job_kind_filter: str | None = None) -> JobPaths | None:
     """
     Pakt de oudste job uit INBOX en verplaatst atomically naar RUNNING.
     Returnt JobPaths of None als de queue leeg is.
     """
     RUNNING.mkdir(parents=True, exist_ok=True)
+    wanted = str(job_kind_filter or "").strip().lower()
 
     # Alleen echte job dirs, geen tmp
     candidates = sorted(
@@ -183,6 +195,10 @@ def claim_next_job() -> JobPaths | None:
         return None
 
     for job_dir in candidates:
+        if wanted:
+            kind = _job_kind_from_job_json(job_dir)
+            if kind != wanted:
+                continue
         target = RUNNING / job_dir.name
         try:
             os.replace(job_dir, target)  # atomic claim
