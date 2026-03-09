@@ -127,6 +127,22 @@ def ended_event(
     return payload
 
 
+def result_event(
+    session_id: str,
+    *,
+    envelope: dict[str, Any],
+    seq: int | None = None,
+) -> dict[str, Any]:
+    payload = dict(envelope or {})
+    payload["type"] = "result"
+    payload["protocol_version"] = PROTOCOL_VERSION
+    payload["session_id"] = str(session_id)
+    payload["ts_utc"] = utc_iso_now()
+    if seq is not None:
+        payload["seq"] = int(seq)
+    return payload
+
+
 def parse_client_message(raw: str) -> tuple[str | None, dict[str, Any], str | None]:
     text = str(raw or "")
     try:

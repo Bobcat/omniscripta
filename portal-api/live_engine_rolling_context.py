@@ -1,19 +1,23 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
+from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from fastapi import WebSocket, WebSocketDisconnect, status
 
 from live_chunk_transcribe import LiveChunkBatchBridge
 from live_protocol import (
+    PROTOCOL_VERSION,
     control_ack_event,
     ended_event,
     error_event,
     parse_client_message,
     pong_event,
     ready_event,
+    result_event,
     stats_event,
 )
 from live_recordings import LiveWavRecorder
@@ -185,6 +189,7 @@ async def run_live_session_ws_rolling_context(
         "stale_completion_ignored_count": 0,
         "superseded_completion_count": 0,
     }
+    last_result_event_signature = ""
 
     async def send_event(payload: dict[str, Any]) -> None:
         out = dict(payload)
@@ -193,6 +198,60 @@ async def run_live_session_ws_rolling_context(
         except KeyError:
             pass
         await websocket.send_json(out)
+
+    def _result_envelope_from_snapshot(result_snapshot: dict[str, Any]) -> dict[str, Any]:
+        result = dict(result_snapshot or {})
+        effective_engine = str(result.get("live_engine") or LIVE_ENGINE)
+        result["live_engine"] = effective_engine
+        final_segments = result.get("final_segments")
+        has_segments = isinstance(final_segments, list) and any(isinstance(s, dict) for s in final_segments)
+
+        has_recording_wav = False
+        raw_recording_path = str(result.get("recording_path") or "").strip()
+        if raw_recording_path:
+            try:
+                wav_candidate = Path(raw_recording_path).expanduser().resolve()
+                has_recording_wav = wav_candidate.suffix.lower() == ".wav" and wav_candidate.is_file()
+            except Exception:
+                has_recording_wav = False
+
+        finalization_state = str(result.get("finalization_state") or "").strip().lower()
+        ready_states = {"ready", "finalized", "recording_finalized"}
+        if effective_engine == "rolling_context":
+            # Rolling is only ready when drain/final commit completed.
+            ready_states = {"ready", "finalized"}
+
+        return {
+            "protocol_version": PROTOCOL_VERSION,
+            "session_id": str(session_id),
+            "live_engine": effective_engine,
+            "result": result,
+            "ready": finalization_state in ready_states,
+            "can_export_srt": bool(has_segments),
+            "can_export_wav": bool(has_recording_wav),
+            "transcript_srt_url": _rooted_path(f"/demo/live/sessions/{session_id}/transcript.srt") if has_segments else None,
+            "recording_wav_url": _rooted_path(f"/demo/live/sessions/{session_id}/recording.wav") if has_recording_wav else None,
+        }
+
+    async def _emit_result_event(*, force: bool = False) -> None:
+        nonlocal last_result_event_signature
+        try:
+            result_snapshot = LIVE_SESSIONS.live_result_snapshot(session_id)
+        except Exception:
+            return
+        envelope = _result_envelope_from_snapshot(result_snapshot)
+        try:
+            signature = json.dumps(envelope, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        except Exception:
+            signature = ""
+        if not force and signature and signature == last_result_event_signature:
+            return
+        try:
+            await send_event(result_event(session_id, envelope=envelope))
+        except Exception:
+            return
+        if signature:
+            last_result_event_signature = signature
 
     def _append_log(kind: str, **fields: Any) -> None:
         try:
@@ -430,6 +489,10 @@ async def run_live_session_ws_rolling_context(
             except Exception:
                 pass
 
+    async def _update_state_and_emit_result(*, force_result: bool = False) -> None:
+        _update_state()
+        await _emit_result_event(force=force_result)
+
     def _archive_current_result(*, close_reason: str) -> dict[str, Any]:
         try:
             live_result = LIVE_SESSIONS.live_result_snapshot(session_id)
@@ -603,7 +666,7 @@ async def run_live_session_ws_rolling_context(
                 error=f"{type(e).__name__}: {e}",
             )
             finalization_state = "error"
-            _update_state()
+            await _update_state_and_emit_result()
             return
 
         rolling_infer_seq_next = infer_seq + 1
@@ -618,7 +681,7 @@ async def run_live_session_ws_rolling_context(
         }
         if finalization_state not in {"error", "ready"}:
             finalization_state = "processing_chunks"
-        _update_state()
+        await _update_state_and_emit_result()
         _append_log(
             "rolling_inference_enqueued",
             seq=int(infer_seq),
@@ -693,7 +756,7 @@ async def run_live_session_ws_rolling_context(
                 error="",
             )
             rolling_inflight.pop(seq, None)
-            _update_state()
+            await _update_state_and_emit_result()
             return
 
         if bool(poll.ok):
@@ -973,7 +1036,7 @@ async def run_live_session_ws_rolling_context(
         rolling_inflight.pop(seq, None)
         if finalization_state not in {"error", "ready"}:
             finalization_state = "recording" if str(recording_state or "") == "recording" else "processing_chunks"
-        _update_state()
+        await _update_state_and_emit_result()
 
     async def _process_rolling(*, force_poll: bool = False, force_emit: bool = False) -> None:
         await _poll_inference(force=force_poll)
@@ -1085,7 +1148,7 @@ async def run_live_session_ws_rolling_context(
             recording_bytes = int(rec_snap.bytes_written)
             recording_duration_ms = int(rec_snap.duration_ms)
             finalization_state = "recording"
-            _update_state()
+            await _update_state_and_emit_result(force_result=True)
             _append_log(
                 "rolling_context_started",
                 recording=rec_snap.to_dict(),
@@ -1115,7 +1178,7 @@ async def run_live_session_ws_rolling_context(
             recording_state = "error"
             finalization_state = "error"
             shadow_disabled_reason = f"rolling_init_failed:{type(e).__name__}"
-            _update_state()
+            await _update_state_and_emit_result(force_result=True)
             _append_log("rolling_context_init_error", error=f"{type(e).__name__}: {e}")
 
         while True:
@@ -1151,7 +1214,7 @@ async def run_live_session_ws_rolling_context(
                         except Exception:
                             pass
                         recorder = None
-                        _update_state()
+                        await _update_state_and_emit_result()
                 if raw:
                     rolling_pcm.extend(raw)
 
@@ -1217,14 +1280,14 @@ async def run_live_session_ws_rolling_context(
                 recording_state = "recording"
                 if finalization_state not in {"error", "ready"}:
                     finalization_state = "recording"
-                _update_state()
+                await _update_state_and_emit_result()
                 await send_event(control_ack_event(session_id, control_type="start", state=snapshot["state"]))
                 continue
 
             if control_type == "pause":
                 snapshot = LIVE_SESSIONS.mark_state(session_id, state="paused")
                 recording_state = "paused"
-                _update_state()
+                await _update_state_and_emit_result()
                 await send_event(control_ack_event(session_id, control_type="pause", state=snapshot["state"]))
                 continue
 
@@ -1233,7 +1296,7 @@ async def run_live_session_ws_rolling_context(
                 recording_state = "recording"
                 if finalization_state not in {"error", "ready"}:
                     finalization_state = "recording"
-                _update_state()
+                await _update_state_and_emit_result()
                 await send_event(control_ack_event(session_id, control_type="resume", state=snapshot["state"]))
                 continue
 
@@ -1244,7 +1307,7 @@ async def run_live_session_ws_rolling_context(
                     recording_state = "finalizing"
                 if finalization_state not in {"error", "ready"}:
                     finalization_state = "finalizing"
-                _update_state()
+                await _update_state_and_emit_result()
                 # Enqueue een laatste rolling inferentie en drain daarna alleen polls.
                 await _process_rolling(force_poll=True, force_emit=True)
                 wait_deadline = time.monotonic() + max(0.0, LIVE_DRAIN_WAIT_S)
@@ -1259,12 +1322,13 @@ async def run_live_session_ws_rolling_context(
                 _commit_preview_tail_if_needed()
                 if finalization_state != "error":
                     finalization_state = "ready"
-                _update_state()
+                await _update_state_and_emit_result(force_result=True)
                 try:
                     live_result = _archive_current_result(close_reason=stop_reason)
                     archived_result = True
                 except Exception:
                     live_result = {}
+                await _emit_result_event(force=True)
 
                 await send_event(
                     ended_event(
@@ -1318,13 +1382,14 @@ async def run_live_session_ws_rolling_context(
         _commit_preview_tail_if_needed()
         if finalization_state not in {"error", "ready"}:
             finalization_state = "ready"
-        _update_state()
+        await _update_state_and_emit_result(force_result=True)
 
         if not archived_result:
             try:
                 _archive_current_result(close_reason=stop_reason)
             except Exception:
                 pass
+        await _emit_result_event(force=True)
 
         LIVE_SESSIONS.close_session(session_id, reason=stop_reason)
         if recorder is not None and not recording_finalized:
