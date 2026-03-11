@@ -33,7 +33,6 @@
       "max_decode_window_ms": 12000,
       "buffer_trim_threshold_ms": 30000,
       "buffer_trim_drop_ms": 20000,
-      "max_outstanding_per_session": 1,
       "min_new_audio_ms": 1000
     }
   },

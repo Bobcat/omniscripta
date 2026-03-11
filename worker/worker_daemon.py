@@ -859,7 +859,7 @@ def _apply_upload_pending_status(*, pending: _PendingUploadJob, row: dict[str, A
 
 
 def _is_asr_terminal_state(state: str) -> bool:
-  return str(state or "").strip().lower() in {"completed", "failed", "cancelled", "superseded"}
+  return str(state or "").strip().lower() in {"completed", "failed", "cancelled"}
 
 
 def _upload_terminal_event_from_pending_row(*, request_id: str, row: dict[str, Any]) -> dict[str, Any]:
@@ -1175,20 +1175,6 @@ def _finalize_live_chunk_terminal(pending: _PendingLiveJob, event: dict[str, Any
     _finalize_live_chunk_completed(pending=pending, response=response)
     finish_job(job, ok=True)
     return
-  if state == "superseded":
-    err = dict(event.get("error") or {})
-    msg = str(err.get("message") or "Superseded by newer live request").strip()
-    _write_status(
-      job.status_path,
-      state="superseded",
-      phase="done",
-      progress=1.0,
-      finished_at=_utc_iso(),
-      message=msg,
-      error="",
-    )
-    finish_job(job, ok=True)
-    return
   err_obj = dict(event.get("error") or {})
   err_code = str(err_obj.get("code") or "ASR_REMOTE_TERMINAL_ERROR")
   err_msg = str(err_obj.get("message") or f"ASR terminal state: {state or 'unknown'}")
@@ -1381,7 +1367,7 @@ def _handle_live_submit_result(*, payload: dict[str, Any], pending: dict[str, _P
     job_cfg=job_cfg,
     job_t0_mono=job_t0,
   )
-  if lifecycle_state in {"completed", "failed", "cancelled", "superseded"}:
+  if lifecycle_state in {"completed", "failed", "cancelled"}:
     event = dict(lifecycle)
     event["request_id"] = request_id
     try:
@@ -1793,7 +1779,7 @@ def _prepare_upload_job_for_submit(
   )
   pending.asr_wait_message = wait_msg
   pending.progress_set_message(wait_msg, status_phase="whisperx_wait")
-  if lifecycle_state in {"completed", "failed", "cancelled", "superseded"}:
+  if lifecycle_state in {"completed", "failed", "cancelled"}:
     event = dict(submit_lifecycle)
     event["request_id"] = pending.request_id
     return event

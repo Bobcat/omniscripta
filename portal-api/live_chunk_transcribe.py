@@ -300,11 +300,9 @@ class LiveChunkBatchBridge:
             raise FileNotFoundError(f"status.json missing for job: {job_id}")
         status = _read_json(status_path)
         state = str(status.get("state") or "")
-        done = state in {"done", "error", "superseded"}
+        done = state in {"done", "error"}
         ok = state == "done"
         err = str(status.get("error") or "")
-        if state == "superseded" and not err:
-            err = "superseded"
         srt_text = ""
         plain = ""
         segments: list[dict[str, Any]] = []

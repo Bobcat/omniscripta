@@ -101,7 +101,6 @@ LIVE_ROLLING_BUFFER_TRIM_DROP_MS = max(
     LIVE_ROLLING_MIN_INFER_AUDIO_MS,
     get_int("live.rolling.buffer_trim_drop_ms", 20000, min_value=1000)
 )
-LIVE_ROLLING_MAX_OUTSTANDING_PER_SESSION = get_int("live.rolling.max_outstanding_per_session", 2, min_value=1)
 LIVE_ROLLING_MIN_NEW_AUDIO_MS = get_int("live.rolling.min_new_audio_ms", LIVE_ROLLING_MIN_INFER_AUDIO_MS, min_value=0)
 LIVE_ROLLING_MIN_EMIT_INTERVAL_MS = get_int(
     "polling_intervals.live_rolling_emit_min_ms",
@@ -138,7 +137,6 @@ def _live_engine_rolling_context_config() -> dict[str, Any]:
         "LIVE_ROLLING_MAX_DECODE_WINDOW_MS": LIVE_ROLLING_MAX_DECODE_WINDOW_MS,
         "LIVE_ROLLING_BUFFER_TRIM_THRESHOLD_MS": LIVE_ROLLING_BUFFER_TRIM_THRESHOLD_MS,
         "LIVE_ROLLING_BUFFER_TRIM_DROP_MS": LIVE_ROLLING_BUFFER_TRIM_DROP_MS,
-        "LIVE_ROLLING_MAX_OUTSTANDING_PER_SESSION": LIVE_ROLLING_MAX_OUTSTANDING_PER_SESSION,
         "LIVE_ROLLING_MIN_NEW_AUDIO_MS": LIVE_ROLLING_MIN_NEW_AUDIO_MS,
         "LIVE_ROLLING_MIN_EMIT_INTERVAL_MS": LIVE_ROLLING_MIN_EMIT_INTERVAL_MS,
     }

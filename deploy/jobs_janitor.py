@@ -156,7 +156,7 @@ def main() -> int:
             return 2
         entries = _collect_entries(state_dir=state_dir, state=state)
 
-        # Cleanup scope is by job_kind only; this includes done/live entries with status.state "superseded".
+        # Cleanup scope is by job_kind only.
         live_entries = [e for e in entries if e.job_kind in live_kinds]
         # Phase 1: TTL-based removal candidates.
         ttl_candidates = [
