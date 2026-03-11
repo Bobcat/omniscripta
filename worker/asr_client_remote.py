@@ -3,9 +3,10 @@ from __future__ import annotations
 import json
 import random
 import sys
+import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib import error as urlerror
 from urllib import parse as urlparse
 from urllib import request as urlrequest
@@ -67,6 +68,10 @@ def _retry_max_delay_s() -> float:
 
 def _retry_jitter_s() -> float:
   return get_float("asr_remote.retry_jitter_s", 0.1, min_value=0.0)
+
+
+def _stream_heartbeat_s() -> float:
+  return get_float("worker_events.sse_heartbeat_s", 10.0, min_value=1.0)
 
 
 def _json_or_empty(raw: bytes) -> dict[str, Any]:
@@ -308,56 +313,6 @@ def submit_remote_pool_request(
   }
 
 
-def fetch_remote_completions(
-  *,
-  consumer_id: str,
-  since_seq: int,
-  limit: int = 100,
-) -> dict[str, Any]:
-  pool_base_url = _pool_base_url()
-  token = get_str("asr_pool.token", "")
-  http_timeout_s = _http_timeout_s()
-  retry_attempts = _retry_attempts()
-  retry_base_delay_s = _retry_base_delay_s()
-  retry_max_delay_s = max(retry_base_delay_s, _retry_max_delay_s())
-  retry_jitter_s = _retry_jitter_s()
-  query = urlparse.urlencode(
-    {
-      "consumer_id": str(consumer_id or ""),
-      "since_seq": int(max(0, int(since_seq))),
-      "limit": int(max(1, min(1000, int(limit)))),
-    }
-  )
-  url = urlparse.urljoin(pool_base_url + "/", f"asr/v1/completions?{query}")
-  try:
-    status_code, body, _attempts_used = _http_json_with_retry(
-      method="GET",
-      url=url,
-      token=token,
-      timeout_s=http_timeout_s,
-      payload=None,
-      attempts=retry_attempts,
-      backoff_base_s=retry_base_delay_s,
-      backoff_max_s=retry_max_delay_s,
-      jitter_s=retry_jitter_s,
-    )
-  except Exception as e:
-    return {
-      "ok": False,
-      "status_code": 0,
-      "body": {
-        "code": "ASR_REMOTE_COMPLETIONS_IO_FAILURE",
-        "message": f"ASR pool completions I/O failed: {type(e).__name__}: {e}",
-        "retryable": True,
-      },
-    }
-  return {
-    "ok": bool(int(status_code) == 200),
-    "status_code": int(status_code),
-    "body": dict(body or {}),
-  }
-
-
 def fetch_remote_pending_status(
   *,
   consumer_id: str,
@@ -417,3 +372,222 @@ def fetch_remote_pending_status(
     "status_code": int(status_code),
     "body": dict(body or {}),
   }
+
+
+def fetch_remote_request_status(
+  *,
+  request_id: str,
+) -> dict[str, Any]:
+  rid = str(request_id or "").strip()
+  if not rid:
+    return {
+      "ok": False,
+      "status_code": 400,
+      "body": {
+        "code": "ASR_REQUEST_ID_REQUIRED",
+        "message": "request_id is required",
+        "retryable": False,
+      },
+    }
+
+  pool_base_url = _pool_base_url()
+  token = get_str("asr_pool.token", "")
+  http_timeout_s = _http_timeout_s()
+  retry_attempts = _retry_attempts()
+  retry_base_delay_s = _retry_base_delay_s()
+  retry_max_delay_s = max(retry_base_delay_s, _retry_max_delay_s())
+  retry_jitter_s = _retry_jitter_s()
+  safe_rid = urlparse.quote(rid, safe="")
+  url = urlparse.urljoin(pool_base_url + "/", f"asr/v1/requests/{safe_rid}")
+  try:
+    status_code, body, _attempts_used = _http_json_with_retry(
+      method="GET",
+      url=url,
+      token=token,
+      timeout_s=http_timeout_s,
+      payload=None,
+      attempts=retry_attempts,
+      backoff_base_s=retry_base_delay_s,
+      backoff_max_s=retry_max_delay_s,
+      jitter_s=retry_jitter_s,
+    )
+  except Exception as e:
+    return {
+      "ok": False,
+      "status_code": 0,
+      "body": {
+        "code": "ASR_REMOTE_REQUEST_STATUS_IO_FAILURE",
+        "message": f"ASR pool request status I/O failed: {type(e).__name__}: {e}",
+        "retryable": True,
+      },
+    }
+  return {
+    "ok": bool(int(status_code) == 200),
+    "status_code": int(status_code),
+    "body": dict(body or {}),
+  }
+
+
+def _parse_sse_event(*, event_name: str, data_lines: list[str]) -> tuple[str, dict[str, Any]]:
+  raw = "\n".join(list(data_lines or [])).strip()
+  if not raw:
+    return str(event_name or "message").strip().lower(), {}
+  try:
+    parsed = json.loads(raw)
+  except Exception:
+    return str(event_name or "message").strip().lower(), {"raw": raw}
+  return str(event_name or "message").strip().lower(), (dict(parsed) if isinstance(parsed, dict) else {"value": parsed})
+
+
+def stream_remote_completions_forever(
+  *,
+  consumer_id: str,
+  start_since_seq: int,
+  stop_event: threading.Event,
+  on_event: Callable[[str, dict[str, Any]], None],
+) -> None:
+  """
+  Long-lived SSE reader for /asr/v1/completions/stream.
+  Calls on_event(kind, payload) for:
+    - completion
+    - feed_reset
+    - stream_error
+  """
+  cid = str(consumer_id or "").strip()
+  if not cid:
+    on_event(
+      "stream_error",
+      {
+        "code": "ASR_COMPLETIONS_STREAM_CONSUMER_REQUIRED",
+        "message": "consumer_id is required for stream reader",
+      },
+    )
+    return
+
+  pool_base_url = _pool_base_url()
+  token = get_str("asr_pool.token", "")
+  heartbeat_s = _stream_heartbeat_s()
+  reconnect_base_s = _retry_base_delay_s()
+  reconnect_max_s = max(reconnect_base_s, _retry_max_delay_s())
+  reconnect_jitter_s = _retry_jitter_s()
+  timeout_s = max(30.0, (float(heartbeat_s) * 3.0))
+  since_seq = int(max(0, int(start_since_seq)))
+  last_feed_id = ""
+  retry_index = 0
+
+  while not stop_event.is_set():
+    query = urlparse.urlencode(
+      {
+        "consumer_id": cid,
+        "since_seq": int(max(0, int(since_seq))),
+        "limit": 200,
+        "heartbeat_s": float(heartbeat_s),
+      }
+    )
+    stream_url = urlparse.urljoin(pool_base_url + "/", f"asr/v1/completions/stream?{query}")
+    req = urlrequest.Request(stream_url, method="GET")
+    req.add_header("Accept", "text/event-stream")
+    if token:
+      req.add_header("X-ASR-Token", token)
+    try:
+      with urlrequest.urlopen(req, timeout=float(timeout_s)) as resp:
+        status_code = int(getattr(resp, "status", 200) or 200)
+        if status_code != 200:
+          on_event(
+            "stream_error",
+            {
+              "code": "ASR_COMPLETIONS_STREAM_HTTP_ERROR",
+              "status_code": int(status_code),
+              "url": stream_url,
+            },
+          )
+          raise RuntimeError(f"completions stream http={status_code}")
+        retry_index = 0
+        event_name = "message"
+        data_lines: list[str] = []
+        while not stop_event.is_set():
+          raw_line = resp.readline()
+          if not raw_line:
+            break
+          try:
+            line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+          except Exception:
+            line = str(raw_line).rstrip("\r\n")
+          if line == "":
+            kind, payload = _parse_sse_event(event_name=event_name, data_lines=data_lines)
+            event_name = "message"
+            data_lines = []
+            if kind == "meta":
+              feed_id = str(payload.get("feed_id") or "").strip()
+              next_seq_raw = payload.get("next_seq")
+              next_seq = int(max(0, int(next_seq_raw or 0)))
+              feed_changed = bool(last_feed_id and feed_id and feed_id != last_feed_id)
+              if feed_changed:
+                on_event(
+                  "feed_reset",
+                  {
+                    "old_feed_id": str(last_feed_id),
+                    "new_feed_id": str(feed_id),
+                  },
+                )
+              if feed_id:
+                last_feed_id = feed_id
+              if feed_changed:
+                # Cursor must be reset for the new feed; old seq values are not comparable.
+                # IMPORTANT: reset to 0 explicitly. The server's meta.next_seq can echo the
+                # old client cursor when since_seq was from a different (old) feed, which
+                # would otherwise skip all events on the new feed.
+                since_seq = 0
+                # Reconnect immediately so the server-side stream cursor also resets.
+                break
+              elif next_seq_raw is not None:
+                since_seq = int(max(since_seq, next_seq))
+            elif kind == "completion":
+              seq = int(max(0, int(payload.get("seq") or 0)))
+              if seq > 0:
+                since_seq = int(max(since_seq, seq + 1))
+              on_event("completion", dict(payload))
+            elif kind == "heartbeat":
+              next_seq = int(max(0, int(payload.get("next_seq") or since_seq)))
+              feed_id = str(payload.get("feed_id") or "").strip()
+              since_seq = int(max(since_seq, next_seq))
+              if feed_id:
+                last_feed_id = feed_id
+            elif kind == "error":
+              on_event(
+                "stream_error",
+                {
+                  "code": str(payload.get("code") or "ASR_COMPLETIONS_STREAM_ERROR_EVENT"),
+                  "message": str(payload.get("message") or "stream error event"),
+                  "payload": dict(payload),
+                },
+              )
+            continue
+          if line.startswith(":"):
+            continue
+          if line.startswith("event:"):
+            event_name = str(line[6:]).strip() or "message"
+            continue
+          if line.startswith("data:"):
+            data_lines.append(str(line[5:]).lstrip())
+            continue
+    except Exception as e:
+      if stop_event.is_set():
+        break
+      on_event(
+        "stream_error",
+        {
+          "code": "ASR_COMPLETIONS_STREAM_IO_FAILURE",
+          "message": f"{type(e).__name__}: {e}",
+          "retryable": True,
+        },
+      )
+      sleep_s = _backoff_sleep_s(
+        retry_index=retry_index,
+        base_s=reconnect_base_s,
+        max_s=reconnect_max_s,
+        jitter_s=reconnect_jitter_s,
+      )
+      retry_index += 1
+      if sleep_s > 0.0 and not stop_event.is_set():
+        stop_event.wait(timeout=float(sleep_s))
