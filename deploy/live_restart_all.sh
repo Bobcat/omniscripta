@@ -13,6 +13,19 @@ JANITOR_TIMER_UNIT="transcribe-demo-jobs-janitor.timer"
 
 API_HEALTH_URL="http://127.0.0.1:8000/health"
 ASR_POOL_URL="http://127.0.0.1:8090/asr/v1/pool"
+API_READY_TIMEOUT_S="${API_READY_TIMEOUT_S:-20}"
+ASR_POOL_READY_TIMEOUT_S="${ASR_POOL_READY_TIMEOUT_S:-120}"
+WAIT_POLL_INTERVAL_S="${WAIT_POLL_INTERVAL_S:-0.5}"
+CURL_CONNECT_TIMEOUT_S="${CURL_CONNECT_TIMEOUT_S:-1}"
+CURL_MAX_TIME_S="${CURL_MAX_TIME_S:-2}"
+
+ts() {
+  date +"%H:%M:%S"
+}
+
+log() {
+  echo "[live-restart][$(ts)] $*"
+}
 
 systemctl_live() {
   if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
@@ -25,46 +38,68 @@ systemctl_live() {
 wait_for_http() {
   local url="$1"
   local timeout_s="$2"
+  local label="${3:-$1}"
+  local ok_codes="${4:-200}"
   local started_s now_s elapsed_s
+  local http_code
   started_s="$(date +%s)"
   while true; do
-    if curl -fsS "$url" >/dev/null 2>&1; then
+    http_code="$(
+      curl -sS -o /dev/null -w "%{http_code}" \
+        --connect-timeout "$CURL_CONNECT_TIMEOUT_S" \
+        --max-time "$CURL_MAX_TIME_S" \
+        "$url" 2>/dev/null || true
+    )"
+    if [[ ",$ok_codes," == *",$http_code,"* ]]; then
+      now_s="$(date +%s)"
+      elapsed_s="$((now_s - started_s))"
+      log "$label ready after ${elapsed_s}s (http=$http_code)"
       return 0
     fi
     now_s="$(date +%s)"
     elapsed_s="$((now_s - started_s))"
     if (( elapsed_s >= timeout_s )); then
-      echo "Timeout while waiting for $url (${timeout_s}s)" >&2
+      log "Timeout while waiting for $label (${timeout_s}s)"
       return 1
     fi
-    sleep 1
+    sleep "$WAIT_POLL_INTERVAL_S"
   done
 }
 
-echo "[live-restart] Restarting API + ASR pool..."
+print_status() {
+  local maxlen=0 unit state
+  for unit in "$@"; do
+    if (( ${#unit} > maxlen )); then
+      maxlen=${#unit}
+    fi
+  done
+  for unit in "$@"; do
+    state="$(systemctl_live is-active "$unit" || true)"
+    printf "  - %-*s  %s\n" "$maxlen" "$unit" "$state"
+  done
+}
+
+log "Restarting API + ASR pool..."
 systemctl_live restart "$API_UNIT" "$ASR_UNIT"
 
-echo "[live-restart] Waiting for API health..."
-wait_for_http "$API_HEALTH_URL" 60
+log "Waiting for API health..."
+wait_for_http "$API_HEALTH_URL" "$API_READY_TIMEOUT_S" "API health" "200"
 
-echo "[live-restart] Waiting for ASR pool readiness (warm startup may take time)..."
-wait_for_http "$ASR_POOL_URL" 240
+log "Waiting for ASR pool readiness (warm startup may take time)..."
+wait_for_http "$ASR_POOL_URL" "$ASR_POOL_READY_TIMEOUT_S" "ASR pool readiness" "200,401"
 
-echo "[live-restart] Restarting workers + tabby tunnel + janitor timer..."
+log "Restarting workers + tabby tunnel + janitor timer..."
 systemctl_live restart "$UPLOAD_WORKER_UNIT" "$LIVE_WORKER_UNIT" "$TABBY_TUNNEL_UNIT" "$JANITOR_TIMER_UNIT"
 
 echo
 echo "[live-restart] Service status:"
-for unit in \
+print_status \
   "$API_UNIT" \
   "$ASR_UNIT" \
   "$UPLOAD_WORKER_UNIT" \
   "$LIVE_WORKER_UNIT" \
   "$TABBY_TUNNEL_UNIT" \
-  "$JANITOR_TIMER_UNIT"; do
-  state="$(systemctl_live is-active "$unit" || true)"
-  printf "  - %-35s %s\n" "$unit" "$state"
-done
+  "$JANITOR_TIMER_UNIT"
 
 echo
 echo "[live-restart] OK"
