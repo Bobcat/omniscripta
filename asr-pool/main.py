@@ -25,6 +25,7 @@ from shared.app_config import get_str, get_int, get_float, get_bool
 ROOT_PATH = get_str("asr_pool.root_path", "")
 app = FastAPI(root_path=ROOT_PATH)
 ASR_COMPLETIONS_STREAM_HEARTBEAT_S = get_float("worker_events.sse_heartbeat_s", 10.0, min_value=1.0)
+INTERACTIVE_NONLIVE_SESSION_KEY = "__interactive_nonlive__"
 
 
 def _repo_root() -> Path:
@@ -198,6 +199,7 @@ class AsrPoolService:
         self._tasks: list[asyncio.Task[None]] = []
         self._stopping = False
         self._interactive_burst_count = 0
+        self._interactive_rr_last_session_key = ""
         self._noninteractive_next = "normal"
         self._watchdog_restart_count: list[int] = [0 for _ in range(max(0, int(self._runner_slots)))]
         self._last_records_prune_mono = 0.0
@@ -753,8 +755,10 @@ class AsrPoolService:
                 },
                 "scheduling_policy": {
                     "interactive_single_queue": True,
+                    "interactive_round_robin_by_session": True,
+                    "interactive_nonlive_pseudo_session_key": str(INTERACTIVE_NONLIVE_SESSION_KEY),
                     "interactive_burst_max": int(self._interactive_burst_max),
-                    "fairness_mode": "burst_then_round_robin_noninteractive",
+                    "fairness_mode": "burst_then_round_robin_interactive_sessions_and_noninteractive_priorities",
                 },
             }
 
@@ -804,6 +808,69 @@ class AsrPoolService:
             return ["background", "normal"]
         return ["normal", "background"]
 
+    def _interactive_session_key_for_record(self, rec: _Record) -> str:
+        live_session_id = str(rec.live_session_id or "").strip()
+        if live_session_id:
+            return live_session_id
+        return str(INTERACTIVE_NONLIVE_SESSION_KEY)
+
+    def _interactive_sessions_snapshot_unlocked(self) -> list[str]:
+        queue = self._queues["interactive"]
+        stale_ids: list[str] = []
+        seen: set[str] = set()
+        sessions: list[str] = []
+        for rid in list(queue):
+            rec = self._records.get(str(rid))
+            if rec is None or rec.state != "queued" or rec.queue_key != "interactive":
+                stale_ids.append(str(rid))
+                continue
+            session_key = self._interactive_session_key_for_record(rec)
+            if session_key in seen:
+                continue
+            seen.add(session_key)
+            sessions.append(session_key)
+        for rid in stale_ids:
+            try:
+                queue.remove(rid)
+            except ValueError:
+                continue
+        if not queue:
+            self._interactive_rr_last_session_key = ""
+        return sessions
+
+    def _dequeue_interactive_request_id_unlocked(self) -> str | None:
+        queue = self._queues["interactive"]
+        if not queue:
+            self._interactive_rr_last_session_key = ""
+            return None
+        sessions = self._interactive_sessions_snapshot_unlocked()
+        if not sessions:
+            return None
+
+        preferred_session = sessions[0]
+        last_session = str(self._interactive_rr_last_session_key or "")
+        if last_session and len(sessions) > 1 and last_session in sessions:
+            idx = int(sessions.index(last_session))
+            preferred_session = sessions[(idx + 1) % len(sessions)]
+        elif last_session and last_session not in sessions:
+            self._interactive_rr_last_session_key = ""
+
+        ordered_sessions = [preferred_session] + [s for s in sessions if s != preferred_session]
+        for session_key in ordered_sessions:
+            for rid in list(queue):
+                rec = self._records.get(str(rid))
+                if rec is None or rec.state != "queued" or rec.queue_key != "interactive":
+                    continue
+                if self._interactive_session_key_for_record(rec) != session_key:
+                    continue
+                try:
+                    queue.remove(str(rid))
+                except ValueError:
+                    continue
+                self._interactive_rr_last_session_key = str(session_key)
+                return str(rid)
+        return None
+
     def _dequeue_order_unlocked(self) -> list[str]:
         interactive_ready = self._priority_depth("interactive") > 0
         normal_ready = self._priority_depth("normal") > 0
@@ -820,7 +887,7 @@ class AsrPoolService:
 
     def _note_dequeue_key_unlocked(self, queue_key: str) -> None:
         key = str(queue_key or "").strip().lower()
-        if key.startswith("interactive_"):
+        if key == "interactive" or key.startswith("interactive_"):
             self._interactive_burst_count = int(self._interactive_burst_count) + 1
             return
         self._interactive_burst_count = 0
@@ -837,6 +904,8 @@ class AsrPoolService:
             q.remove(request_id)
         except ValueError:
             return
+        if str(queue_key) == "interactive" and not q:
+            self._interactive_rr_last_session_key = ""
 
     @staticmethod
     def _consumer_id_from_request(request: dict[str, Any]) -> str:
@@ -1051,6 +1120,12 @@ class AsrPoolService:
                 for key in self._dequeue_order_unlocked():
                     # Keep heavy upload/background ASR single-flight across the pool.
                     if key == "background" and self._has_running_background_unlocked():
+                        continue
+                    if key == "interactive":
+                        rid = self._dequeue_interactive_request_id_unlocked()
+                        if rid:
+                            self._note_dequeue_key_unlocked(key)
+                            return rid
                         continue
                     queue = self._queues[key]
                     while queue:
