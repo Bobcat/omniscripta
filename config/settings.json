@@ -43,7 +43,7 @@
     "live_rolling_emit_min_ms": 120,
     "asr_pool_watchdog_poll_ms": 2000,
     "asr_pool_stage_poll_ms": 150,
-    "asr_pool_warm_response_poll_s": 0.05,
+    "asr_pool_warm_response_poll_ms": 50,
     "asr_remote_pending_status_poll_s": 1.0,
     "asr_pool_records_prune_s": 30,
     "asr_blob_cleanup_s": 120
@@ -89,7 +89,7 @@
       "device": "cuda",
       "compute_type": "int8",
       "batch_size": 1,
-      "chunk_size": 30,
+      "chunk_size": 20,
       "chunk_size_live": 10,
       "live_chunk_backend": "whisperx",
       "beam_size": 5,

@@ -509,7 +509,8 @@ class LiveSessionManager:
                     0,
                     sum(1 for r in sess.live_commit_results if str(r.get("state") or "") == "error"),
                 )
-                # A new final chunk supersedes any preview suffix that was shown before it.
+                # Keep preview-clear coupled to the ready-commit mutation.
+                # This makes commit + preview-clear an atomic snapshot update.
                 sess.live_preview_text = ""
                 sess.live_preview_seq = -1
                 sess.live_preview_audio_end_ms = 0

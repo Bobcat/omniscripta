@@ -95,7 +95,7 @@ async def run_live_session_ws_rolling_context(
     LIVE_ROLLING_MIN_NEW_AUDIO_MS = int(_cfg(config, "LIVE_ROLLING_MIN_NEW_AUDIO_MS"))
     LIVE_ROLLING_MIN_EMIT_INTERVAL_MS = int(_cfg(config, "LIVE_ROLLING_MIN_EMIT_INTERVAL_MS"))
 
-    poll_interval_s = max(0.1, float(LIVE_ROLLING_POLL_INTERVAL_MS) / 1000.0)
+    poll_interval_s = max(0.02, float(LIVE_ROLLING_POLL_INTERVAL_MS) / 1000.0)
     emit_interval_s = max(0.0, float(LIVE_ROLLING_MIN_EMIT_INTERVAL_MS) / 1000.0)
     max_outstanding_per_session = int(max(1, LIVE_ROLLING_MAX_OUTSTANDING_PER_SESSION))
     min_new_audio_ms = int(max(0, LIVE_ROLLING_MIN_NEW_AUDIO_MS))
@@ -961,19 +961,13 @@ async def run_live_session_ws_rolling_context(
                 if call_outcome not in {"commit", "error"}:
                     call_outcome = "empty"
                 if committed_this_poll:
-                    # Only clear preview when this poll actually committed content.
-                    # Otherwise keep previous preview to avoid UX flicker/vanishing text.
+                    # On ready-commit, preview clear is done atomically inside
+                    # LIVE_SESSIONS.record_live_commit(..., state="ready").
+                    # Keep reset bookkeeping here, but avoid separate clear call.
                     rolling_last_preview_signature = ""
                     rolling_same_preview_repeats = 0
                     rolling_last_preview_audio_end_ms = -1
                     rolling_same_preview_audio_repeats = 0
-                    try:
-                        LIVE_SESSIONS.clear_live_preview(
-                            session_id,
-                            max_seq=int(max(0, seq)),
-                        )
-                    except Exception:
-                        pass
             _record_call_audit(
                 seq=seq,
                 job_id=job_id,
@@ -1110,10 +1104,6 @@ async def run_live_session_ws_rolling_context(
             rolling_same_preview_audio_repeats = 0
             rolling_last_preview_text = ""
             rolling_last_preview_audio_end_fallback_ms = 0
-            try:
-                LIVE_SESSIONS.clear_live_preview(session_id)
-            except Exception:
-                pass
             _append_log("rolling_tail_preview_committed", t0_ms=commit_t0, t1_ms=commit_t1, chars=len(preview_text))
         except Exception:
             pass

@@ -74,7 +74,7 @@ LIVE_DIARIZE_MIN_SPEAKERS = get_int("live.diarize_min_speakers", 1, min_value=1)
 LIVE_DIARIZE_MAX_SPEAKERS = get_int("live.diarize_max_speakers", 4, min_value=1)
 
 # Rolling context settings
-LIVE_ROLLING_POLL_INTERVAL_MS = get_int("polling_intervals.live_rolling_poll_ms", 250, min_value=100)
+LIVE_ROLLING_POLL_INTERVAL_MS = get_int("polling_intervals.live_rolling_poll_ms", 250, min_value=20)
 LIVE_ROLLING_MIN_INFER_AUDIO_MS = get_int("live.rolling.min_infer_audio_ms", 1000, min_value=200)
 LIVE_ROLLING_SINGLE_COMMIT_MIN_MS = max(
     LIVE_ROLLING_MIN_INFER_AUDIO_MS,
