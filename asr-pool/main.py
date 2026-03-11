@@ -25,6 +25,7 @@ from shared.app_config import get_str, get_int, get_float, get_bool
 ROOT_PATH = get_str("asr_pool.root_path", "")
 app = FastAPI(root_path=ROOT_PATH)
 ASR_COMPLETIONS_STREAM_HEARTBEAT_S = get_float("worker_events.sse_heartbeat_s", 10.0, min_value=1.0)
+INTERACTIVE_NONLIVE_SESSION_KEY = "__interactive_nonlive__"
 
 
 def _repo_root() -> Path:
@@ -158,7 +159,6 @@ class AsrPoolService:
             "completed": get_int("asr_pool.records.ttl_completed_s", 900, min_value=10),
             "failed": get_int("asr_pool.records.ttl_failed_s", 1800, min_value=10),
             "cancelled": get_int("asr_pool.records.ttl_cancelled_s", 600, min_value=10),
-            "superseded": get_int("asr_pool.records.ttl_superseded_s", 600, min_value=10),
         }
         self._records_prune_interval_s = get_int("polling_intervals.asr_pool_records_prune_s", 30, min_value=1)
         self._records_pruned_total = 0
@@ -194,13 +194,12 @@ class AsrPoolService:
         # Feed id changes on pool (re)start so consumers can detect that in-memory
         # completion cursors are no longer valid after a restart.
         self._completion_feed_id = uuid4().hex
-        self._live_latest_chunk_index: dict[str, int] = {}
-        self._live_queued_request_id: dict[str, str] = {}
         self._lock = asyncio.Lock()
         self._cond = asyncio.Condition(self._lock)
         self._tasks: list[asyncio.Task[None]] = []
         self._stopping = False
         self._interactive_burst_count = 0
+        self._interactive_rr_last_session_key = ""
         self._noninteractive_next = "normal"
         self._watchdog_restart_count: list[int] = [0 for _ in range(max(0, int(self._runner_slots)))]
         self._last_records_prune_mono = 0.0
@@ -465,82 +464,6 @@ class AsrPoolService:
                 )
                 return 200, self._to_lifecycle(existing)
 
-            live_key = self._live_key(live_session_id) if is_live else ""
-            if is_live and live_chunk_index is not None:
-                latest_idx = self._live_latest_chunk_index.get(live_key)
-                if latest_idx is not None and int(live_chunk_index) <= int(latest_idx):
-                    rec = _Record(
-                        request_id=request_id,
-                        payload_hash=payload_hash,
-                        request=prepared,
-                        profile_id=str(prepared.get("profile_id") or ""),
-                        priority=priority,
-                        live_lane=live_lane,
-                        queue_key=queue_key,
-                        state="superseded",
-                        submitted_at_utc=_iso_utc(),
-                        consumer_id=str(consumer_id),
-                        live_session_id=str(live_session_id),
-                        live_chunk_index=int(live_chunk_index),
-                    )
-                    self._records[request_id] = rec
-                    self._mark_record_terminal_unlocked(
-                        rec,
-                        state="superseded",
-                        stage="superseded",
-                        error={
-                            "code": "ASR_REQUEST_SUPERSEDED",
-                            "message": "Superseded by newer live request",
-                            "retryable": False,
-                            "details": {
-                                "live_session_id": str(live_session_id),
-                                "live_lane": "single",
-                                "live_chunk_index": int(live_chunk_index),
-                                "latest_live_chunk_index": int(latest_idx),
-                            },
-                        },
-                        retryable=False,
-                    )
-                    self._emit_event(
-                        "submit_superseded_stale",
-                        request_id=str(request_id),
-                        live_session_id=str(live_session_id),
-                        live_lane="single",
-                        live_chunk_index=int(live_chunk_index),
-                        latest_live_chunk_index=int(latest_idx),
-                    )
-                    self._maybe_prune_records_unlocked(reason="submit_superseded_stale", force=False)
-                    return 202, self._to_lifecycle(rec)
-
-                replaced_rid = str(self._live_queued_request_id.get(live_key) or "")
-                if replaced_rid:
-                    replaced = self._records.get(replaced_rid)
-                    if replaced is not None and str(replaced.state) == "queued":
-                        self._remove_from_queue_unlocked(replaced_rid, replaced.queue_key)
-                        self._mark_record_terminal_unlocked(
-                            replaced,
-                            state="superseded",
-                            stage="superseded",
-                            error={
-                                "code": "ASR_REQUEST_SUPERSEDED",
-                                "message": "Superseded by newer live request",
-                                "retryable": False,
-                                "details": {
-                                    "live_session_id": str(live_session_id),
-                                    "live_lane": "single",
-                                    "replaced_by_request_id": str(request_id),
-                                },
-                            },
-                            retryable=False,
-                        )
-                        self._emit_event(
-                            "queued_live_request_superseded",
-                            request_id=str(replaced.request_id),
-                            replaced_by_request_id=str(request_id),
-                            live_session_id=str(live_session_id),
-                            live_lane="single",
-                        )
-
             if self._priority_depth(priority) >= int(self._queue_limits.get(priority, 1)):
                 self._emit_event(
                     "submit_rejected_queue_full",
@@ -576,11 +499,6 @@ class AsrPoolService:
             )
             self._records[request_id] = rec
             self._queues[queue_key].append(request_id)
-            if is_live and live_chunk_index is not None:
-                prev = self._live_latest_chunk_index.get(live_key)
-                if prev is None or int(live_chunk_index) > int(prev):
-                    self._live_latest_chunk_index[live_key] = int(live_chunk_index)
-                self._live_queued_request_id[live_key] = str(request_id)
             queue_position = int(len(self._queues[queue_key]))
             self._emit_event(
                 "submit_accepted",
@@ -826,7 +744,6 @@ class AsrPoolService:
                         "completed": int(self._records_ttl_s["completed"]),
                         "failed": int(self._records_ttl_s["failed"]),
                         "cancelled": int(self._records_ttl_s["cancelled"]),
-                        "superseded": int(self._records_ttl_s["superseded"]),
                     },
                     "prune_interval_s": int(self._records_prune_interval_s),
                     "pruned_total": int(self._records_pruned_total),
@@ -838,8 +755,10 @@ class AsrPoolService:
                 },
                 "scheduling_policy": {
                     "interactive_single_queue": True,
+                    "interactive_round_robin_by_session": True,
+                    "interactive_nonlive_pseudo_session_key": str(INTERACTIVE_NONLIVE_SESSION_KEY),
                     "interactive_burst_max": int(self._interactive_burst_max),
-                    "fairness_mode": "burst_then_round_robin_noninteractive",
+                    "fairness_mode": "burst_then_round_robin_interactive_sessions_and_noninteractive_priorities",
                 },
             }
 
@@ -889,6 +808,69 @@ class AsrPoolService:
             return ["background", "normal"]
         return ["normal", "background"]
 
+    def _interactive_session_key_for_record(self, rec: _Record) -> str:
+        live_session_id = str(rec.live_session_id or "").strip()
+        if live_session_id:
+            return live_session_id
+        return str(INTERACTIVE_NONLIVE_SESSION_KEY)
+
+    def _interactive_sessions_snapshot_unlocked(self) -> list[str]:
+        queue = self._queues["interactive"]
+        stale_ids: list[str] = []
+        seen: set[str] = set()
+        sessions: list[str] = []
+        for rid in list(queue):
+            rec = self._records.get(str(rid))
+            if rec is None or rec.state != "queued" or rec.queue_key != "interactive":
+                stale_ids.append(str(rid))
+                continue
+            session_key = self._interactive_session_key_for_record(rec)
+            if session_key in seen:
+                continue
+            seen.add(session_key)
+            sessions.append(session_key)
+        for rid in stale_ids:
+            try:
+                queue.remove(rid)
+            except ValueError:
+                continue
+        if not queue:
+            self._interactive_rr_last_session_key = ""
+        return sessions
+
+    def _dequeue_interactive_request_id_unlocked(self) -> str | None:
+        queue = self._queues["interactive"]
+        if not queue:
+            self._interactive_rr_last_session_key = ""
+            return None
+        sessions = self._interactive_sessions_snapshot_unlocked()
+        if not sessions:
+            return None
+
+        preferred_session = sessions[0]
+        last_session = str(self._interactive_rr_last_session_key or "")
+        if last_session and len(sessions) > 1 and last_session in sessions:
+            idx = int(sessions.index(last_session))
+            preferred_session = sessions[(idx + 1) % len(sessions)]
+        elif last_session and last_session not in sessions:
+            self._interactive_rr_last_session_key = ""
+
+        ordered_sessions = [preferred_session] + [s for s in sessions if s != preferred_session]
+        for session_key in ordered_sessions:
+            for rid in list(queue):
+                rec = self._records.get(str(rid))
+                if rec is None or rec.state != "queued" or rec.queue_key != "interactive":
+                    continue
+                if self._interactive_session_key_for_record(rec) != session_key:
+                    continue
+                try:
+                    queue.remove(str(rid))
+                except ValueError:
+                    continue
+                self._interactive_rr_last_session_key = str(session_key)
+                return str(rid)
+        return None
+
     def _dequeue_order_unlocked(self) -> list[str]:
         interactive_ready = self._priority_depth("interactive") > 0
         normal_ready = self._priority_depth("normal") > 0
@@ -905,7 +887,7 @@ class AsrPoolService:
 
     def _note_dequeue_key_unlocked(self, queue_key: str) -> None:
         key = str(queue_key or "").strip().lower()
-        if key.startswith("interactive_"):
+        if key == "interactive" or key.startswith("interactive_"):
             self._interactive_burst_count = int(self._interactive_burst_count) + 1
             return
         self._interactive_burst_count = 0
@@ -922,6 +904,8 @@ class AsrPoolService:
             q.remove(request_id)
         except ValueError:
             return
+        if str(queue_key) == "interactive" and not q:
+            self._interactive_rr_last_session_key = ""
 
     @staticmethod
     def _consumer_id_from_request(request: dict[str, Any]) -> str:
@@ -945,19 +929,6 @@ class AsrPoolService:
         if chunk_index is not None:
             chunk_index = int(max(0, chunk_index))
         return session_id, chunk_index
-
-    @staticmethod
-    def _live_key(session_id: str) -> str:
-        # v3 scope: one live lane only.
-        return f"{str(session_id)}|single"
-
-    def _clear_live_queue_pointer_if_matches(self, rec: _Record) -> None:
-        if not rec.live_session_id:
-            return
-        key = self._live_key(rec.live_session_id)
-        current = str(self._live_queued_request_id.get(key) or "")
-        if current == str(rec.request_id):
-            self._live_queued_request_id.pop(key, None)
 
     def _completion_event_for_record(self, rec: _Record) -> dict[str, Any]:
         self._completion_seq_next = int(max(1, int(self._completion_seq_next))) + 1
@@ -1024,7 +995,6 @@ class AsrPoolService:
         rec.response = dict(response or {}) if response is not None else None
         rec.error = dict(error or {}) if error is not None else None
         rec.retryable = retryable
-        self._clear_live_queue_pointer_if_matches(rec)
         self._append_completion_event_unlocked(rec)
 
     def _to_lifecycle(self, rec: _Record) -> dict[str, Any]:
@@ -1089,7 +1059,7 @@ class AsrPoolService:
         removable_by_ttl: list[str] = []
         for rid, rec in self._records.items():
             state = str(rec.state or "").strip().lower()
-            if state not in {"completed", "failed", "cancelled", "superseded"}:
+            if state not in {"completed", "failed", "cancelled"}:
                 continue
             ttl_s = int(self._records_ttl_s.get(state, 0))
             if ttl_s <= 0:
@@ -1108,7 +1078,7 @@ class AsrPoolService:
             terminal_rows: list[tuple[float, str]] = []
             for rid, rec in self._records.items():
                 state = str(rec.state or "").strip().lower()
-                if state not in {"completed", "failed", "cancelled", "superseded"}:
+                if state not in {"completed", "failed", "cancelled"}:
                     continue
                 ref_unix = _parse_utc_unix(rec.finished_at_utc) or _parse_utc_unix(rec.submitted_at_utc) or now_unix
                 terminal_rows.append((float(ref_unix), str(rid)))
@@ -1150,6 +1120,12 @@ class AsrPoolService:
                 for key in self._dequeue_order_unlocked():
                     # Keep heavy upload/background ASR single-flight across the pool.
                     if key == "background" and self._has_running_background_unlocked():
+                        continue
+                    if key == "interactive":
+                        rid = self._dequeue_interactive_request_id_unlocked()
+                        if rid:
+                            self._note_dequeue_key_unlocked(key)
+                            return rid
                         continue
                     queue = self._queues[key]
                     while queue:
@@ -1195,7 +1171,6 @@ class AsrPoolService:
                 rec.started_at_utc = _iso_utc()
                 rec.stage = "dispatch"
                 rec.stage_started_at_utc = rec.started_at_utc
-                self._clear_live_queue_pointer_if_matches(rec)
                 request = dict(rec.request)
                 timeout_s = int(self._timeouts_s.get(rec.priority, 120))
                 queue_wait_s = _seconds_between_utc(rec.submitted_at_utc, rec.started_at_utc)

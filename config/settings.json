@@ -10,7 +10,7 @@
   "live": {
     "session_ttl_s": 900,
     "session_preconnect_ttl_s": 30,
-    "max_sessions": 1,
+    "max_sessions": 4,
     "archive_ttl_s": 3600,
     "max_archives": 256,
     "audio_sample_rate_hz": 16000,
@@ -25,25 +25,24 @@
     "calibration_seconds": [60, 180, 300, 480, 600, 1200, 1800, 2700, 3600],
     
     "rolling": {
-      "min_infer_audio_ms": 1000,
+      "min_infer_audio_ms": 500,
       "single_segment_commit_min_ms": 12000,
       "force_commit_repeats": 3,
-      "max_uncommitted_ms": 15000,
+      "max_uncommitted_ms": 30000,
       "hard_clip_keep_tail_ms": 5000,
       "max_decode_window_ms": 12000,
       "buffer_trim_threshold_ms": 30000,
       "buffer_trim_drop_ms": 20000,
-      "max_outstanding_per_session": 1,
-      "min_new_audio_ms": 1000
+      "min_new_audio_ms": 500
     }
   },
 
   "polling_intervals": {
-    "live_rolling_poll_ms": 120,
+    "live_rolling_poll_ms": 100,
     "live_rolling_emit_min_ms": 120,
     "asr_pool_watchdog_poll_ms": 2000,
     "asr_pool_stage_poll_ms": 150,
-    "asr_pool_warm_response_poll_s": 0.05,
+    "asr_pool_warm_response_poll_ms": 50,
     "asr_remote_pending_status_poll_s": 1.0,
     "asr_pool_records_prune_s": 30,
     "asr_blob_cleanup_s": 120
@@ -89,7 +88,7 @@
       "device": "cuda",
       "compute_type": "int8",
       "batch_size": 1,
-      "chunk_size": 30,
+      "chunk_size": 20,
       "chunk_size_live": 10,
       "live_chunk_backend": "whisperx",
       "beam_size": 5,
@@ -133,7 +132,7 @@
     "instance": "1",
     "hardware_key": "",
     "live": {
-      "max_outstanding_requests": 2
+      "max_outstanding_requests": 4
     },
     "upload": {
       "max_outstanding_requests": 1

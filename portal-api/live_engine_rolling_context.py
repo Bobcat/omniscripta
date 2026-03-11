@@ -91,13 +91,11 @@ async def run_live_session_ws_rolling_context(
     LIVE_ROLLING_MAX_DECODE_WINDOW_MS = int(_cfg(config, "LIVE_ROLLING_MAX_DECODE_WINDOW_MS"))
     LIVE_ROLLING_BUFFER_TRIM_THRESHOLD_MS = int(_cfg(config, "LIVE_ROLLING_BUFFER_TRIM_THRESHOLD_MS"))
     LIVE_ROLLING_BUFFER_TRIM_DROP_MS = int(_cfg(config, "LIVE_ROLLING_BUFFER_TRIM_DROP_MS"))
-    LIVE_ROLLING_MAX_OUTSTANDING_PER_SESSION = int(_cfg(config, "LIVE_ROLLING_MAX_OUTSTANDING_PER_SESSION"))
     LIVE_ROLLING_MIN_NEW_AUDIO_MS = int(_cfg(config, "LIVE_ROLLING_MIN_NEW_AUDIO_MS"))
     LIVE_ROLLING_MIN_EMIT_INTERVAL_MS = int(_cfg(config, "LIVE_ROLLING_MIN_EMIT_INTERVAL_MS"))
 
-    poll_interval_s = max(0.1, float(LIVE_ROLLING_POLL_INTERVAL_MS) / 1000.0)
+    poll_interval_s = max(0.02, float(LIVE_ROLLING_POLL_INTERVAL_MS) / 1000.0)
     emit_interval_s = max(0.0, float(LIVE_ROLLING_MIN_EMIT_INTERVAL_MS) / 1000.0)
-    max_outstanding_per_session = int(max(1, LIVE_ROLLING_MAX_OUTSTANDING_PER_SESSION))
     min_new_audio_ms = int(max(0, LIVE_ROLLING_MIN_NEW_AUDIO_MS))
     single_segment_commit_min_ms = int(max(LIVE_ROLLING_MIN_INFER_AUDIO_MS, LIVE_ROLLING_SINGLE_COMMIT_MIN_MS))
     force_commit_repeats = int(max(1, LIVE_ROLLING_FORCE_COMMIT_REPEATS))
@@ -146,10 +144,9 @@ async def run_live_session_ws_rolling_context(
     rolling_chunks_failed = 0
 
     rolling_infer_seq_next = 0
-    rolling_inflight: dict[int, dict[str, Any]] = {}
+    rolling_inflight: dict[str, Any] | None = None
     rolling_last_submitted_t1_ms = 0
     rolling_last_applied_seq = -1
-    rolling_poll_rr_cursor_seq = -1
     rolling_last_emit_mono = 0.0
     rolling_last_poll_mono = 0.0
 
@@ -187,7 +184,6 @@ async def run_live_session_ws_rolling_context(
         "min_new_audio_skips": 0,
         "window_no_progress_skips": 0,
         "stale_completion_ignored_count": 0,
-        "superseded_completion_count": 0,
     }
     last_result_event_signature = ""
 
@@ -276,7 +272,7 @@ async def run_live_session_ws_rolling_context(
         ratio_sum = float(max(0.0, float(rolling_call_audit_summary.get("segments_per_s_sum") or 0.0)))
         avg_segs = (float(segs_sum) / float(calls_done)) if calls_done > 0 else None
         avg_ratio = (ratio_sum / float(calls_done)) if calls_done > 0 else None
-        inflight_count = int(max(0, len(rolling_inflight)))
+        inflight_count = 1 if rolling_inflight is not None else 0
         return {
             "inflight": bool(inflight_count > 0),
             "inflight_count": int(inflight_count),
@@ -296,7 +292,6 @@ async def run_live_session_ws_rolling_context(
                 "max_decode_window_ms": int(max_decode_window_ms),
                 "buffer_trim_threshold_ms": int(buffer_trim_threshold_ms),
                 "buffer_trim_drop_ms": int(buffer_trim_drop_ms),
-                "max_outstanding_per_session": int(max_outstanding_per_session),
                 "min_new_audio_ms": int(min_new_audio_ms),
                 "min_emit_interval_ms": int(LIVE_ROLLING_MIN_EMIT_INTERVAL_MS),
                 "diarize_enabled": bool(LIVE_DIARIZE_ENABLED),
@@ -575,7 +570,7 @@ async def run_live_session_ws_rolling_context(
         if chunk_bridge is None:
             return
         now_mono = time.monotonic()
-        if len(rolling_inflight) >= max_outstanding_per_session:
+        if rolling_inflight is not None:
             rolling_guardrail_metrics["outstanding_limit_skips"] = int(
                 max(0, int(rolling_guardrail_metrics.get("outstanding_limit_skips") or 0)) + 1
             )
@@ -672,7 +667,7 @@ async def run_live_session_ws_rolling_context(
         rolling_infer_seq_next = infer_seq + 1
         rolling_last_emit_mono = now_mono
         rolling_last_submitted_t1_ms = int(max(rolling_last_submitted_t1_ms, infer_t1_ms))
-        rolling_inflight[infer_seq] = {
+        rolling_inflight = {
             "seq": int(infer_seq),
             "job_id": str(job.job_id),
             "t0_ms": int(infer_t0_ms),
@@ -697,7 +692,6 @@ async def run_live_session_ws_rolling_context(
         nonlocal rolling_commit_index_next
         nonlocal rolling_processed_offset_ms
         nonlocal rolling_last_applied_seq
-        nonlocal rolling_poll_rr_cursor_seq
         nonlocal rolling_last_preview_signature
         nonlocal rolling_same_preview_repeats
         nonlocal rolling_last_preview_audio_end_ms
@@ -706,22 +700,14 @@ async def run_live_session_ws_rolling_context(
         nonlocal rolling_last_preview_audio_end_fallback_ms
         nonlocal finalization_state
 
-        if chunk_bridge is None or not rolling_inflight:
+        if chunk_bridge is None or rolling_inflight is None:
             return
         now_mono = time.monotonic()
         if (not force) and ((now_mono - rolling_last_poll_mono) < poll_interval_s):
             return
         rolling_last_poll_mono = now_mono
 
-        seq_rows = sorted(int(k) for k in rolling_inflight.keys())
-        if not seq_rows:
-            return
-        seq = int(seq_rows[0])
-        if int(rolling_poll_rr_cursor_seq) in seq_rows:
-            idx = seq_rows.index(int(rolling_poll_rr_cursor_seq))
-            seq = int(seq_rows[(idx + 1) % len(seq_rows)])
-        rolling_poll_rr_cursor_seq = int(seq)
-        inflight = dict(rolling_inflight.get(seq) or {})
+        inflight = dict(rolling_inflight or {})
         seq = int(inflight.get("seq") or 0)
         job_id = str(inflight.get("job_id") or "")
         t0_ms = int(max(0, int(inflight.get("t0_ms") or 0)))
@@ -755,7 +741,7 @@ async def run_live_session_ws_rolling_context(
                 outcome="empty",
                 error="",
             )
-            rolling_inflight.pop(seq, None)
+            rolling_inflight = None
             await _update_state_and_emit_result()
             return
 
@@ -961,19 +947,13 @@ async def run_live_session_ws_rolling_context(
                 if call_outcome not in {"commit", "error"}:
                     call_outcome = "empty"
                 if committed_this_poll:
-                    # Only clear preview when this poll actually committed content.
-                    # Otherwise keep previous preview to avoid UX flicker/vanishing text.
+                    # On ready-commit, preview clear is done atomically inside
+                    # LIVE_SESSIONS.record_live_commit(..., state="ready").
+                    # Keep reset bookkeeping here, but avoid separate clear call.
                     rolling_last_preview_signature = ""
                     rolling_same_preview_repeats = 0
                     rolling_last_preview_audio_end_ms = -1
                     rolling_same_preview_audio_repeats = 0
-                    try:
-                        LIVE_SESSIONS.clear_live_preview(
-                            session_id,
-                            max_seq=int(max(0, seq)),
-                        )
-                    except Exception:
-                        pass
             _record_call_audit(
                 seq=seq,
                 job_id=job_id,
@@ -986,54 +966,39 @@ async def run_live_session_ws_rolling_context(
             rolling_last_applied_seq = int(max(rolling_last_applied_seq, seq))
         else:
             poll_state = str(poll.state or "").strip().lower()
-            if poll_state == "superseded":
-                rolling_guardrail_metrics["superseded_completion_count"] = int(
-                    max(0, int(rolling_guardrail_metrics.get("superseded_completion_count") or 0)) + 1
-                )
-                _append_log("rolling_inference_superseded", seq=seq, job_id=job_id)
-                _record_call_audit(
-                    seq=seq,
-                    job_id=job_id,
-                    call_t0_ms=t0_ms,
-                    call_t1_ms=t1_ms,
-                    segments_returned_count=0,
-                    outcome="empty",
-                    error="",
-                )
-            else:
-                err = str(poll.error or "asr_error")
-                try:
-                    result = LIVE_SESSIONS.record_live_commit(
-                        session_id,
-                        chunk_index=int(max(0, rolling_commit_index_next)),
-                        t0_ms=int(t0_ms),
-                        t1_ms=int(t1_ms),
-                        text="",
-                        segments=[],
-                        state="error",
-                        error=err,
-                        reason="rolling_context_error",
-                    )
-                    _sync_counts_from_result(result)
-                    rolling_commit_index_next += 1
-                except Exception:
-                    pass
-                rolling_processed_offset_ms = int(max(rolling_processed_offset_ms, t1_ms))
-                _maybe_trim_pcm_buffer()
-                finalization_state = "error"
-                rolling_last_applied_seq = int(max(rolling_last_applied_seq, seq))
-                _append_log("rolling_inference_error", seq=seq, job_id=job_id, error=err)
-                _record_call_audit(
-                    seq=seq,
-                    job_id=job_id,
-                    call_t0_ms=t0_ms,
-                    call_t1_ms=t1_ms,
-                    segments_returned_count=0,
-                    outcome="error",
+            err = str(poll.error or f"asr_state:{poll_state}" or "asr_error")
+            try:
+                result = LIVE_SESSIONS.record_live_commit(
+                    session_id,
+                    chunk_index=int(max(0, rolling_commit_index_next)),
+                    t0_ms=int(t0_ms),
+                    t1_ms=int(t1_ms),
+                    text="",
+                    segments=[],
+                    state="error",
                     error=err,
+                    reason="rolling_context_error",
                 )
+                _sync_counts_from_result(result)
+                rolling_commit_index_next += 1
+            except Exception:
+                pass
+            rolling_processed_offset_ms = int(max(rolling_processed_offset_ms, t1_ms))
+            _maybe_trim_pcm_buffer()
+            finalization_state = "error"
+            rolling_last_applied_seq = int(max(rolling_last_applied_seq, seq))
+            _append_log("rolling_inference_error", seq=seq, job_id=job_id, error=err)
+            _record_call_audit(
+                seq=seq,
+                job_id=job_id,
+                call_t0_ms=t0_ms,
+                call_t1_ms=t1_ms,
+                segments_returned_count=0,
+                outcome="error",
+                error=err,
+            )
 
-        rolling_inflight.pop(seq, None)
+        rolling_inflight = None
         if finalization_state not in {"error", "ready"}:
             finalization_state = "recording" if str(recording_state or "") == "recording" else "processing_chunks"
         await _update_state_and_emit_result()
@@ -1110,10 +1075,6 @@ async def run_live_session_ws_rolling_context(
             rolling_same_preview_audio_repeats = 0
             rolling_last_preview_text = ""
             rolling_last_preview_audio_end_fallback_ms = 0
-            try:
-                LIVE_SESSIONS.clear_live_preview(session_id)
-            except Exception:
-                pass
             _append_log("rolling_tail_preview_committed", t0_ms=commit_t0, t1_ms=commit_t1, chars=len(preview_text))
         except Exception:
             pass
@@ -1162,7 +1123,6 @@ async def run_live_session_ws_rolling_context(
                     "max_decode_window_ms": int(max_decode_window_ms),
                     "buffer_trim_threshold_ms": int(buffer_trim_threshold_ms),
                     "buffer_trim_drop_ms": int(buffer_trim_drop_ms),
-                    "max_outstanding_per_session": int(max_outstanding_per_session),
                     "min_new_audio_ms": int(min_new_audio_ms),
                     "min_emit_interval_ms": int(LIVE_ROLLING_MIN_EMIT_INTERVAL_MS),
                     "language": LIVE_ASR_LANGUAGE,
@@ -1239,9 +1199,9 @@ async def run_live_session_ws_rolling_context(
                         live_commits_failed=int(max(0, rolling_chunks_failed)),
                         live_finalization_state=str(finalization_state or ""),
                         live_jobs_enabled=True,
-                        live_jobs_pending=int(max(0, len(rolling_inflight))),
+                        live_jobs_pending=(1 if rolling_inflight is not None else 0),
                         live_shadow_disabled_reason=str(shadow_disabled_reason or ""),
-                        live_inflight=bool(len(rolling_inflight) > 0),
+                        live_inflight=bool(rolling_inflight is not None),
                         rolling_guardrails=dict(rolling_guardrail_metrics),
                         rolling_unprocessed_audio_ms=int(max(0, int(recording_duration_ms) - int(rolling_processed_offset_ms))),
                         rolling_pcm_base_ms=int(max(0, rolling_pcm_base_ms)),
@@ -1313,7 +1273,7 @@ async def run_live_session_ws_rolling_context(
                 wait_deadline = time.monotonic() + max(0.0, LIVE_DRAIN_WAIT_S)
                 while time.monotonic() < wait_deadline:
                     await _drain_inflight_only(force_poll=True)
-                    if not rolling_inflight:
+                    if rolling_inflight is None:
                         break
                     await asyncio.sleep(min(0.1, poll_interval_s))
 
@@ -1375,7 +1335,7 @@ async def run_live_session_ws_rolling_context(
         while time.monotonic() < wait_deadline:
             await _drain_inflight_only(force_poll=True)
             remaining_ms = int(max(0, recording_duration_ms - rolling_processed_offset_ms))
-            if (not rolling_inflight) and remaining_ms < LIVE_ROLLING_MIN_INFER_AUDIO_MS:
+            if (rolling_inflight is None) and remaining_ms < LIVE_ROLLING_MIN_INFER_AUDIO_MS:
                 break
             await asyncio.sleep(min(0.1, poll_interval_s))
 
