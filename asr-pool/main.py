@@ -13,7 +13,7 @@ from typing import Any
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Header, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -24,6 +24,7 @@ from shared.app_config import get_str, get_int, get_float, get_bool
 
 ROOT_PATH = get_str("asr_pool.root_path", "")
 app = FastAPI(root_path=ROOT_PATH)
+ASR_COMPLETIONS_STREAM_HEARTBEAT_S = get_float("worker_events.sse_heartbeat_s", 10.0, min_value=1.0)
 
 
 def _repo_root() -> Path:
@@ -86,6 +87,21 @@ def _error(
     if details:
         payload["details"] = dict(details)
     return JSONResponse(status_code=int(status_code), content=payload)
+
+
+def _sse_json_event(*, event: str, data: dict[str, Any], event_id: str | None = None) -> bytes:
+    lines: list[str] = []
+    safe_id = str(event_id or "").strip()
+    if safe_id:
+        lines.append(f"id: {safe_id}")
+    safe_event = str(event or "").strip()
+    if safe_event:
+        lines.append(f"event: {safe_event}")
+    payload = json.dumps(data or {}, ensure_ascii=False, separators=(",", ":"))
+    for row in payload.splitlines() or [""]:
+        lines.append(f"data: {row}")
+    lines.append("")
+    return ("\n".join(lines) + "\n").encode("utf-8")
 
 
 @dataclass
@@ -646,7 +662,14 @@ class AsrPoolService:
                 "message": "cancel accepted",
             }
 
-    async def completions(self, *, consumer_id: str, since_seq: int, limit: int) -> tuple[int, dict[str, Any]]:
+    async def completions_wait(
+        self,
+        *,
+        consumer_id: str,
+        since_seq: int,
+        limit: int,
+        wait_timeout_s: float = 0.0,
+    ) -> tuple[int, dict[str, Any]]:
         cid = str(consumer_id or "").strip()
         if not cid:
             return 400, {
@@ -657,31 +680,53 @@ class AsrPoolService:
             }
         safe_since = int(max(0, int(since_seq)))
         safe_limit = int(max(1, min(1000, int(limit))))
+        safe_wait_timeout_s = max(0.0, float(wait_timeout_s))
+        wait_deadline = (time.monotonic() + safe_wait_timeout_s) if safe_wait_timeout_s > 0.0 else 0.0
         # TODO(v3-followup): add durable cursor/recovery semantics across ASR pool restarts.
         # v3 intentionally keeps completion feed in-memory only.
-        async with self._lock:
-            self._maybe_prune_records_unlocked(reason="completions", force=False)
-            # Scan from newest to oldest and stop once seq<=since_seq to avoid
-            # repeatedly walking the full history under lock on every poll.
-            rows_window: deque[dict[str, Any]] = deque()
-            for row in reversed(self._completion_events):
-                seq = int(max(0, int(row.get("seq") or 0)))
-                if seq <= safe_since:
-                    break
-                if str(row.get("consumer_id") or "") != cid:
-                    continue
-                rows_window.appendleft(dict(row))
-                if len(rows_window) > safe_limit:
-                    rows_window.pop()
-            rows = list(rows_window)
-            next_seq = safe_since if not rows else int(max(0, int(rows[-1].get("seq") or safe_since)))
-            return 200, {
-                "feed_id": str(self._completion_feed_id),
-                "consumer_id": cid,
-                "since_seq": int(safe_since),
-                "next_seq": int(next_seq),
-                "events": rows,
-            }
+        async with self._cond:
+            while True:
+                self._maybe_prune_records_unlocked(reason="completions", force=False)
+                rows, next_seq = self._collect_completion_rows_unlocked(
+                    consumer_id=cid,
+                    since_seq=safe_since,
+                    limit=safe_limit,
+                )
+                if rows or safe_wait_timeout_s <= 0.0:
+                    return 200, {
+                        "feed_id": str(self._completion_feed_id),
+                        "consumer_id": cid,
+                        "since_seq": int(safe_since),
+                        "next_seq": int(next_seq),
+                        "events": rows,
+                    }
+                remaining_s = float(wait_deadline - time.monotonic())
+                if remaining_s <= 0.0:
+                    return 200, {
+                        "feed_id": str(self._completion_feed_id),
+                        "consumer_id": cid,
+                        "since_seq": int(safe_since),
+                        "next_seq": int(next_seq),
+                        "events": [],
+                    }
+                try:
+                    await asyncio.wait_for(self._cond.wait(), timeout=remaining_s)
+                except asyncio.TimeoutError:
+                    return 200, {
+                        "feed_id": str(self._completion_feed_id),
+                        "consumer_id": cid,
+                        "since_seq": int(safe_since),
+                        "next_seq": int(next_seq),
+                        "events": [],
+                    }
+
+    async def completions(self, *, consumer_id: str, since_seq: int, limit: int) -> tuple[int, dict[str, Any]]:
+        return await self.completions_wait(
+            consumer_id=str(consumer_id),
+            since_seq=int(since_seq),
+            limit=int(limit),
+            wait_timeout_s=0.0,
+        )
 
     async def pending_status(
         self,
@@ -937,11 +982,30 @@ class AsrPoolService:
             "context": dict((rec.request or {}).get("context") or {}),
         }
 
+    def _collect_completion_rows_unlocked(self, *, consumer_id: str, since_seq: int, limit: int) -> tuple[list[dict[str, Any]], int]:
+        cid = str(consumer_id or "").strip()
+        safe_since = int(max(0, int(since_seq)))
+        safe_limit = int(max(1, min(1000, int(limit))))
+        rows_window: deque[dict[str, Any]] = deque()
+        for row in reversed(self._completion_events):
+            seq = int(max(0, int(row.get("seq") or 0)))
+            if seq <= safe_since:
+                break
+            if str(row.get("consumer_id") or "") != cid:
+                continue
+            rows_window.appendleft(dict(row))
+            if len(rows_window) > safe_limit:
+                rows_window.pop()
+        rows = list(rows_window)
+        next_seq = safe_since if not rows else int(max(0, int(rows[-1].get("seq") or safe_since)))
+        return rows, next_seq
+
     def _append_completion_event_unlocked(self, rec: _Record) -> None:
         event = self._completion_event_for_record(rec)
         self._completion_events.append(event)
         while len(self._completion_events) > int(self._completion_events_max):
             self._completion_events.popleft()
+        self._cond.notify_all()
 
     def _mark_record_terminal_unlocked(
         self,
@@ -1343,6 +1407,102 @@ async def get_asr_completions(
         limit=int(limit),
     )
     return JSONResponse(status_code=int(status_code), content=body)
+
+
+@app.get("/asr/v1/completions/stream")
+async def stream_asr_completions(
+    consumer_id: str = Query(default=""),
+    since_seq: int = Query(default=0),
+    limit: int = Query(default=100),
+    heartbeat_s: float = Query(default=ASR_COMPLETIONS_STREAM_HEARTBEAT_S),
+    _auth: None = Depends(_auth_guard),
+):
+    cid = str(consumer_id or "").strip()
+    if not cid:
+        return _error(
+            400,
+            code="ASR_COMPLETIONS_CONSUMER_REQUIRED",
+            message="consumer_id is required",
+            retryable=False,
+        )
+    safe_since_seq = int(max(0, int(since_seq)))
+    safe_limit = int(max(1, min(1000, int(limit))))
+    safe_heartbeat_s = max(1.0, min(60.0, float(heartbeat_s or ASR_COMPLETIONS_STREAM_HEARTBEAT_S)))
+
+    async def _stream():
+        since_local = int(safe_since_seq)
+        last_feed_id = ""
+        first_meta = True
+        try:
+            while True:
+                status_code, body = await POOL.completions_wait(
+                    consumer_id=cid,
+                    since_seq=since_local,
+                    limit=safe_limit,
+                    wait_timeout_s=safe_heartbeat_s,
+                )
+                if int(status_code) != 200:
+                    yield _sse_json_event(
+                        event="error",
+                        data=dict(body or {}),
+                    )
+                    break
+
+                feed_id = str(body.get("feed_id") or "")
+                next_seq_raw = body.get("next_seq")
+                if next_seq_raw is None:
+                    next_seq = int(max(0, int(since_local)))
+                else:
+                    next_seq = int(max(0, int(next_seq_raw)))
+                if first_meta or (feed_id and feed_id != last_feed_id):
+                    yield _sse_json_event(
+                        event="meta",
+                        data={
+                            "schema": "asr.completions.stream.v1",
+                            "consumer_id": str(cid),
+                            "feed_id": str(feed_id),
+                            "since_seq": int(since_local),
+                            "next_seq": int(next_seq),
+                        },
+                        event_id=str(next_seq),
+                    )
+                    first_meta = False
+                    last_feed_id = str(feed_id)
+
+                emitted_completion = False
+                for row in (body.get("events") or []):
+                    if not isinstance(row, dict):
+                        continue
+                    seq = int(max(0, int(row.get("seq") or 0)))
+                    yield _sse_json_event(
+                        event="completion",
+                        data=dict(row),
+                        event_id=(str(seq) if seq > 0 else None),
+                    )
+                    emitted_completion = True
+                since_local = int(next_seq)
+
+                if not emitted_completion:
+                    yield _sse_json_event(
+                        event="heartbeat",
+                        data={
+                            "feed_id": str(feed_id),
+                            "next_seq": int(since_local),
+                            "ts_utc": _iso_utc(),
+                        },
+                        event_id=str(since_local),
+                    )
+        except asyncio.CancelledError:
+            return
+
+    return StreamingResponse(
+        _stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.get("/asr/v1/pending-status")

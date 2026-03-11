@@ -44,7 +44,6 @@
     "asr_pool_watchdog_poll_ms": 2000,
     "asr_pool_stage_poll_ms": 150,
     "asr_pool_warm_response_poll_s": 0.05,
-    "asr_remote_completions_poll_s": 0.2,
     "asr_remote_pending_status_poll_s": 1.0,
     "asr_pool_records_prune_s": 30,
     "asr_blob_cleanup_s": 120
@@ -90,7 +89,7 @@
       "device": "cuda",
       "compute_type": "int8",
       "batch_size": 1,
-      "chunk_size": 20,
+      "chunk_size": 30,
       "chunk_size_live": 10,
       "live_chunk_backend": "whisperx",
       "beam_size": 5,
@@ -135,7 +134,17 @@
     "hardware_key": "",
     "live": {
       "max_outstanding_requests": 2
+    },
+    "upload": {
+      "max_outstanding_requests": 1
     }
+  },
+
+  "worker_events": {
+    "sse_heartbeat_s": 10.0,
+    "inbox_debounce_ms": 40,
+    "coordinator_tick_s": 0.2,
+    "metrics_log_interval_s": 30.0
   },
 
   "snip": {

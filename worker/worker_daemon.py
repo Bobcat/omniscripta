@@ -4,6 +4,7 @@ import fcntl
 import hashlib
 import json
 import os
+import queue
 import re
 import shutil
 import socket
@@ -15,7 +16,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any
 
-from queue_fs import claim_next_job, finish_job
+from queue_fs import INBOX, claim_next_job, finish_job
 from worker_status_io import _append_log, _utc_iso, _write_status
 from phase_snipping import _make_snippet
 from phase_speaker_lines import make_speaker_lines_from_srt
@@ -25,7 +26,14 @@ from phase_topics_parse import parse_topics_raw_file
 from phase_topics_validate import validate_all_chunks
 from phase_topics_merge import merge_topics
 from progress_predictor import build_prediction, phase_order_for_job
-from asr_client_remote import fetch_remote_completions, fetch_remote_pending_status, submit_remote_pool_request
+from asr_client_remote import (
+  fetch_remote_pending_status,
+  fetch_remote_request_status,
+  stream_remote_completions_forever,
+  submit_remote_pool_request,
+)
+from event_loop import WorkerEventBus, WorkerEventType
+from inbox_watch import start_inbox_watcher
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
@@ -187,12 +195,70 @@ def _worker_live_max_outstanding() -> int:
   return get_int("worker.live.max_outstanding_requests", 2, min_value=1)
 
 
-def _worker_completions_poll_interval_s() -> float:
-  return get_float("polling_intervals.asr_remote_completions_poll_s", 0.2, min_value=0.05)
+def _worker_upload_max_outstanding() -> int:
+  return get_int("worker.upload.max_outstanding_requests", 1, min_value=1)
+
+
+def _worker_coordinator_tick_interval_s() -> float:
+  return get_float("worker_events.coordinator_tick_s", 0.2, min_value=0.05)
 
 
 def _worker_pending_status_poll_interval_s() -> float:
   return get_float("polling_intervals.asr_remote_pending_status_poll_s", 1.0, min_value=0.2)
+
+
+def _worker_inbox_debounce_ms() -> int:
+  return get_int("worker_events.inbox_debounce_ms", 40, min_value=0)
+
+
+def _worker_metrics_log_interval_s() -> float:
+  return get_float("worker_events.metrics_log_interval_s", 30.0, min_value=1.0)
+
+
+@dataclass
+class _WorkerLoopCounters:
+  inbox_events: int = 0
+  sse_reconnects: int = 0
+  feed_resets: int = 0
+  submits_started: int = 0
+  submits_succeeded: int = 0
+  submits_failed: int = 0
+  scheduler_refill_cycles: int = 0
+  completions_seen: int = 0
+  completions_matched: int = 0
+  last_log_mono: float = field(default_factory=time.monotonic)
+
+
+def _maybe_log_worker_counters(
+  *,
+  mode: str,
+  consumer_id: str,
+  counters: _WorkerLoopCounters,
+  pending_count: int,
+  submitting_count: int,
+  interval_s: float,
+  force: bool = False,
+) -> None:
+  now = time.monotonic()
+  if not force and (now - float(counters.last_log_mono)) < max(0.0, float(interval_s)):
+    return
+  counters.last_log_mono = now
+  print(
+    "worker_daemon counters "
+    f"mode={mode} consumer_id={consumer_id} "
+    f"inbox_events={int(counters.inbox_events)} "
+    f"sse_reconnects={int(counters.sse_reconnects)} "
+    f"feed_resets={int(counters.feed_resets)} "
+    f"submits_started={int(counters.submits_started)} "
+    f"submits_succeeded={int(counters.submits_succeeded)} "
+    f"submits_failed={int(counters.submits_failed)} "
+    f"scheduler_refill_cycles={int(counters.scheduler_refill_cycles)} "
+    f"completions_seen={int(counters.completions_seen)} "
+    f"completions_matched={int(counters.completions_matched)} "
+    f"pending={int(max(0, int(pending_count)))} "
+    f"submitting={int(max(0, int(submitting_count)))}",
+    flush=True,
+  )
 
 
 def _hardware_key(host_id: str) -> str:
@@ -600,6 +666,13 @@ class _PendingLiveJob:
   job_t0_mono: float
 
 
+@dataclass
+class _LiveSubmitWork:
+  job: object
+  job_cfg: dict[str, Any]
+  job_t0_mono: float
+
+
 def _noop_start_phase(_phase_key: str, _base_message: str, _status_phase: str) -> None:
   return None
 
@@ -646,6 +719,11 @@ class _PendingUploadJob:
   progress_finish_phase: Any = _noop_finish_phase
   progress_heartbeat: Any = _noop_progress_heartbeat
   progress_set_message: Any = _noop_set_message
+
+
+@dataclass
+class _UploadSubmitWork:
+  pending: _PendingUploadJob
 
 
 def _new_pending_upload_job(*, job: object) -> _PendingUploadJob:
@@ -778,6 +856,54 @@ def _apply_upload_pending_status(*, pending: _PendingUploadJob, row: dict[str, A
   if msg != pending.asr_wait_message:
     pending.asr_wait_message = msg
     pending.progress_set_message(msg, status_phase="whisperx_wait")
+
+
+def _is_asr_terminal_state(state: str) -> bool:
+  return str(state or "").strip().lower() in {"completed", "failed", "cancelled", "superseded"}
+
+
+def _upload_terminal_event_from_pending_row(*, request_id: str, row: dict[str, Any]) -> dict[str, Any]:
+  state = str(row.get("state") or "").strip().lower()
+  lifecycle = fetch_remote_request_status(request_id=request_id)
+  if bool(lifecycle.get("ok", False)):
+    body = dict(lifecycle.get("body") or {})
+    if not str(body.get("request_id") or "").strip():
+      body["request_id"] = str(request_id)
+    return body
+
+  status_code = int(lifecycle.get("status_code") or 0)
+  body = dict(lifecycle.get("body") or {})
+  code = str(body.get("code") or "ASR_REQUEST_STATUS_FETCH_FAILED")
+  message = str(
+    body.get("message")
+    or f"Failed to fetch ASR request lifecycle after terminal pending-state (http={status_code})"
+  )
+  retryable = bool(body.get("retryable", False))
+  if status_code == 404:
+    # v3 intentionally does not recover in-flight requests across ASR pool restarts.
+    # If pending-status reports terminal but lifecycle row vanished, fail fast so upload
+    # queue throughput recovers and new jobs keep flowing after restart.
+    return {
+      "request_id": str(request_id),
+      "state": "failed",
+      "error": {
+        "code": "ASR_REQUEST_LOST_AFTER_TERMINAL_PENDING",
+        "message": (
+          "ASR request lifecycle missing after terminal pending-state "
+          "(likely ASR pool restart; in-flight recovery is not implemented in v3)."
+        ),
+        "retryable": False,
+      },
+    }
+  return {
+    "request_id": str(request_id),
+    "state": ("failed" if state == "completed" else (state or "failed")),
+    "error": {
+      "code": code,
+      "message": message,
+      "retryable": retryable,
+    },
+  }
 
 
 def _record_upload_phase_timing(*, pending: _PendingUploadJob, name: str, elapsed_s: float) -> None:
@@ -1088,10 +1214,35 @@ def _completion_feed_reset_error(*, old_feed_id: str, new_feed_id: str) -> str:
   )
 
 
-def _fail_pending_live_due_to_feed_reset(*, pending: dict[str, _PendingLiveJob], old_feed_id: str, new_feed_id: str) -> None:
+def _fail_pending_live_due_to_feed_reset(
+  *,
+  pending: dict[str, _PendingLiveJob],
+  consumer_id: str,
+  old_feed_id: str,
+  new_feed_id: str,
+) -> None:
   if not pending:
     return
   err_msg = _completion_feed_reset_error(old_feed_id=old_feed_id, new_feed_id=new_feed_id)
+  keep_request_ids: set[str] = set()
+  try:
+    status_batch = fetch_remote_pending_status(
+      consumer_id=consumer_id,
+      request_ids=list(pending.keys()),
+      limit=200,
+    )
+    if bool(status_batch.get("ok", False)):
+      status_body = dict(status_batch.get("body") or {})
+      rows = status_body.get("rows") or []
+      if isinstance(rows, list):
+        for row in rows:
+          if not isinstance(row, dict):
+            continue
+          rid = str(row.get("request_id") or "").strip()
+          if rid:
+            keep_request_ids.add(rid)
+  except Exception:
+    pass
   event = {
     "state": "failed",
     "error": {
@@ -1100,12 +1251,17 @@ def _fail_pending_live_due_to_feed_reset(*, pending: dict[str, _PendingLiveJob],
       "retryable": False,
     },
   }
-  for pending_job in list(pending.values()):
+  failed_request_ids: list[str] = []
+  for request_id, pending_job in list(pending.items()):
+    if str(request_id) in keep_request_ids:
+      # Request still exists on the new feed; do not fail it as stale.
+      continue
     try:
       ev = dict(event)
       ev["request_id"] = str(pending_job.request_id)
       _finalize_live_chunk_terminal(pending_job, ev)
       print(f"Error {pending_job.job.job_id}: {err_msg}")
+      failed_request_ids.append(str(request_id))
     except Exception as e:
       _write_status(
         pending_job.job.status_path,
@@ -1118,132 +1274,307 @@ def _fail_pending_live_due_to_feed_reset(*, pending: dict[str, _PendingLiveJob],
       )
       finish_job(pending_job.job, ok=False)
       print(f"Error {pending_job.job.job_id}: {err_msg} | fallback={e!r}")
-  pending.clear()
+      failed_request_ids.append(str(request_id))
+  for rid in failed_request_ids:
+    pending.pop(str(rid), None)
+
+
+def _live_submit_worker_loop(
+  *,
+  submit_queue: "queue.Queue[_LiveSubmitWork | None]",
+  event_bus: WorkerEventBus,
+  consumer_id: str,
+) -> None:
+  while True:
+    work = submit_queue.get()
+    if work is None:
+      return
+    payload: dict[str, Any] = {
+      "mode": "live",
+      "job": work.job,
+      "job_cfg": work.job_cfg,
+      "job_t0_mono": float(work.job_t0_mono),
+    }
+    try:
+      request_payload = _prepare_live_chunk_request(job=work.job, job_cfg=work.job_cfg)
+      submit = submit_remote_pool_request(
+        request_payload=request_payload,
+        consumer_id=consumer_id,
+      )
+      payload["submit"] = dict(submit or {})
+    except Exception as e:
+      payload["error"] = str(e)
+    event_bus.put(WorkerEventType.SUBMIT_RESULT, payload)
+
+
+def _handle_live_submit_result(*, payload: dict[str, Any], pending: dict[str, _PendingLiveJob]) -> bool:
+  job = payload.get("job")
+  if job is None:
+    return False
+  job_cfg = dict(payload.get("job_cfg") or {})
+  try:
+    job_t0 = float(payload.get("job_t0_mono") or time.monotonic())
+  except Exception:
+    job_t0 = time.monotonic()
+  err_msg = str(payload.get("error") or "").strip()
+  if err_msg:
+    _write_status(
+      job.status_path,
+      state="error",
+      phase="error",
+      progress=1.0,
+      finished_at=_utc_iso(),
+      message=f"Worker error: {err_msg}",
+      error=err_msg,
+    )
+    finish_job(job, ok=False)
+    print(f"Error {job.job_id}: {err_msg}")
+    return True
+
+  submit = dict(payload.get("submit") or {})
+  if not bool(submit.get("ok", False)):
+    err_response = dict(submit.get("error_response") or {})
+    err = dict(err_response.get("error") or {})
+    msg = str(err.get("message") or err_response.get("message") or "ASR submit failed")
+    code = str(err.get("code") or err_response.get("code") or "ASR_SUBMIT_FAILED")
+    _write_status(
+      job.status_path,
+      state="error",
+      phase="error",
+      progress=1.0,
+      finished_at=_utc_iso(),
+      message=f"Worker error: {code}: {msg}",
+      error=f"{code}: {msg}",
+    )
+    finish_job(job, ok=False)
+    print(f"Error {job.job_id}: submit_failed {code}: {msg}")
+    return True
+
+  request_id = str(submit.get("request_id") or "").strip()
+  if not request_id:
+    _write_status(
+      job.status_path,
+      state="error",
+      phase="error",
+      progress=1.0,
+      finished_at=_utc_iso(),
+      message="Worker error: ASR submit response missing request_id",
+      error="ASR submit response missing request_id",
+    )
+    finish_job(job, ok=False)
+    print(f"Error {job.job_id}: missing_request_id")
+    return True
+
+  lifecycle = dict(submit.get("submit_lifecycle") or {})
+  lifecycle_state = str(lifecycle.get("state") or "").strip().lower()
+  _write_status(
+    job.status_path,
+    state="running",
+    phase="whisperx_wait",
+    progress=0.1,
+    message=f"Waiting for ASR completion ({request_id})…",
+    asr_request_id=request_id,
+  )
+  rec = _PendingLiveJob(
+    request_id=request_id,
+    job=job,
+    job_cfg=job_cfg,
+    job_t0_mono=job_t0,
+  )
+  if lifecycle_state in {"completed", "failed", "cancelled", "superseded"}:
+    event = dict(lifecycle)
+    event["request_id"] = request_id
+    try:
+      _finalize_live_chunk_terminal(rec, event)
+      print(f"Done {job.job_id} state={lifecycle_state}")
+    except Exception as e:
+      _write_status(
+        job.status_path,
+        state="error",
+        phase="error",
+        progress=1.0,
+        finished_at=_utc_iso(),
+        message=f"Worker error: {e!r}",
+        error=str(e),
+      )
+      finish_job(job, ok=False)
+      print(f"Error {job.job_id}: {e!r}")
+    return True
+
+  pending[request_id] = rec
+  return True
+
+
+def _live_submit_result_succeeded(payload: dict[str, Any]) -> bool:
+  err_msg = str(payload.get("error") or "").strip()
+  if err_msg:
+    return False
+  submit = dict(payload.get("submit") or {})
+  if not bool(submit.get("ok", False)):
+    return False
+  request_id = str(submit.get("request_id") or "").strip()
+  if not request_id:
+    return False
+  return True
+
+
+def _completion_stream_worker_loop(
+  *,
+  consumer_id: str,
+  event_bus: WorkerEventBus,
+  stop_event: threading.Event,
+) -> None:
+  def _on_event(kind: str, payload: dict[str, Any]) -> None:
+    if kind == "completion":
+      event_bus.put(WorkerEventType.COMPLETION_EVENT, {"event": dict(payload or {})})
+      return
+    if kind == "feed_reset":
+      event_bus.put(WorkerEventType.FEED_RESET, dict(payload or {}))
+      return
+    if kind == "stream_error":
+      event_bus.put(WorkerEventType.TICK, {"reason": "completion_stream_error"})
+
+  stream_remote_completions_forever(
+    consumer_id=consumer_id,
+    start_since_seq=0,
+    stop_event=stop_event,
+    on_event=_on_event,
+  )
 
 
 def _run_live_worker_submit_reap() -> int:
   mode = "live"
   consumer_id = _worker_consumer_id(mode)
   max_outstanding = _worker_live_max_outstanding()
+  tick_interval_s = max(0.05, float(_worker_coordinator_tick_interval_s()))
+  metrics_log_interval_s = max(1.0, float(_worker_metrics_log_interval_s()))
+  event_bus = WorkerEventBus()
+  inbox_watcher = start_inbox_watcher(
+    inbox_dir=INBOX,
+    event_bus=event_bus,
+    debounce_ms=_worker_inbox_debounce_ms(),
+  )
+  submit_queue: "queue.Queue[_LiveSubmitWork | None]" = queue.Queue(maxsize=max(1, int(max_outstanding)))
+  submit_thread = threading.Thread(
+    target=_live_submit_worker_loop,
+    kwargs={
+      "submit_queue": submit_queue,
+      "event_bus": event_bus,
+      "consumer_id": consumer_id,
+    },
+    name="worker-live-submit",
+    daemon=True,
+  )
+  submit_thread.start()
+  completion_stop = threading.Event()
+  completion_thread = threading.Thread(
+    target=_completion_stream_worker_loop,
+    kwargs={
+      "consumer_id": consumer_id,
+      "event_bus": event_bus,
+      "stop_event": completion_stop,
+    },
+    name="worker-live-completion-stream",
+    daemon=True,
+  )
+  completion_thread.start()
   pending: dict[str, _PendingLiveJob] = {}
-  since_seq = 0
-  last_feed_id = ""
+  submitting: dict[str, _LiveSubmitWork] = {}
+  counters = _WorkerLoopCounters()
+  inbox_dirty = True
   # TODO(v3-followup): add restart recovery / re-request reconciliation for pending live jobs.
   print(f"worker_daemon started mode={mode} consumer_id={consumer_id} max_outstanding={max_outstanding}")
-  while True:
-    did_work = False
-    comp = fetch_remote_completions(
-      consumer_id=consumer_id,
-      since_seq=since_seq,
-      limit=200,
-    )
-    if comp.get("ok", False):
-      body = dict(comp.get("body") or {})
-      feed_id = str(body.get("feed_id") or "").strip()
-      if feed_id:
-        if last_feed_id and feed_id != last_feed_id:
-          # Feed id change means ASR pool restarted and in-memory completion
-          # sequence was reset. Do not attempt recovery in v3: fail in-flight
-          # jobs, reset cursor, and continue with new jobs.
+  event_bus.put(WorkerEventType.TICK, {"reason": "startup"})
+  try:
+    while True:
+      ev = event_bus.get(timeout_s=tick_interval_s)
+      if ev is not None and ev.kind == WorkerEventType.SHUTDOWN:
+        break
+
+      did_work = False
+      if ev is not None:
+        if ev.kind == WorkerEventType.INBOX_DIRTY:
+          counters.inbox_events += 1
+          inbox_dirty = True
+        elif ev.kind == WorkerEventType.SUBMIT_RESULT:
+          payload = dict(ev.payload or {})
+          if str(payload.get("mode") or "") == "live":
+            job = payload.get("job")
+            job_id = str(getattr(job, "job_id", "") or "")
+            if job_id:
+              submitting.pop(job_id, None)
+            if _live_submit_result_succeeded(payload):
+              counters.submits_succeeded += 1
+            else:
+              counters.submits_failed += 1
+            did_work = _handle_live_submit_result(payload=payload, pending=pending) or did_work
+            inbox_dirty = True
+        elif ev.kind == WorkerEventType.COMPLETION_EVENT:
+          event = dict((ev.payload or {}).get("event") or {})
+          rid = str(event.get("request_id") or "").strip()
+          if rid:
+            counters.completions_seen += 1
+            pending_job = pending.pop(rid, None)
+            if pending_job is not None:
+              counters.completions_matched += 1
+              did_work = True
+              inbox_dirty = True
+              try:
+                _finalize_live_chunk_terminal(pending_job, event)
+                print(f"Done {pending_job.job.job_id} state={str(event.get('state') or '')}")
+              except Exception as e:
+                _write_status(
+                  pending_job.job.status_path,
+                  state="error",
+                  phase="error",
+                  progress=1.0,
+                  finished_at=_utc_iso(),
+                  message=f"Worker error: {e!r}",
+                  error=str(e),
+                )
+                finish_job(pending_job.job, ok=False)
+                print(f"Error {pending_job.job.job_id}: {e!r}")
+        elif ev.kind == WorkerEventType.FEED_RESET:
+          counters.feed_resets += 1
+          old_feed_id = str((ev.payload or {}).get("old_feed_id") or "").strip()
+          new_feed_id = str((ev.payload or {}).get("new_feed_id") or "").strip()
           _fail_pending_live_due_to_feed_reset(
             pending=pending,
-            old_feed_id=last_feed_id,
-            new_feed_id=feed_id,
+            consumer_id=consumer_id,
+            old_feed_id=old_feed_id,
+            new_feed_id=new_feed_id,
           )
-          since_seq = 0
           did_work = True
+          inbox_dirty = True
           print(
             "worker_daemon live completion_feed_reset "
-            f"old_feed_id={last_feed_id[:12]} new_feed_id={feed_id[:12]} since_seq_reset=0"
+            f"old_feed_id={old_feed_id[:12]} new_feed_id={new_feed_id[:12]} since_seq_reset=0"
           )
-          last_feed_id = feed_id
+        elif ev.kind == WorkerEventType.TICK:
+          reason = str((ev.payload or {}).get("reason") or "").strip().lower()
+          if reason == "completion_stream_error":
+            counters.sse_reconnects += 1
+        elif ev.kind != WorkerEventType.TICK:
           continue
-        last_feed_id = feed_id
-      try:
-        since_seq = int(max(since_seq, int(body.get("next_seq") or since_seq)))
-      except Exception:
-        pass
-      events = body.get("events") or []
-      if isinstance(events, list):
-        for event in events:
-          if not isinstance(event, dict):
-            continue
-          rid = str(event.get("request_id") or "").strip()
-          if not rid:
-            continue
-          pending_job = pending.pop(rid, None)
-          if pending_job is None:
-            continue
+
+      if inbox_dirty:
+        counters.scheduler_refill_cycles += 1
+        while (len(pending) + len(submitting)) < max_outstanding:
+          job = claim_next_job(job_kind_filter="live_chunk")
+          if not job:
+            inbox_dirty = False
+            break
           did_work = True
           try:
-            _finalize_live_chunk_terminal(pending_job, event)
-            print(f"Done {pending_job.job.job_id} state={str(event.get('state') or '')}")
-          except Exception as e:
-            _write_status(
-              pending_job.job.status_path,
-              state="error",
-              phase="error",
-              progress=1.0,
-              finished_at=_utc_iso(),
-              message=f"Worker error: {e!r}",
-              error=str(e),
+            job_cfg = json.loads(job.job_path.read_text(encoding="utf-8"))
+            work = _LiveSubmitWork(
+              job=job,
+              job_cfg=job_cfg,
+              job_t0_mono=time.monotonic(),
             )
-            finish_job(pending_job.job, ok=False)
-            print(f"Error {pending_job.job.job_id}: {e!r}")
-
-    while len(pending) < max_outstanding:
-      job = claim_next_job(job_kind_filter="live_chunk")
-      if not job:
-        break
-      did_work = True
-      job_t0 = time.monotonic()
-      try:
-        job_cfg = json.loads(job.job_path.read_text(encoding="utf-8"))
-        request_payload = _prepare_live_chunk_request(job=job, job_cfg=job_cfg)
-        submit = submit_remote_pool_request(
-          request_payload=request_payload,
-          consumer_id=consumer_id,
-        )
-        if not bool(submit.get("ok", False)):
-          err_response = dict(submit.get("error_response") or {})
-          err = dict(err_response.get("error") or {})
-          msg = str(err.get("message") or err_response.get("message") or "ASR submit failed")
-          code = str(err.get("code") or err_response.get("code") or "ASR_SUBMIT_FAILED")
-          _write_status(
-            job.status_path,
-            state="error",
-            phase="error",
-            progress=1.0,
-            finished_at=_utc_iso(),
-            message=f"Worker error: {code}: {msg}",
-            error=f"{code}: {msg}",
-          )
-          finish_job(job, ok=False)
-          print(f"Error {job.job_id}: submit_failed {code}: {msg}")
-          continue
-        request_id = str(submit.get("request_id") or "").strip()
-        lifecycle = dict(submit.get("submit_lifecycle") or {})
-        lifecycle_state = str(lifecycle.get("state") or "").strip().lower()
-        _write_status(
-          job.status_path,
-          state="running",
-          phase="whisperx_wait",
-          progress=0.1,
-          message=f"Waiting for ASR completion ({request_id})…",
-          asr_request_id=request_id,
-        )
-        rec = _PendingLiveJob(
-          request_id=request_id,
-          job=job,
-          job_cfg=job_cfg,
-          job_t0_mono=job_t0,
-        )
-        if lifecycle_state in {"completed", "failed", "cancelled", "superseded"}:
-          event = dict(lifecycle)
-          event["request_id"] = request_id
-          try:
-            _finalize_live_chunk_terminal(rec, event)
-            print(f"Done {job.job_id} state={lifecycle_state}")
+            submitting[str(job.job_id)] = work
+            counters.submits_started += 1
+            submit_queue.put(work)
           except Exception as e:
             _write_status(
               job.status_path,
@@ -1256,24 +1587,34 @@ def _run_live_worker_submit_reap() -> int:
             )
             finish_job(job, ok=False)
             print(f"Error {job.job_id}: {e!r}")
-          continue
-        pending[request_id] = rec
-      except Exception as e:
-        _write_status(
-          job.status_path,
-          state="error",
-          phase="error",
-          progress=1.0,
-          finished_at=_utc_iso(),
-          message=f"Worker error: {e!r}",
-          error=str(e),
-        )
-        finish_job(job, ok=False)
-        print(f"Error {job.job_id}: {e!r}")
 
-    if not did_work:
-      # Keep live cadence tight both for in-flight reap and for newly queued chunks.
-      time.sleep(max(0.05, float(_worker_completions_poll_interval_s())))
+      if did_work:
+        # Keep coordinator responsive after progress without sleeping out the full tick.
+        event_bus.put(WorkerEventType.TICK, {"reason": "followup"})
+      _maybe_log_worker_counters(
+        mode=mode,
+        consumer_id=consumer_id,
+        counters=counters,
+        pending_count=len(pending),
+        submitting_count=len(submitting),
+        interval_s=metrics_log_interval_s,
+        force=False,
+      )
+  finally:
+    _maybe_log_worker_counters(
+      mode=mode,
+      consumer_id=consumer_id,
+      counters=counters,
+      pending_count=len(pending),
+      submitting_count=len(submitting),
+      interval_s=metrics_log_interval_s,
+      force=True,
+    )
+    completion_stop.set()
+    completion_thread.join(timeout=1.0)
+    inbox_watcher.close()
+    submit_queue.put(None)
+    submit_thread.join(timeout=1.0)
 
   return 0
 
@@ -1788,143 +2129,270 @@ def _fail_pending_upload_due_to_feed_reset(*, pending: dict[str, _PendingUploadJ
   pending.clear()
 
 
+def _upload_submit_worker_loop(
+  *,
+  submit_queue: "queue.Queue[_UploadSubmitWork | None]",
+  event_bus: WorkerEventBus,
+  consumer_id: str,
+) -> None:
+  while True:
+    work = submit_queue.get()
+    if work is None:
+      return
+    pending = work.pending
+    payload: dict[str, Any] = {
+      "mode": "upload",
+      "pending": pending,
+    }
+    try:
+      terminal_event = _prepare_upload_job_for_submit(
+        pending=pending,
+        consumer_id=consumer_id,
+      )
+      if terminal_event is not None:
+        payload["terminal_event"] = dict(terminal_event)
+    except Exception as e:
+      payload["error"] = str(e)
+    event_bus.put(WorkerEventType.SUBMIT_RESULT, payload)
+
+
+def _handle_upload_submit_result(*, payload: dict[str, Any], pending: dict[str, _PendingUploadJob]) -> bool:
+  pending_job = payload.get("pending")
+  if pending_job is None:
+    return False
+  err_msg = str(payload.get("error") or "").strip()
+  if err_msg:
+    _finalize_upload_job_error(pending=pending_job, exc=RuntimeError(err_msg))
+    print(f"Error {pending_job.job.job_id}: {err_msg}")
+    return True
+
+  terminal_event = payload.get("terminal_event")
+  if isinstance(terminal_event, dict):
+    try:
+      _finalize_upload_job_terminal(pending=pending_job, event=terminal_event)
+      print(f"Done {pending_job.job.job_id} state={str(terminal_event.get('state') or '')}")
+    except Exception as e:
+      _finalize_upload_job_error(pending=pending_job, exc=e)
+      print(f"Error {pending_job.job.job_id}: {e!r}")
+    return True
+
+  if not pending_job.request_id:
+    _finalize_upload_job_error(pending=pending_job, exc=RuntimeError("ASR submit completed without request_id"))
+    print(f"Error {pending_job.job.job_id}: missing_request_id")
+    return True
+
+  pending[pending_job.request_id] = pending_job
+  return True
+
+
+def _upload_submit_result_succeeded(payload: dict[str, Any]) -> bool:
+  err_msg = str(payload.get("error") or "").strip()
+  if err_msg:
+    return False
+  pending_job = payload.get("pending")
+  if pending_job is None:
+    return False
+  return True
+
+
 def _run_upload_worker_submit_reap() -> int:
   mode = "upload"
   consumer_id = _worker_consumer_id(mode)
-  max_outstanding = 1
+  max_outstanding = _worker_upload_max_outstanding()
+  tick_interval_s = max(0.05, float(_worker_coordinator_tick_interval_s()))
+  metrics_log_interval_s = max(1.0, float(_worker_metrics_log_interval_s()))
+  event_bus = WorkerEventBus()
+  inbox_watcher = start_inbox_watcher(
+    inbox_dir=INBOX,
+    event_bus=event_bus,
+    debounce_ms=_worker_inbox_debounce_ms(),
+  )
+  submit_queue: "queue.Queue[_UploadSubmitWork | None]" = queue.Queue(maxsize=max(1, int(max_outstanding)))
+  submit_thread = threading.Thread(
+    target=_upload_submit_worker_loop,
+    kwargs={
+      "submit_queue": submit_queue,
+      "event_bus": event_bus,
+      "consumer_id": consumer_id,
+    },
+    name="worker-upload-submit",
+    daemon=True,
+  )
+  submit_thread.start()
+  completion_stop = threading.Event()
+  completion_thread = threading.Thread(
+    target=_completion_stream_worker_loop,
+    kwargs={
+      "consumer_id": consumer_id,
+      "event_bus": event_bus,
+      "stop_event": completion_stop,
+    },
+    name="worker-upload-completion-stream",
+    daemon=True,
+  )
+  completion_thread.start()
   pending_status_poll_interval_s = max(0.2, float(_worker_pending_status_poll_interval_s()))
   pending: dict[str, _PendingUploadJob] = {}
-  since_seq = 0
-  last_feed_id = ""
+  submitting: dict[str, _UploadSubmitWork] = {}
+  counters = _WorkerLoopCounters()
+  inbox_dirty = True
   last_pending_status_poll_mono = 0.0
   # TODO(v3-followup): add restart recovery / re-request reconciliation for pending upload jobs.
   print(f"worker_daemon started mode={mode} consumer_id={consumer_id} max_outstanding={max_outstanding}")
-  while True:
-    did_work = False
-    comp = fetch_remote_completions(
-      consumer_id=consumer_id,
-      since_seq=since_seq,
-      limit=200,
-    )
-    if comp.get("ok", False):
-      body = dict(comp.get("body") or {})
-      feed_id = str(body.get("feed_id") or "").strip()
-      if feed_id:
-        if last_feed_id and feed_id != last_feed_id:
-          # Feed id change means ASR pool restarted and in-memory completion
-          # sequence was reset. Do not attempt recovery in v3: fail in-flight
-          # jobs, reset cursor, and continue with new jobs.
+  event_bus.put(WorkerEventType.TICK, {"reason": "startup"})
+  try:
+    while True:
+      ev = event_bus.get(timeout_s=tick_interval_s)
+      if ev is not None and ev.kind == WorkerEventType.SHUTDOWN:
+        break
+
+      did_work = False
+      if ev is not None:
+        if ev.kind == WorkerEventType.INBOX_DIRTY:
+          counters.inbox_events += 1
+          inbox_dirty = True
+        elif ev.kind == WorkerEventType.SUBMIT_RESULT:
+          payload = dict(ev.payload or {})
+          if str(payload.get("mode") or "") == "upload":
+            pending_job = payload.get("pending")
+            job_id = str(getattr(getattr(pending_job, "job", None), "job_id", "") or "")
+            if job_id:
+              submitting.pop(job_id, None)
+            if _upload_submit_result_succeeded(payload):
+              counters.submits_succeeded += 1
+            else:
+              counters.submits_failed += 1
+            did_work = _handle_upload_submit_result(payload=payload, pending=pending) or did_work
+            inbox_dirty = True
+        elif ev.kind == WorkerEventType.COMPLETION_EVENT:
+          event = dict((ev.payload or {}).get("event") or {})
+          rid = str(event.get("request_id") or "").strip()
+          if rid:
+            counters.completions_seen += 1
+            pending_job = pending.pop(rid, None)
+            if pending_job is not None:
+              counters.completions_matched += 1
+              did_work = True
+              inbox_dirty = True
+              try:
+                _finalize_upload_job_terminal(pending=pending_job, event=event)
+                print(f"Done {pending_job.job.job_id} state={str(event.get('state') or '')}")
+              except Exception as e:
+                _finalize_upload_job_error(pending=pending_job, exc=e)
+                print(f"Error {pending_job.job.job_id}: {e!r}")
+        elif ev.kind == WorkerEventType.FEED_RESET:
+          counters.feed_resets += 1
+          old_feed_id = str((ev.payload or {}).get("old_feed_id") or "").strip()
+          new_feed_id = str((ev.payload or {}).get("new_feed_id") or "").strip()
           _fail_pending_upload_due_to_feed_reset(
             pending=pending,
-            old_feed_id=last_feed_id,
-            new_feed_id=feed_id,
+            old_feed_id=old_feed_id,
+            new_feed_id=new_feed_id,
           )
-          since_seq = 0
           did_work = True
+          inbox_dirty = True
           print(
             "worker_daemon upload completion_feed_reset "
-            f"old_feed_id={last_feed_id[:12]} new_feed_id={feed_id[:12]} since_seq_reset=0"
+            f"old_feed_id={old_feed_id[:12]} new_feed_id={new_feed_id[:12]} since_seq_reset=0"
           )
-          last_feed_id = feed_id
+        elif ev.kind == WorkerEventType.TICK:
+          reason = str((ev.payload or {}).get("reason") or "").strip().lower()
+          if reason == "completion_stream_error":
+            counters.sse_reconnects += 1
+        elif ev.kind != WorkerEventType.TICK:
           continue
-        last_feed_id = feed_id
-      try:
-        since_seq = int(max(since_seq, int(body.get("next_seq") or since_seq)))
-      except Exception:
-        pass
-      events = body.get("events") or []
-      if isinstance(events, list):
-        for event in events:
-          if not isinstance(event, dict):
-            continue
-          rid = str(event.get("request_id") or "").strip()
-          if not rid:
-            continue
-          pending_job = pending.pop(rid, None)
-          if pending_job is None:
-            continue
-          did_work = True
+
+      if pending:
+        now_mono = time.monotonic()
+        if (now_mono - last_pending_status_poll_mono) >= pending_status_poll_interval_s:
+          last_pending_status_poll_mono = now_mono
+          status_batch = fetch_remote_pending_status(
+            consumer_id=consumer_id,
+            request_ids=list(pending.keys()),
+            limit=200,
+          )
+          if status_batch.get("ok", False):
+            status_body = dict(status_batch.get("body") or {})
+            rows = status_body.get("rows") or []
+            if isinstance(rows, list):
+              for row in rows:
+                if not isinstance(row, dict):
+                  continue
+                rid = str(row.get("request_id") or "").strip()
+                if not rid:
+                  continue
+                pending_job = pending.get(rid)
+                if pending_job is None:
+                  continue
+                try:
+                  _apply_upload_pending_status(pending=pending_job, row=row)
+                except Exception:
+                  pass
+                state = str(row.get("state") or "").strip().lower()
+                if not _is_asr_terminal_state(state):
+                  continue
+                pending.pop(rid, None)
+                did_work = True
+                inbox_dirty = True
+                try:
+                  terminal_event = _upload_terminal_event_from_pending_row(request_id=rid, row=row)
+                  _finalize_upload_job_terminal(pending=pending_job, event=terminal_event)
+                  print(f"Done {pending_job.job.job_id} state={str(terminal_event.get('state') or '')}")
+                except Exception as e:
+                  _finalize_upload_job_error(pending=pending_job, exc=e)
+                  print(f"Error {pending_job.job.job_id}: {e!r}")
+        for pending_job in list(pending.values()):
           try:
-            _finalize_upload_job_terminal(pending=pending_job, event=event)
-            print(f"Done {pending_job.job.job_id} state={str(event.get('state') or '')}")
+            pending_job.progress_heartbeat()
+          except Exception:
+            pass
+
+      if inbox_dirty:
+        counters.scheduler_refill_cycles += 1
+        while (len(pending) + len(submitting)) < max_outstanding:
+          job = claim_next_job(job_kind_filter="upload_audio")
+          if not job:
+            inbox_dirty = False
+            break
+          did_work = True
+          pending_job = _new_pending_upload_job(job=job)
+          try:
+            work = _UploadSubmitWork(pending=pending_job)
+            submitting[str(job.job_id)] = work
+            counters.submits_started += 1
+            submit_queue.put(work)
           except Exception as e:
+            submitting.pop(str(job.job_id), None)
             _finalize_upload_job_error(pending=pending_job, exc=e)
-            print(f"Error {pending_job.job.job_id}: {e!r}")
+            print(f"Error {job.job_id}: {e!r}")
 
-    if pending:
-      now_mono = time.monotonic()
-      if (now_mono - last_pending_status_poll_mono) >= pending_status_poll_interval_s:
-        last_pending_status_poll_mono = now_mono
-        status_batch = fetch_remote_pending_status(
-          consumer_id=consumer_id,
-          request_ids=list(pending.keys()),
-          limit=200,
-        )
-        if status_batch.get("ok", False):
-          status_body = dict(status_batch.get("body") or {})
-          status_feed_id = str(status_body.get("feed_id") or "").strip()
-          if status_feed_id and last_feed_id and status_feed_id != last_feed_id:
-            # Keep feed-reset behavior consistent with completion polling.
-            _fail_pending_upload_due_to_feed_reset(
-              pending=pending,
-              old_feed_id=last_feed_id,
-              new_feed_id=status_feed_id,
-            )
-            since_seq = 0
-            did_work = True
-            print(
-              "worker_daemon upload pending_status_feed_reset "
-              f"old_feed_id={last_feed_id[:12]} new_feed_id={status_feed_id[:12]} since_seq_reset=0"
-            )
-            last_feed_id = status_feed_id
-            continue
-          if status_feed_id:
-            last_feed_id = status_feed_id
-          rows = status_body.get("rows") or []
-          if isinstance(rows, list):
-            for row in rows:
-              if not isinstance(row, dict):
-                continue
-              rid = str(row.get("request_id") or "").strip()
-              if not rid:
-                continue
-              pending_job = pending.get(rid)
-              if pending_job is None:
-                continue
-              try:
-                _apply_upload_pending_status(pending=pending_job, row=row)
-              except Exception:
-                pass
-      for pending_job in list(pending.values()):
-        try:
-          pending_job.progress_heartbeat()
-        except Exception:
-          pass
-
-    while len(pending) < max_outstanding:
-      job = claim_next_job(job_kind_filter="upload_audio")
-      if not job:
-        break
-      did_work = True
-      pending_job = _new_pending_upload_job(job=job)
-      try:
-        terminal_event = _prepare_upload_job_for_submit(
-          pending=pending_job,
-          consumer_id=consumer_id,
-        )
-        if terminal_event is not None:
-          _finalize_upload_job_terminal(pending=pending_job, event=terminal_event)
-          print(f"Done {job.job_id} state={str(terminal_event.get('state') or '')}")
-          continue
-        if not pending_job.request_id:
-          raise RuntimeError("ASR submit completed without request_id")
-        pending[pending_job.request_id] = pending_job
-      except Exception as e:
-        _finalize_upload_job_error(pending=pending_job, exc=e)
-        print(f"Error {job.job_id}: {e!r}")
-
-    if not did_work:
-      time.sleep(max(0.05, float(_worker_completions_poll_interval_s())))
+      if did_work:
+        # Keep coordinator responsive after progress without sleeping out the full tick.
+        event_bus.put(WorkerEventType.TICK, {"reason": "followup"})
+      _maybe_log_worker_counters(
+        mode=mode,
+        consumer_id=consumer_id,
+        counters=counters,
+        pending_count=len(pending),
+        submitting_count=len(submitting),
+        interval_s=metrics_log_interval_s,
+        force=False,
+      )
+  finally:
+    _maybe_log_worker_counters(
+      mode=mode,
+      consumer_id=consumer_id,
+      counters=counters,
+      pending_count=len(pending),
+      submitting_count=len(submitting),
+      interval_s=metrics_log_interval_s,
+      force=True,
+    )
+    completion_stop.set()
+    completion_thread.join(timeout=1.0)
+    inbox_watcher.close()
+    submit_queue.put(None)
+    submit_thread.join(timeout=1.0)
 
   return 0
 
