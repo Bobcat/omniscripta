@@ -101,6 +101,7 @@ class LiveSession:
     fixture_id: str = ""
     fixture_version: str = ""
     fixture_test_mode: str = ""
+    asr_language: str = ""
 
 
 @dataclass
@@ -127,6 +128,7 @@ class ClosedSessionArchive:
     fixture_id: str = ""
     fixture_version: str = ""
     fixture_test_mode: str = ""
+    asr_language: str = ""
 
 
 class LiveSessionManager:
@@ -192,6 +194,7 @@ class LiveSessionManager:
         *,
         ttl_seconds: int | None = None,
         live_engine: str | None = None,
+        asr_language: str | None = None,
     ) -> dict[str, Any]:
         now_unix = time.time()
         now_mono = time.monotonic()
@@ -199,6 +202,7 @@ class LiveSessionManager:
         ttl = int(max(10, ttl))
         preconnect_ttl = int(max(5, min(ttl, self._preconnect_ttl_seconds)))
         engine_name = str(live_engine or "").strip().lower() or "rolling_context"
+        session_asr_language = str(asr_language or "").strip().lower()
 
         with self._lock:
             self._cleanup_expired_locked(now_unix)
@@ -214,6 +218,7 @@ class LiveSessionManager:
                 ttl_seconds=ttl,
                 live_engine=engine_name,
                 last_seen_unix=now_unix,
+                asr_language=session_asr_language,
             )
             self._sessions[session_id] = sess
             snapshot = self._snapshot_locked(sess)
@@ -337,6 +342,22 @@ class LiveSessionManager:
                 sess.fixture_version = str(fixture_version or "").strip()
             if fixture_test_mode is not None:
                 sess.fixture_test_mode = str(fixture_test_mode or "").strip()
+            return self._snapshot_locked(sess)
+
+    def set_asr_language(
+        self,
+        session_id: str,
+        *,
+        asr_language: str | None = None,
+    ) -> dict[str, Any]:
+        now_unix = time.time()
+        safe_language = str(asr_language or "").strip().lower()
+        with self._lock:
+            sess = self._sessions.get(session_id)
+            if not sess:
+                raise KeyError("session_not_found")
+            sess.last_seen_unix = now_unix
+            sess.asr_language = safe_language
             return self._snapshot_locked(sess)
 
     def update_live_preview(
@@ -683,6 +704,7 @@ class LiveSessionManager:
                 fixture_id="",
                 fixture_version="",
                 fixture_test_mode="",
+                asr_language="",
             )
             src_sess = self._sessions.get(str(session_id))
             if src_sess is not None:
@@ -693,6 +715,7 @@ class LiveSessionManager:
                 arc.fixture_id = str(src_sess.fixture_id or "")
                 arc.fixture_version = str(src_sess.fixture_version or "")
                 arc.fixture_test_mode = str(src_sess.fixture_test_mode or "")
+                arc.asr_language = str(src_sess.asr_language or "")
                 if not requested_engine:
                     arc.live_engine = str(src_sess.live_engine or "rolling_context")
             self._archives[arc.session_id] = arc
@@ -750,6 +773,7 @@ class LiveSessionManager:
             "fixture_id": str(sess.fixture_id or ""),
             "fixture_version": str(sess.fixture_version or ""),
             "fixture_test_mode": str(sess.fixture_test_mode or ""),
+            "asr_language": str(sess.asr_language or ""),
             "stats_log_path": str(self._stats_log_path(sess.session_id)),
         }
 
@@ -777,6 +801,7 @@ class LiveSessionManager:
             "fixture_id": str(arc.fixture_id or ""),
             "fixture_version": str(arc.fixture_version or ""),
             "fixture_test_mode": str(arc.fixture_test_mode or ""),
+            "asr_language": str(arc.asr_language or ""),
         }
 
     def _live_result_snapshot_locked(self, sess: LiveSession) -> dict[str, Any]:
@@ -856,6 +881,7 @@ class LiveSessionManager:
             "fixture_id": str(sess.fixture_id or ""),
             "fixture_version": str(sess.fixture_version or ""),
             "fixture_test_mode": str(sess.fixture_test_mode or ""),
+            "asr_language": str(sess.asr_language or ""),
         }
 
     def _live_archive_result_snapshot_locked(self, arc: ClosedSessionArchive) -> dict[str, Any]:
@@ -930,6 +956,7 @@ class LiveSessionManager:
             "fixture_id": str(arc.fixture_id or ""),
             "fixture_version": str(arc.fixture_version or ""),
             "fixture_test_mode": str(arc.fixture_test_mode or ""),
+            "asr_language": str(arc.asr_language or ""),
         }
 
     def metrics_snapshot(self) -> dict[str, Any]:

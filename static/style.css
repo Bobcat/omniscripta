@@ -2717,6 +2717,74 @@
       flex: 1 1 0;
     }
 
+    .live-language-picker {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+      flex-wrap: wrap;
+    }
+
+    .live-language-picker.is-compact {
+      flex-wrap: nowrap;
+      align-items: center;
+    }
+
+    .live-language-picker.is-compact .live-language-help {
+      display: none;
+    }
+
+    .live-language-help {
+      width: 100%;
+      margin-top: -2px;
+      font-size: 0.68rem;
+      line-height: 1.2;
+      color: var(--muted, #64748b);
+      white-space: normal;
+    }
+
+
+    .live-language-picker .live-language-select {
+      width: auto;
+      min-width: 176px;
+      max-width: 260px;
+      padding: 6px 34px 6px 12px;
+      border-radius: 999px;
+      border: 1px solid var(--border-color, #dbe2ea);
+      background-color: #f8fafc;
+      color: var(--text-main, #1e293b);
+      font-size: 0.82rem;
+      font-weight: 600;
+      line-height: 1.2;
+      cursor: pointer;
+      appearance: none;
+      -webkit-appearance: none;
+      -moz-appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath fill='%23475569' d='M1.2.3 5 4.1 8.8.3 10 1.5 5 6 0 1.5z'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 12px center;
+      background-size: 10px 6px;
+      box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
+      transition: border-color 0.15s ease, box-shadow 0.15s ease, background-color 0.15s ease;
+    }
+
+    .live-language-picker .live-language-select:hover {
+      background-color: #ffffff;
+      border-color: #cbd5e1;
+    }
+
+    .live-language-picker .live-language-select:focus {
+      outline: none;
+      border-color: var(--accent-blue, #3b82f6);
+      box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.2);
+      background-color: #ffffff;
+    }
+
+    .live-language-picker .live-language-select:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+
     .live-bottom-bar .controls-center {
       display: flex;
       align-items: center;
@@ -3545,6 +3613,22 @@
 
       .live-bottom-bar .controls-left {
         flex: 0 0 auto;
+      }
+
+      .live-language-picker {
+        gap: 4px;
+      }
+
+
+      .live-language-help {
+        display: none;
+      }
+
+      .live-language-picker .live-language-select {
+        min-width: 124px;
+        max-width: 156px;
+        padding: 5px 28px 5px 10px;
+        font-size: 0.78rem;
       }
 
       .live-bottom-bar .controls-center {

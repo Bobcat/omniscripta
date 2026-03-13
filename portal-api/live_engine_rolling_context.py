@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -41,6 +42,21 @@ def _normalize_optional_language(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+_LIVE_SESSION_LANGUAGE_RE = re.compile(r"^[a-z]{2,3}(?:[-_][a-z0-9]{2,8})?$")
+
+
+def _parse_control_language(value: Any) -> str:
+    text = _normalize_optional_language(value)
+    if text is None:
+        return ""
+    normalized = str(text).lower()
+    if normalized in {"auto", "default", "server-default", "server_default"}:
+        return ""
+    if not _LIVE_SESSION_LANGUAGE_RE.match(normalized):
+        raise ValueError("language must be empty/auto or a short code like 'en', 'nl', 'pt-br'")
+    return normalized
 
 
 def _ms_to_byte_offset(ms: int, *, bytes_per_second: int, sample_width_bytes: int) -> int:
@@ -93,6 +109,7 @@ async def run_live_session_ws_rolling_context(
     LIVE_ROLLING_BUFFER_TRIM_DROP_MS = int(_cfg(config, "LIVE_ROLLING_BUFFER_TRIM_DROP_MS"))
     LIVE_ROLLING_MIN_NEW_AUDIO_MS = int(_cfg(config, "LIVE_ROLLING_MIN_NEW_AUDIO_MS"))
     LIVE_ROLLING_MIN_EMIT_INTERVAL_MS = int(_cfg(config, "LIVE_ROLLING_MIN_EMIT_INTERVAL_MS"))
+    session_live_asr_language = LIVE_ASR_LANGUAGE
 
     poll_interval_s = max(0.02, float(LIVE_ROLLING_POLL_INTERVAL_MS) / 1000.0)
     emit_interval_s = max(0.0, float(LIVE_ROLLING_MIN_EMIT_INTERVAL_MS) / 1000.0)
@@ -119,6 +136,13 @@ async def run_live_session_ws_rolling_context(
         return
 
     await websocket.accept()
+    try:
+        session_snapshot = LIVE_SESSIONS.snapshot(session_id)
+        snap_lang = _normalize_optional_language((session_snapshot or {}).get("asr_language"))
+        if snap_lang is not None:
+            session_live_asr_language = snap_lang
+    except Exception:
+        session_live_asr_language = LIVE_ASR_LANGUAGE
 
     stop_reason = "client_disconnected"
     websocket_closed = False
@@ -646,7 +670,7 @@ async def run_live_session_ws_rolling_context(
                 t0_ms=int(infer_t0_ms),
                 t1_ms=int(infer_t1_ms),
                 pcm16le=pcm,
-                language=LIVE_ASR_LANGUAGE,
+                language=session_live_asr_language,
                 # v3 scope: one hardcoded live lane.
                 live_lane="single",
                 preview_seq=infer_seq,
@@ -1098,7 +1122,7 @@ async def run_live_session_ws_rolling_context(
             chunk_bridge = LiveChunkBatchBridge(
                 sample_rate_hz=LIVE_AUDIO_SAMPLE_RATE_HZ,
                 channels=LIVE_AUDIO_CHANNELS,
-                language=LIVE_ASR_LANGUAGE,
+                language=session_live_asr_language,
                 diarize_enabled=LIVE_DIARIZE_ENABLED,
                 diarize_speaker_mode=LIVE_DIARIZE_SPEAKER_MODE,
                 diarize_min_speakers=LIVE_DIARIZE_MIN_SPEAKERS,
@@ -1125,7 +1149,7 @@ async def run_live_session_ws_rolling_context(
                     "buffer_trim_drop_ms": int(buffer_trim_drop_ms),
                     "min_new_audio_ms": int(min_new_audio_ms),
                     "min_emit_interval_ms": int(LIVE_ROLLING_MIN_EMIT_INTERVAL_MS),
-                    "language": LIVE_ASR_LANGUAGE,
+                    "language": session_live_asr_language,
                     "diarize_enabled": bool(LIVE_DIARIZE_ENABLED),
                     "diarize_speaker_mode": str(LIVE_DIARIZE_SPEAKER_MODE),
                     "diarize_min_speakers": int(LIVE_DIARIZE_MIN_SPEAKERS),
@@ -1224,7 +1248,7 @@ async def run_live_session_ws_rolling_context(
                 )
                 continue
 
-            control_type, _obj, parse_err = parse_client_message(raw_text)
+            control_type, obj, parse_err = parse_client_message(raw_text)
             if parse_err:
                 await send_event(error_event(session_id, code=parse_err, message="Invalid control message."))
                 continue
@@ -1233,6 +1257,28 @@ async def run_live_session_ws_rolling_context(
 
             if control_type == "ping":
                 await send_event(pong_event(session_id))
+                continue
+
+            if control_type == "set_language":
+                try:
+                    next_language = _parse_control_language((obj or {}).get("language"))
+                except ValueError as e:
+                    await send_event(error_event(session_id, code="invalid_language", message=str(e)))
+                    continue
+                snapshot = LIVE_SESSIONS.set_asr_language(
+                    session_id,
+                    asr_language=next_language,
+                )
+                session_live_asr_language = _normalize_optional_language(snapshot.get("asr_language"))
+                if session_live_asr_language is None:
+                    session_live_asr_language = LIVE_ASR_LANGUAGE
+                _append_log(
+                    "rolling_language_updated",
+                    language=(session_live_asr_language or ""),
+                    requested=(next_language or "auto"),
+                )
+                await _update_state_and_emit_result(force_result=True)
+                await send_event(control_ack_event(session_id, control_type="set_language", state=snapshot["state"]))
                 continue
 
             if control_type == "start":
