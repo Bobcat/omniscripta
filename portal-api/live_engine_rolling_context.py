@@ -173,6 +173,8 @@ async def run_live_session_ws_rolling_context(
     rolling_last_applied_seq = -1
     rolling_last_emit_mono = 0.0
     rolling_last_poll_mono = 0.0
+    rolling_gpu_proxy_transcribe_s: float = 0.0
+    rolling_gpu_proxy_pipeline_s: float = 0.0
 
     rolling_call_audit_recent: list[dict[str, Any]] = []
     rolling_call_audit_summary: dict[str, Any] = {
@@ -492,6 +494,8 @@ async def run_live_session_ws_rolling_context(
                 chunks_failed=rolling_chunks_failed,
                 finalization_state=finalization_state,
                 batch_job_id="",
+                gpu_proxy_transcribe_s=rolling_gpu_proxy_transcribe_s,
+                gpu_proxy_pipeline_s=rolling_gpu_proxy_pipeline_s,
             )
         except Exception:
             pass
@@ -723,6 +727,8 @@ async def run_live_session_ws_rolling_context(
         nonlocal rolling_last_preview_text
         nonlocal rolling_last_preview_audio_end_fallback_ms
         nonlocal finalization_state
+        nonlocal rolling_gpu_proxy_transcribe_s
+        nonlocal rolling_gpu_proxy_pipeline_s
 
         if chunk_bridge is None or rolling_inflight is None:
             return
@@ -774,6 +780,15 @@ async def run_live_session_ws_rolling_context(
             segments_returned_count = int(len(raw_segments))
             segments = [dict(seg) for seg in (poll.segments or []) if isinstance(seg, dict)]
             segments.sort(key=lambda seg: int(seg.get("t0_ms") or 0))
+
+            # -- Accumulate GPU proxy timing for EVERY completed poll --
+            _poll_status = dict(poll.status or {})
+            _gpu_t = _safe_float(_poll_status.get("asr_timing_whisperx_transcribe_call_s"))
+            if _gpu_t is not None:
+                rolling_gpu_proxy_transcribe_s += _gpu_t
+            _gpu_p = _safe_float(_poll_status.get("asr_timing_whisperx_total_s"))
+            if _gpu_p is not None:
+                rolling_gpu_proxy_pipeline_s += _gpu_p
 
             commit_segments: list[dict[str, Any]] = []
             preview_text = ""
@@ -894,9 +909,6 @@ async def run_live_session_ws_rolling_context(
                         if str(seg.get("text") or "").strip()
                     ).strip()
                     if commit_text:
-                        status_obj = dict(poll.status or {})
-                        asr_pipeline_time_s = _safe_float(status_obj.get("asr_timing_whisperx_total_s"))
-                        asr_transcribe_time_s = _safe_float(status_obj.get("asr_timing_whisperx_transcribe_s"))
                         try:
                             result = LIVE_SESSIONS.record_live_commit(
                                 session_id,
@@ -909,8 +921,6 @@ async def run_live_session_ws_rolling_context(
                                 error="",
                                 reason=str(commit_reason),
                                 chunk_duration_ms=int(max(0, commit_t1_ms - commit_t0_ms)),
-                                asr_pipeline_time_s=asr_pipeline_time_s,
-                                asr_transcribe_time_s=asr_transcribe_time_s,
                             )
                             _sync_counts_from_result(result)
                             rolling_commit_index_next += 1

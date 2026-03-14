@@ -658,6 +658,8 @@ class PersistentWhisperxRunner:
           flush=True,
         )
       timings["transcribe_s"] = round(max(0.0, float(time.monotonic() - t0)), 6)
+      if transcribe_call_duration_s is not None:
+        timings["transcribe_call_s"] = round(max(0.0, float(transcribe_call_duration_s)), 6)
 
       aligned: dict[str, Any]
       t0 = time.monotonic()
