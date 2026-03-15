@@ -999,6 +999,16 @@ async def run_live_session_ws_rolling_context(
             )
             rolling_last_applied_seq = int(max(rolling_last_applied_seq, seq))
         else:
+            # Include errored completions in GPU proxy totals when timing fields
+            # are present in worker status, so duty-cycle accounting stays complete.
+            _poll_status = dict(poll.status or {})
+            _gpu_t = _safe_float(_poll_status.get("asr_timing_whisperx_transcribe_call_s"))
+            if _gpu_t is not None:
+                rolling_gpu_proxy_transcribe_s += _gpu_t
+            _gpu_p = _safe_float(_poll_status.get("asr_timing_whisperx_total_s"))
+            if _gpu_p is not None:
+                rolling_gpu_proxy_pipeline_s += _gpu_p
+
             poll_state = str(poll.state or "").strip().lower()
             err = str(poll.error or f"asr_state:{poll_state}" or "asr_error")
             try:
@@ -1182,6 +1192,9 @@ async def run_live_session_ws_rolling_context(
                 stop_reason = "client_disconnected"
                 break
 
+            # TODO(security): add ingress abuse guards for live audio frames.
+            # Candidate controls: max frame bytes and per-session token-bucket
+            # rate limiting (audio_ms per wallclock_s) to prevent client hijack.
             raw_bytes = incoming.get("bytes")
             if raw_bytes is not None:
                 snapshot = LIVE_SESSIONS.record_audio(session_id, byte_count=len(raw_bytes))
