@@ -570,6 +570,9 @@ class PersistentWhisperxRunner:
         "print_progress": False,
         "verbose": False,
       }
+      if language is not None:
+        # Keep model cache language-agnostic, but still pass per-call language hints.
+        transcribe_kwargs["language"] = str(language)
       if upload_mode:
         try:
           upload_batch_size = int(self.cfg.get("upload_batch_size", 4) or 4)
