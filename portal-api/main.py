@@ -108,6 +108,32 @@ LIVE_ROLLING_MIN_EMIT_INTERVAL_MS = get_int(
     LIVE_ROLLING_POLL_INTERVAL_MS,
     min_value=0,
 )
+LIVE_ROLLING_PACING_BASE_EMIT_MS_PER_SLOT1 = get_int(
+    "live.rolling.pacing.base_emit_ms_per_slot1",
+    500,
+    min_value=1,
+)
+LIVE_ROLLING_PACING_STARTUP_DURATION_MS = get_int(
+    "live.rolling.pacing.startup.duration_ms",
+    0,
+    min_value=0,
+)
+LIVE_ROLLING_PACING_STARTUP_EMIT_MS = get_int(
+    "live.rolling.pacing.startup.emit_ms",
+    LIVE_ROLLING_PACING_BASE_EMIT_MS_PER_SLOT1,
+    min_value=1,
+)
+LIVE_ROLLING_PACING_STARTUP_MIN_INFER_AUDIO_MS = get_int(
+    "live.rolling.pacing.startup.min_infer_audio_ms",
+    LIVE_ROLLING_MIN_INFER_AUDIO_MS,
+    min_value=0,
+)
+LIVE_ROLLING_PACING_STARTUP_MIN_NEW_AUDIO_MS = get_int(
+    "live.rolling.pacing.startup.min_new_audio_ms",
+    LIVE_ROLLING_MIN_NEW_AUDIO_MS,
+    min_value=0,
+)
+LIVE_ROLLING_PACING_RUNNER_SLOTS = get_int("asr_pool.runner_slots", 1, min_value=1)
 
 _LIVE_SESSION_LANGUAGE_RE = re.compile(r"^[a-z]{2,3}(?:[-_][a-z0-9]{2,8})?$")
 LIVE_SESSIONS = LiveSessionManager(
@@ -142,6 +168,12 @@ def _live_engine_rolling_context_config() -> dict[str, Any]:
         "LIVE_ROLLING_BUFFER_TRIM_DROP_MS": LIVE_ROLLING_BUFFER_TRIM_DROP_MS,
         "LIVE_ROLLING_MIN_NEW_AUDIO_MS": LIVE_ROLLING_MIN_NEW_AUDIO_MS,
         "LIVE_ROLLING_MIN_EMIT_INTERVAL_MS": LIVE_ROLLING_MIN_EMIT_INTERVAL_MS,
+        "LIVE_ROLLING_PACING_BASE_EMIT_MS_PER_SLOT1": LIVE_ROLLING_PACING_BASE_EMIT_MS_PER_SLOT1,
+        "LIVE_ROLLING_PACING_STARTUP_DURATION_MS": LIVE_ROLLING_PACING_STARTUP_DURATION_MS,
+        "LIVE_ROLLING_PACING_STARTUP_EMIT_MS": LIVE_ROLLING_PACING_STARTUP_EMIT_MS,
+        "LIVE_ROLLING_PACING_STARTUP_MIN_INFER_AUDIO_MS": LIVE_ROLLING_PACING_STARTUP_MIN_INFER_AUDIO_MS,
+        "LIVE_ROLLING_PACING_STARTUP_MIN_NEW_AUDIO_MS": LIVE_ROLLING_PACING_STARTUP_MIN_NEW_AUDIO_MS,
+        "LIVE_ROLLING_PACING_RUNNER_SLOTS": LIVE_ROLLING_PACING_RUNNER_SLOTS,
     }
 
 

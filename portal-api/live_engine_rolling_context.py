@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import time
@@ -109,10 +110,15 @@ async def run_live_session_ws_rolling_context(
     LIVE_ROLLING_BUFFER_TRIM_DROP_MS = int(_cfg(config, "LIVE_ROLLING_BUFFER_TRIM_DROP_MS"))
     LIVE_ROLLING_MIN_NEW_AUDIO_MS = int(_cfg(config, "LIVE_ROLLING_MIN_NEW_AUDIO_MS"))
     LIVE_ROLLING_MIN_EMIT_INTERVAL_MS = int(_cfg(config, "LIVE_ROLLING_MIN_EMIT_INTERVAL_MS"))
+    LIVE_ROLLING_PACING_BASE_EMIT_MS_PER_SLOT1 = int(_cfg(config, "LIVE_ROLLING_PACING_BASE_EMIT_MS_PER_SLOT1"))
+    LIVE_ROLLING_PACING_STARTUP_DURATION_MS = int(_cfg(config, "LIVE_ROLLING_PACING_STARTUP_DURATION_MS"))
+    LIVE_ROLLING_PACING_STARTUP_EMIT_MS = int(_cfg(config, "LIVE_ROLLING_PACING_STARTUP_EMIT_MS"))
+    LIVE_ROLLING_PACING_STARTUP_MIN_INFER_AUDIO_MS = int(_cfg(config, "LIVE_ROLLING_PACING_STARTUP_MIN_INFER_AUDIO_MS"))
+    LIVE_ROLLING_PACING_STARTUP_MIN_NEW_AUDIO_MS = int(_cfg(config, "LIVE_ROLLING_PACING_STARTUP_MIN_NEW_AUDIO_MS"))
+    LIVE_ROLLING_PACING_RUNNER_SLOTS = int(_cfg(config, "LIVE_ROLLING_PACING_RUNNER_SLOTS"))
     session_live_asr_language = LIVE_ASR_LANGUAGE
 
     poll_interval_s = max(0.02, float(LIVE_ROLLING_POLL_INTERVAL_MS) / 1000.0)
-    emit_interval_s = max(0.0, float(LIVE_ROLLING_MIN_EMIT_INTERVAL_MS) / 1000.0)
     min_new_audio_ms = int(max(0, LIVE_ROLLING_MIN_NEW_AUDIO_MS))
     single_segment_commit_min_ms = int(max(LIVE_ROLLING_MIN_INFER_AUDIO_MS, LIVE_ROLLING_SINGLE_COMMIT_MIN_MS))
     force_commit_repeats = int(max(1, LIVE_ROLLING_FORCE_COMMIT_REPEATS))
@@ -125,6 +131,24 @@ async def run_live_session_ws_rolling_context(
     )
     buffer_trim_threshold_ms = int(max(max_decode_window_ms, LIVE_ROLLING_BUFFER_TRIM_THRESHOLD_MS))
     buffer_trim_drop_ms = int(max(LIVE_ROLLING_MIN_INFER_AUDIO_MS, LIVE_ROLLING_BUFFER_TRIM_DROP_MS))
+    pacing_runner_slots = int(max(1, LIVE_ROLLING_PACING_RUNNER_SLOTS))
+    pacing_base_emit_ms_per_slot1 = int(max(1, LIVE_ROLLING_PACING_BASE_EMIT_MS_PER_SLOT1))
+    startup_duration_ms = int(max(0, LIVE_ROLLING_PACING_STARTUP_DURATION_MS))
+    startup_emit_ms = int(max(1, LIVE_ROLLING_PACING_STARTUP_EMIT_MS))
+    startup_min_infer_audio_ms = int(max(0, LIVE_ROLLING_PACING_STARTUP_MIN_INFER_AUDIO_MS))
+    startup_min_new_audio_ms = int(max(0, LIVE_ROLLING_PACING_STARTUP_MIN_NEW_AUDIO_MS))
+    pacing_effective_emit_ms = int(
+        max(
+            LIVE_ROLLING_MIN_EMIT_INTERVAL_MS,
+            int(round(float(pacing_base_emit_ms_per_slot1) / float(pacing_runner_slots))),
+        )
+    )
+    pacing_phase_seed = int.from_bytes(
+        hashlib.sha1(str(session_id).encode("utf-8")).digest()[:8],
+        byteorder="big",
+        signed=False,
+    )
+    pacing_phase_ms = int(pacing_phase_seed % int(max(1, pacing_effective_emit_ms)))
 
     try:
         LIVE_SESSIONS.open_websocket(session_id)
@@ -198,6 +222,8 @@ async def run_live_session_ws_rolling_context(
     rolling_same_preview_audio_repeats = 0
     rolling_last_preview_text = ""
     rolling_last_preview_audio_end_fallback_ms = 0
+    rolling_pacing_epoch_mono_ms = 0
+    rolling_pacing_last_slot_index = -1
     rolling_guardrail_metrics: dict[str, int] = {
         "force_commit_repeats_count": 0,
         "decode_window_cap_count": 0,
@@ -207,6 +233,7 @@ async def run_live_session_ws_rolling_context(
         "buffer_trim_dropped_audio_ms": 0,
         "outstanding_limit_skips": 0,
         "emit_interval_skips": 0,
+        "pacing_slot_skips": 0,
         "min_new_audio_skips": 0,
         "window_no_progress_skips": 0,
         "stale_completion_ignored_count": 0,
@@ -292,6 +319,33 @@ async def run_live_session_ws_rolling_context(
     def _preview_signature(value: str) -> str:
         return " ".join(str(value or "").strip().lower().split())
 
+    def _consume_pacing_slot(*, now_mono: float) -> bool:
+        nonlocal rolling_pacing_epoch_mono_ms
+        nonlocal rolling_pacing_last_slot_index
+
+        safe_now_ms = int(round(float(max(0.0, now_mono)) * 1000.0))
+        if rolling_pacing_epoch_mono_ms <= 0:
+            rolling_pacing_epoch_mono_ms = int(max(0, safe_now_ms))
+
+        interval_ms = int(max(1, pacing_effective_emit_ms))
+        safe_phase_ms = int(max(0, pacing_phase_ms % interval_ms))
+        elapsed_ms = int(max(0, safe_now_ms - int(rolling_pacing_epoch_mono_ms)))
+        if elapsed_ms < safe_phase_ms:
+            rolling_guardrail_metrics["pacing_slot_skips"] = int(
+                max(0, int(rolling_guardrail_metrics.get("pacing_slot_skips") or 0)) + 1
+            )
+            return False
+
+        slot_index = int((elapsed_ms - safe_phase_ms) // interval_ms)
+        if slot_index <= int(rolling_pacing_last_slot_index):
+            rolling_guardrail_metrics["pacing_slot_skips"] = int(
+                max(0, int(rolling_guardrail_metrics.get("pacing_slot_skips") or 0)) + 1
+            )
+            return False
+
+        rolling_pacing_last_slot_index = int(slot_index)
+        return True
+
     def _engine_runtime_payload() -> dict[str, Any]:
         calls_done = int(max(0, int(rolling_call_audit_summary.get("calls_done") or 0)))
         segs_sum = int(max(0, int(rolling_call_audit_summary.get("segments_returned_sum") or 0)))
@@ -307,6 +361,17 @@ async def run_live_session_ws_rolling_context(
             "processed_offset_ms": int(max(0, rolling_processed_offset_ms)),
             "buffer_audio_ms": int(max(0, int(recording_duration_ms) - int(rolling_pcm_base_ms))),
             "unprocessed_audio_ms": int(max(0, int(recording_duration_ms) - int(rolling_processed_offset_ms))),
+            "pacing": {
+                "runner_slots": int(max(1, pacing_runner_slots)),
+                "base_emit_ms_per_slot1": int(max(1, pacing_base_emit_ms_per_slot1)),
+                "effective_emit_ms": int(max(1, pacing_effective_emit_ms)),
+                "phase_ms": int(max(0, pacing_phase_ms)),
+                "last_slot_index": int(rolling_pacing_last_slot_index),
+                "startup_duration_ms": int(max(0, startup_duration_ms)),
+                "startup_emit_ms": int(max(1, startup_emit_ms)),
+                "startup_min_infer_audio_ms": int(max(0, startup_min_infer_audio_ms)),
+                "startup_min_new_audio_ms": int(max(0, startup_min_new_audio_ms)),
+            },
             "guardrails": dict(rolling_guardrail_metrics),
             "config": {
                 "poll_interval_ms": int(LIVE_ROLLING_POLL_INTERVAL_MS),
@@ -320,6 +385,13 @@ async def run_live_session_ws_rolling_context(
                 "buffer_trim_drop_ms": int(buffer_trim_drop_ms),
                 "min_new_audio_ms": int(min_new_audio_ms),
                 "min_emit_interval_ms": int(LIVE_ROLLING_MIN_EMIT_INTERVAL_MS),
+                "pacing_base_emit_ms_per_slot1": int(max(1, pacing_base_emit_ms_per_slot1)),
+                "pacing_runner_slots": int(max(1, pacing_runner_slots)),
+                "pacing_effective_emit_ms": int(max(1, pacing_effective_emit_ms)),
+                "pacing_startup_duration_ms": int(max(0, startup_duration_ms)),
+                "pacing_startup_emit_ms": int(max(1, startup_emit_ms)),
+                "pacing_startup_min_infer_audio_ms": int(max(0, startup_min_infer_audio_ms)),
+                "pacing_startup_min_new_audio_ms": int(max(0, startup_min_new_audio_ms)),
                 "diarize_enabled": bool(LIVE_DIARIZE_ENABLED),
                 "diarize_speaker_mode": str(LIVE_DIARIZE_SPEAKER_MODE),
                 "diarize_min_speakers": int(LIVE_DIARIZE_MIN_SPEAKERS),
@@ -598,16 +670,11 @@ async def run_live_session_ws_rolling_context(
         if chunk_bridge is None:
             return
         now_mono = time.monotonic()
+        if str(recording_state or "") not in {"recording", "finalizing"}:
+            return
         if rolling_inflight is not None:
             rolling_guardrail_metrics["outstanding_limit_skips"] = int(
                 max(0, int(rolling_guardrail_metrics.get("outstanding_limit_skips") or 0)) + 1
-            )
-            return
-        if str(recording_state or "") not in {"recording", "finalizing"}:
-            return
-        if (not force) and ((now_mono - rolling_last_emit_mono) < emit_interval_s):
-            rolling_guardrail_metrics["emit_interval_skips"] = int(
-                max(0, int(rolling_guardrail_metrics.get("emit_interval_skips") or 0)) + 1
             )
             return
 
@@ -615,12 +682,30 @@ async def run_live_session_ws_rolling_context(
         _maybe_apply_hard_clip(end_ms=end_ms)
         if end_ms <= rolling_processed_offset_ms:
             return
+        startup_active = (not force) and (startup_duration_ms > 0) and (int(end_ms) < int(startup_duration_ms))
+        if not force:
+            if startup_active:
+                elapsed_since_emit_ms = int(max(0.0, float(now_mono - float(rolling_last_emit_mono))) * 1000.0)
+                if (rolling_last_emit_mono > 0.0) and (elapsed_since_emit_ms < int(startup_emit_ms)):
+                    rolling_guardrail_metrics["emit_interval_skips"] = int(
+                        max(0, int(rolling_guardrail_metrics.get("emit_interval_skips") or 0)) + 1
+                    )
+                    return
+            elif not _consume_pacing_slot(now_mono=now_mono):
+                return
+
+        effective_min_infer_audio_ms = int(LIVE_ROLLING_MIN_INFER_AUDIO_MS)
+        if startup_active and startup_min_infer_audio_ms > 0:
+            effective_min_infer_audio_ms = int(max(1, startup_min_infer_audio_ms))
         unprocessed_ms = int(max(0, end_ms - rolling_processed_offset_ms))
-        if (not force) and (unprocessed_ms < LIVE_ROLLING_MIN_INFER_AUDIO_MS):
+        if (not force) and (unprocessed_ms < effective_min_infer_audio_ms):
             return
+        effective_min_new_audio_ms = int(min_new_audio_ms)
+        if startup_active and startup_min_new_audio_ms > 0:
+            effective_min_new_audio_ms = int(max(0, startup_min_new_audio_ms))
         if (not force) and rolling_last_submitted_t1_ms > 0:
             delta_new_audio_ms = int(max(0, end_ms - rolling_last_submitted_t1_ms))
-            if delta_new_audio_ms < min_new_audio_ms:
+            if delta_new_audio_ms < effective_min_new_audio_ms:
                 rolling_guardrail_metrics["min_new_audio_skips"] = int(
                     max(0, int(rolling_guardrail_metrics.get("min_new_audio_skips") or 0)) + 1
                 )
@@ -1169,6 +1254,14 @@ async def run_live_session_ws_rolling_context(
                     "buffer_trim_drop_ms": int(buffer_trim_drop_ms),
                     "min_new_audio_ms": int(min_new_audio_ms),
                     "min_emit_interval_ms": int(LIVE_ROLLING_MIN_EMIT_INTERVAL_MS),
+                    "pacing_base_emit_ms_per_slot1": int(max(1, pacing_base_emit_ms_per_slot1)),
+                    "pacing_runner_slots": int(max(1, pacing_runner_slots)),
+                    "pacing_effective_emit_ms": int(max(1, pacing_effective_emit_ms)),
+                    "pacing_startup_duration_ms": int(max(0, startup_duration_ms)),
+                    "pacing_startup_emit_ms": int(max(1, startup_emit_ms)),
+                    "pacing_startup_min_infer_audio_ms": int(max(0, startup_min_infer_audio_ms)),
+                    "pacing_startup_min_new_audio_ms": int(max(0, startup_min_new_audio_ms)),
+                    "pacing_phase_ms": int(max(0, pacing_phase_ms)),
                     "language": session_live_asr_language,
                     "diarize_enabled": bool(LIVE_DIARIZE_ENABLED),
                     "diarize_speaker_mode": str(LIVE_DIARIZE_SPEAKER_MODE),

@@ -1,6 +1,7 @@
 {
   "_comment": "UI settings loaded by frontend via /api/ui/settings. Use ui_settings.local.json for local overrides.",
   "version": "ui_settings_v1",
+  "show_quick_start": false,
   "live": {
     "transcript_presentation_mode": "segment_blocks_diarize_hard_v1",
     "speaker_labels_default_enabled": false,

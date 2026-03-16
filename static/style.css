@@ -3704,3 +3704,215 @@
         font-size: 1rem;
       }
     }
+
+    /* --- Intro View / Quick Start --- */
+    .intro-view {
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 40px 20px 0;
+      font-family: 'Inter', sans-serif;
+    }
+
+    .intro-hero {
+      text-align: center;
+      margin-bottom: 40px;
+      padding: 40px 0 20px;
+    }
+
+    .intro-hero h1 {
+      font-size: 2.5rem;
+      font-weight: 600;
+      color: var(--text-color);
+      margin: 0 0 16px 0;
+      letter-spacing: -0.02em;
+    }
+
+    .intro-subtitle {
+      font-size: 1.1rem;
+      color: var(--text-secondary);
+      max-width: 600px;
+      margin: 0 auto;
+      line-height: 1.6;
+    }
+
+    .intro-tabs-container {
+      position: sticky;
+      top: 0;
+      z-index: 50;
+      background: rgba(255, 255, 255, 0.9);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      border-bottom: 1px solid var(--border);
+      padding: 0 20px;
+      margin: 0 -20px 40px -20px;
+      /* Bleed out to container edges */
+    }
+
+    .intro-tabs {
+      display: flex;
+      gap: 8px;
+      overflow-x: auto;
+      scrollbar-width: none;
+      /* Firefox */
+      -ms-overflow-style: none;
+      /* IE/Edge */
+    }
+
+    .intro-tabs::-webkit-scrollbar {
+      display: none;
+      /* Chrome/Safari */
+    }
+
+    .intro-tab {
+      padding: 16px 16px;
+      color: var(--text-secondary);
+      text-decoration: none;
+      font-weight: 500;
+      font-size: 0.95rem;
+      border-bottom: 3px solid transparent;
+      transition: all 0.2s ease;
+      white-space: nowrap;
+    }
+
+    .intro-tab:hover {
+      color: var(--text-color);
+    }
+
+    .intro-tab.active {
+      color: var(--primary);
+      border-bottom-color: var(--primary);
+    }
+
+    .intro-content {
+      display: flex;
+      flex-direction: column;
+      gap: 80px;
+      /* Lots of whitespace between sections */
+    }
+
+    .intro-section {
+      display: flex;
+      flex-direction: column;
+      gap: 24px;
+      padding-top: 20px;
+      /* Offset for sticky header when scrolling */
+      scroll-margin-top: 80px;
+      /* Ensures the sticky header doesn't cover content when jumped to */
+    }
+
+    .intro-text h2 {
+      font-size: 1.5rem;
+      font-weight: 600;
+      margin: 0 0 16px 0;
+      color: var(--text-color);
+    }
+
+    .intro-text p {
+      font-size: 1.05rem;
+      line-height: 1.6;
+      color: var(--text-color);
+      margin: 0 0 24px 0;
+    }
+
+    .intro-feature-list {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .intro-feature-list li {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-size: 1rem;
+      color: var(--text-secondary);
+      background: #f8f9fa;
+      padding: 12px 16px;
+      border-radius: 8px;
+      border: 1px solid #f1f3f4;
+    }
+
+    .intro-feature-list .material-symbols-outlined {
+      color: var(--primary);
+      font-size: 22px;
+    }
+
+    .intro-media {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+      margin-top: 16px;
+      width: 100%;
+    }
+
+    .intro-screenshot-placeholder {
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      background: #f8f9fa;
+      border: 2px dashed #e5e7eb;
+      border-radius: 12px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      padding: 20px;
+      transition: background-color 0.2s, border-color 0.2s;
+    }
+
+    .intro-media:hover .intro-screenshot-placeholder {
+      background: #f1f5f9;
+      border-color: #cbd5e1;
+    }
+
+    .intro-media-caption {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      font-size: 0.9rem;
+    }
+
+    .intro-link {
+      color: var(--primary);
+      text-decoration: none;
+      font-weight: 500;
+      transition: color 0.15s ease;
+    }
+
+    .intro-link:hover {
+      color: #1d4ed8;
+      text-decoration: underline;
+    }
+
+    .intro-hint {
+      font-size: 0.8rem;
+      color: var(--text-secondary);
+      margin: 0;
+    }
+
+    @media (min-width: 768px) {
+      .intro-section {
+        flex-direction: row;
+        align-items: center;
+        gap: 60px;
+      }
+
+      /* Zig-zag alternating layout */
+      .intro-section:nth-child(even) {
+        flex-direction: row-reverse;
+      }
+
+      .intro-text {
+        flex: 1;
+      }
+
+      .intro-media {
+        flex: 1;
+        margin-top: 0;
+      }
+    }

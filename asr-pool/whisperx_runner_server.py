@@ -129,11 +129,13 @@ class PersistentWhisperxRunner:
       pass
 
   def _asr_cache_key(self, *, language: str | None) -> tuple[Any, ...]:
+    # Keep one language-agnostic warm ASR model per runner slot.
+    # Per-call language hints are handled at transcribe() time.
     return (
       str(self.cfg.get("model") or "large-v3"),
       str(self.cfg.get("device") or "cuda"),
       str(self.cfg.get("compute_type") or "float16"),
-      (str(language) if language is not None else "__auto__"),
+      "__language_agnostic__",
       int(self.cfg.get("beam_size", 5) or 5),
       int(self.cfg.get("chunk_size", 30) or 30),
     )
@@ -267,7 +269,7 @@ class PersistentWhisperxRunner:
       str(self.cfg.get("model", "large-v3") or "large-v3"),
       device=str(self.cfg.get("device", "cuda") or "cuda"),
       compute_type=str(self.cfg.get("compute_type", "float16") or "float16"),
-      language=language,
+      language=None,
       asr_options={"beam_size": int(self.cfg.get("beam_size", 5) or 5)},
       vad_options={"chunk_size": int(self.cfg.get("chunk_size", 30) or 30)},
     )
@@ -547,8 +549,12 @@ class PersistentWhisperxRunner:
 
     try:
       _write_progress(progress_path, stage="prepare")
+      # Keep one warm ASR model for live chunks regardless of per-call language hints.
+      # Per-call language is still passed to transcribe(); this only avoids model
+      # cache churn when sessions mix explicit language and auto-detect.
+      model_cache_language = None if live_chunk_mode else language
       # Prepare/load model lazily and keep it warm across requests.
-      model_reused, prepare_s = self._ensure_asr_model(language=language)
+      model_reused, prepare_s = self._ensure_asr_model(language=model_cache_language)
       timings["prepare_s"] = round(float(prepare_s), 6)
 
       t0 = time.monotonic()
