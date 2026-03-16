@@ -1152,6 +1152,7 @@ def _finalize_live_chunk_completed(
     asr_initial_prompt_words=int(max(0, resolved_initial_prompt_words)),
     asr_timing_whisperx_total_s=_timing_value("total_s"),
     asr_timing_whisperx_prepare_s=_timing_value("prepare_s"),
+    asr_timing_whisperx_transcribe_call_s=_timing_value("transcribe_call_s"),
     asr_timing_whisperx_transcribe_s=_timing_value("transcribe_s"),
     asr_timing_whisperx_align_s=_timing_value("align_s"),
     asr_timing_whisperx_diarize_s=_timing_value("diarize_s"),

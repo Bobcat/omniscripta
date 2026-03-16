@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 PROTOCOL_VERSION = "live_v1"
-ALLOWED_CLIENT_TYPES = {"start", "pause", "resume", "stop", "ping"}
+ALLOWED_CLIENT_TYPES = {"start", "pause", "resume", "stop", "ping", "set_language"}
 
 
 def utc_iso_now() -> str:

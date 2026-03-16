@@ -33,7 +33,16 @@
       "max_decode_window_ms": 12000,
       "buffer_trim_threshold_ms": 30000,
       "buffer_trim_drop_ms": 20000,
-      "min_new_audio_ms": 500
+      "min_new_audio_ms": 500,
+      "pacing": {
+        "base_emit_ms_per_slot1": 250,
+        "startup": {
+          "duration_ms": 1200,
+          "emit_ms": 100,
+          "min_infer_audio_ms": 250,
+          "min_new_audio_ms": 200
+        }
+      }
     }
   },
 

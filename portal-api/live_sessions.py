@@ -101,6 +101,9 @@ class LiveSession:
     fixture_id: str = ""
     fixture_version: str = ""
     fixture_test_mode: str = ""
+    asr_language: str = ""
+    gpu_proxy_transcribe_s: float = 0.0
+    gpu_proxy_pipeline_s: float = 0.0
 
 
 @dataclass
@@ -127,6 +130,9 @@ class ClosedSessionArchive:
     fixture_id: str = ""
     fixture_version: str = ""
     fixture_test_mode: str = ""
+    asr_language: str = ""
+    gpu_proxy_transcribe_s: float = 0.0
+    gpu_proxy_pipeline_s: float = 0.0
 
 
 class LiveSessionManager:
@@ -192,6 +198,7 @@ class LiveSessionManager:
         *,
         ttl_seconds: int | None = None,
         live_engine: str | None = None,
+        asr_language: str | None = None,
     ) -> dict[str, Any]:
         now_unix = time.time()
         now_mono = time.monotonic()
@@ -199,6 +206,7 @@ class LiveSessionManager:
         ttl = int(max(10, ttl))
         preconnect_ttl = int(max(5, min(ttl, self._preconnect_ttl_seconds)))
         engine_name = str(live_engine or "").strip().lower() or "rolling_context"
+        session_asr_language = str(asr_language or "").strip().lower()
 
         with self._lock:
             self._cleanup_expired_locked(now_unix)
@@ -214,6 +222,7 @@ class LiveSessionManager:
                 ttl_seconds=ttl,
                 live_engine=engine_name,
                 last_seen_unix=now_unix,
+                asr_language=session_asr_language,
             )
             self._sessions[session_id] = sess
             snapshot = self._snapshot_locked(sess)
@@ -288,6 +297,8 @@ class LiveSessionManager:
         chunks_failed: int | None = None,
         finalization_state: str | None = None,
         batch_job_id: str | None = None,
+        gpu_proxy_transcribe_s: float | None = None,
+        gpu_proxy_pipeline_s: float | None = None,
     ) -> dict[str, Any]:
         now_unix = time.time()
         with self._lock:
@@ -315,6 +326,10 @@ class LiveSessionManager:
                 sess.finalization_state = str(finalization_state or "idle")
             if batch_job_id is not None:
                 sess.batch_job_id = str(batch_job_id)
+            if gpu_proxy_transcribe_s is not None:
+                sess.gpu_proxy_transcribe_s = max(0.0, float(gpu_proxy_transcribe_s))
+            if gpu_proxy_pipeline_s is not None:
+                sess.gpu_proxy_pipeline_s = max(0.0, float(gpu_proxy_pipeline_s))
         return self._snapshot_locked(sess)
 
     def set_fixture_metadata(
@@ -337,6 +352,22 @@ class LiveSessionManager:
                 sess.fixture_version = str(fixture_version or "").strip()
             if fixture_test_mode is not None:
                 sess.fixture_test_mode = str(fixture_test_mode or "").strip()
+            return self._snapshot_locked(sess)
+
+    def set_asr_language(
+        self,
+        session_id: str,
+        *,
+        asr_language: str | None = None,
+    ) -> dict[str, Any]:
+        now_unix = time.time()
+        safe_language = str(asr_language or "").strip().lower()
+        with self._lock:
+            sess = self._sessions.get(session_id)
+            if not sess:
+                raise KeyError("session_not_found")
+            sess.last_seen_unix = now_unix
+            sess.asr_language = safe_language
             return self._snapshot_locked(sess)
 
     def update_live_preview(
@@ -426,8 +457,6 @@ class LiveSessionManager:
         speech_frames: int | None = None,
         silence_frames_tail: int | None = None,
         chunk_duration_ms: int | None = None,
-        asr_pipeline_time_s: float | None = None,
-        asr_transcribe_time_s: float | None = None,
     ) -> dict[str, Any]:
         now_unix = time.time()
         idx = int(max(0, chunk_index))
@@ -441,10 +470,6 @@ class LiveSessionManager:
         safe_speech_frames = None if speech_frames is None else int(max(0, int(speech_frames)))
         safe_silence_frames_tail = None if silence_frames_tail is None else int(max(0, int(silence_frames_tail)))
         safe_chunk_duration_ms = None if chunk_duration_ms is None else int(max(0, int(chunk_duration_ms)))
-        safe_asr_pipeline_time_s = None if asr_pipeline_time_s is None else max(0.0, float(asr_pipeline_time_s))
-        safe_asr_transcribe_time_s = (
-            None if asr_transcribe_time_s is None else max(0.0, float(asr_transcribe_time_s))
-        )
         with self._lock:
             sess = self._sessions.get(session_id)
             if not sess:
@@ -463,8 +488,6 @@ class LiveSessionManager:
                 "speech_frames": safe_speech_frames,
                 "silence_frames_tail": safe_silence_frames_tail,
                 "chunk_duration_ms": safe_chunk_duration_ms,
-                "asr_pipeline_time_s": safe_asr_pipeline_time_s,
-                "asr_transcribe_time_s": safe_asr_transcribe_time_s,
             }
             replaced = False
             for i, existing in enumerate(sess.live_commit_results):
@@ -481,16 +504,6 @@ class LiveSessionManager:
                         row["silence_frames_tail"] = int(max(0, int(existing.get("silence_frames_tail") or 0)))
                     if row["chunk_duration_ms"] is None and existing.get("chunk_duration_ms") is not None:
                         row["chunk_duration_ms"] = int(max(0, int(existing.get("chunk_duration_ms") or 0)))
-                    if row["asr_pipeline_time_s"] is None and existing.get("asr_pipeline_time_s") is not None:
-                        try:
-                            row["asr_pipeline_time_s"] = max(0.0, float(existing.get("asr_pipeline_time_s")))
-                        except Exception:
-                            row["asr_pipeline_time_s"] = None
-                    if row["asr_transcribe_time_s"] is None and existing.get("asr_transcribe_time_s") is not None:
-                        try:
-                            row["asr_transcribe_time_s"] = max(0.0, float(existing.get("asr_transcribe_time_s")))
-                        except Exception:
-                            row["asr_transcribe_time_s"] = None
                     sess.live_commit_results[i] = row
                     replaced = True
                     break
@@ -683,6 +696,7 @@ class LiveSessionManager:
                 fixture_id="",
                 fixture_version="",
                 fixture_test_mode="",
+                asr_language="",
             )
             src_sess = self._sessions.get(str(session_id))
             if src_sess is not None:
@@ -693,6 +707,9 @@ class LiveSessionManager:
                 arc.fixture_id = str(src_sess.fixture_id or "")
                 arc.fixture_version = str(src_sess.fixture_version or "")
                 arc.fixture_test_mode = str(src_sess.fixture_test_mode or "")
+                arc.asr_language = str(src_sess.asr_language or "")
+                arc.gpu_proxy_transcribe_s = float(max(0.0, src_sess.gpu_proxy_transcribe_s))
+                arc.gpu_proxy_pipeline_s = float(max(0.0, src_sess.gpu_proxy_pipeline_s))
                 if not requested_engine:
                     arc.live_engine = str(src_sess.live_engine or "rolling_context")
             self._archives[arc.session_id] = arc
@@ -750,6 +767,7 @@ class LiveSessionManager:
             "fixture_id": str(sess.fixture_id or ""),
             "fixture_version": str(sess.fixture_version or ""),
             "fixture_test_mode": str(sess.fixture_test_mode or ""),
+            "asr_language": str(sess.asr_language or ""),
             "stats_log_path": str(self._stats_log_path(sess.session_id)),
         }
 
@@ -777,6 +795,7 @@ class LiveSessionManager:
             "fixture_id": str(arc.fixture_id or ""),
             "fixture_version": str(arc.fixture_version or ""),
             "fixture_test_mode": str(arc.fixture_test_mode or ""),
+            "asr_language": str(arc.asr_language or ""),
         }
 
     def _live_result_snapshot_locked(self, sess: LiveSession) -> dict[str, Any]:
@@ -856,6 +875,9 @@ class LiveSessionManager:
             "fixture_id": str(sess.fixture_id or ""),
             "fixture_version": str(sess.fixture_version or ""),
             "fixture_test_mode": str(sess.fixture_test_mode or ""),
+            "asr_language": str(sess.asr_language or ""),
+            "gpu_proxy_transcribe_s": round(float(max(0.0, sess.gpu_proxy_transcribe_s)), 3),
+            "gpu_proxy_pipeline_s": round(float(max(0.0, sess.gpu_proxy_pipeline_s)), 3),
         }
 
     def _live_archive_result_snapshot_locked(self, arc: ClosedSessionArchive) -> dict[str, Any]:
@@ -930,6 +952,9 @@ class LiveSessionManager:
             "fixture_id": str(arc.fixture_id or ""),
             "fixture_version": str(arc.fixture_version or ""),
             "fixture_test_mode": str(arc.fixture_test_mode or ""),
+            "asr_language": str(arc.asr_language or ""),
+            "gpu_proxy_transcribe_s": round(float(max(0.0, arc.gpu_proxy_transcribe_s)), 3),
+            "gpu_proxy_pipeline_s": round(float(max(0.0, arc.gpu_proxy_pipeline_s)), 3),
         }
 
     def metrics_snapshot(self) -> dict[str, Any]:

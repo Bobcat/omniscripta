@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import mimetypes
 import sys
@@ -107,6 +108,34 @@ LIVE_ROLLING_MIN_EMIT_INTERVAL_MS = get_int(
     LIVE_ROLLING_POLL_INTERVAL_MS,
     min_value=0,
 )
+LIVE_ROLLING_PACING_BASE_EMIT_MS_PER_SLOT1 = get_int(
+    "live.rolling.pacing.base_emit_ms_per_slot1",
+    500,
+    min_value=1,
+)
+LIVE_ROLLING_PACING_STARTUP_DURATION_MS = get_int(
+    "live.rolling.pacing.startup.duration_ms",
+    0,
+    min_value=0,
+)
+LIVE_ROLLING_PACING_STARTUP_EMIT_MS = get_int(
+    "live.rolling.pacing.startup.emit_ms",
+    LIVE_ROLLING_PACING_BASE_EMIT_MS_PER_SLOT1,
+    min_value=1,
+)
+LIVE_ROLLING_PACING_STARTUP_MIN_INFER_AUDIO_MS = get_int(
+    "live.rolling.pacing.startup.min_infer_audio_ms",
+    LIVE_ROLLING_MIN_INFER_AUDIO_MS,
+    min_value=0,
+)
+LIVE_ROLLING_PACING_STARTUP_MIN_NEW_AUDIO_MS = get_int(
+    "live.rolling.pacing.startup.min_new_audio_ms",
+    LIVE_ROLLING_MIN_NEW_AUDIO_MS,
+    min_value=0,
+)
+LIVE_ROLLING_PACING_RUNNER_SLOTS = get_int("asr_pool.runner_slots", 1, min_value=1)
+
+_LIVE_SESSION_LANGUAGE_RE = re.compile(r"^[a-z]{2,3}(?:[-_][a-z0-9]{2,8})?$")
 LIVE_SESSIONS = LiveSessionManager(
     default_ttl_seconds=LIVE_SESSION_TTL_S,
     preconnect_ttl_seconds=LIVE_SESSION_PRECONNECT_TTL_S,
@@ -139,7 +168,30 @@ def _live_engine_rolling_context_config() -> dict[str, Any]:
         "LIVE_ROLLING_BUFFER_TRIM_DROP_MS": LIVE_ROLLING_BUFFER_TRIM_DROP_MS,
         "LIVE_ROLLING_MIN_NEW_AUDIO_MS": LIVE_ROLLING_MIN_NEW_AUDIO_MS,
         "LIVE_ROLLING_MIN_EMIT_INTERVAL_MS": LIVE_ROLLING_MIN_EMIT_INTERVAL_MS,
+        "LIVE_ROLLING_PACING_BASE_EMIT_MS_PER_SLOT1": LIVE_ROLLING_PACING_BASE_EMIT_MS_PER_SLOT1,
+        "LIVE_ROLLING_PACING_STARTUP_DURATION_MS": LIVE_ROLLING_PACING_STARTUP_DURATION_MS,
+        "LIVE_ROLLING_PACING_STARTUP_EMIT_MS": LIVE_ROLLING_PACING_STARTUP_EMIT_MS,
+        "LIVE_ROLLING_PACING_STARTUP_MIN_INFER_AUDIO_MS": LIVE_ROLLING_PACING_STARTUP_MIN_INFER_AUDIO_MS,
+        "LIVE_ROLLING_PACING_STARTUP_MIN_NEW_AUDIO_MS": LIVE_ROLLING_PACING_STARTUP_MIN_NEW_AUDIO_MS,
+        "LIVE_ROLLING_PACING_RUNNER_SLOTS": LIVE_ROLLING_PACING_RUNNER_SLOTS,
     }
+
+
+def _parse_live_session_asr_language(request: Request) -> str | None:
+    raw = request.query_params.get("language")
+    if raw is None:
+        return None
+    text = str(raw).strip().lower()
+    if not text:
+        return None
+    if text in {"auto", "default", "server-default", "server_default"}:
+        return None
+    if not _LIVE_SESSION_LANGUAGE_RE.match(text):
+        raise HTTPException(
+            status_code=400,
+            detail="language must be empty/auto or a short BCP-47 style code (e.g. 'en', 'nl', 'pt-br')",
+        )
+    return text
 
 
 @app.get("/health")
@@ -150,6 +202,7 @@ def health() -> Dict[str, bool]:
 @app.post("/demo/live/sessions")
 def create_live_session(request: Request) -> Dict[str, Any]:
     ttl_override: int | None = None
+    session_asr_language = _parse_live_session_asr_language(request)
     ttl_raw = request.query_params.get("ttl_s")
     if ttl_raw is not None and str(ttl_raw).strip() != "":
         try:
@@ -163,6 +216,7 @@ def create_live_session(request: Request) -> Dict[str, Any]:
         session = LIVE_SESSIONS.create_session(
             ttl_seconds=ttl_override,
             live_engine=LIVE_ENGINE,
+            asr_language=session_asr_language,
         )
     except RuntimeError as e:
         code = str(e or "live_session_create_failed")
@@ -180,6 +234,13 @@ def create_live_session(request: Request) -> Dict[str, Any]:
         "protocol_version": PROTOCOL_VERSION,
         "live_engine": LIVE_ENGINE,
         "session": session,
+        "asr_language_default": LIVE_ASR_LANGUAGE,
+        "asr_language_effective": str(session.get("asr_language") or LIVE_ASR_LANGUAGE or ""),
+        "asr_language_source": (
+            "session_override"
+            if str(session.get("asr_language") or "").strip()
+            else ("service_default" if LIVE_ASR_LANGUAGE else "auto_detect")
+        ),
         "ws_path": ws_path,
         "ws_url": _ws_url_for_request(request, ws_path),
         "audio_input": {

@@ -129,11 +129,13 @@ class PersistentWhisperxRunner:
       pass
 
   def _asr_cache_key(self, *, language: str | None) -> tuple[Any, ...]:
+    # Keep one language-agnostic warm ASR model per runner slot.
+    # Per-call language hints are handled at transcribe() time.
     return (
       str(self.cfg.get("model") or "large-v3"),
       str(self.cfg.get("device") or "cuda"),
       str(self.cfg.get("compute_type") or "float16"),
-      (str(language) if language is not None else "__auto__"),
+      "__language_agnostic__",
       int(self.cfg.get("beam_size", 5) or 5),
       int(self.cfg.get("chunk_size", 30) or 30),
     )
@@ -267,7 +269,7 @@ class PersistentWhisperxRunner:
       str(self.cfg.get("model", "large-v3") or "large-v3"),
       device=str(self.cfg.get("device", "cuda") or "cuda"),
       compute_type=str(self.cfg.get("compute_type", "float16") or "float16"),
-      language=language,
+      language=None,
       asr_options={"beam_size": int(self.cfg.get("beam_size", 5) or 5)},
       vad_options={"chunk_size": int(self.cfg.get("chunk_size", 30) or 30)},
     )
@@ -547,8 +549,12 @@ class PersistentWhisperxRunner:
 
     try:
       _write_progress(progress_path, stage="prepare")
+      # Keep one warm ASR model for live chunks regardless of per-call language hints.
+      # Per-call language is still passed to transcribe(); this only avoids model
+      # cache churn when sessions mix explicit language and auto-detect.
+      model_cache_language = None if live_chunk_mode else language
       # Prepare/load model lazily and keep it warm across requests.
-      model_reused, prepare_s = self._ensure_asr_model(language=language)
+      model_reused, prepare_s = self._ensure_asr_model(language=model_cache_language)
       timings["prepare_s"] = round(float(prepare_s), 6)
 
       t0 = time.monotonic()
@@ -576,15 +582,24 @@ class PersistentWhisperxRunner:
         transcribe_kwargs["chunk_size"] = int(self.cfg.get("chunk_size_live", 10) or 10)
 
       _write_progress(progress_path, stage="transcribe")
+      transcribe_call_started_utc: str | None = None
+      transcribe_call_finished_utc: str | None = None
+      transcribe_call_duration_s: float | None = None
       with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
         audio_arr = whisperx.load_audio(str(local_path))
         if selected_live_chunk_backend == LIVE_CHUNK_BACKEND_FASTER_WHISPER_DIRECT:
-          result, direct_backend_meta = self._transcribe_live_chunk_direct_faster_whisper(
-            audio_arr=audio_arr,
-            language=language,
-            initial_prompt=initial_prompt,
-            beam_size_override=beam_size_override,
-          )
+          transcribe_call_started_utc = _now_iso()
+          transcribe_call_t0 = time.monotonic()
+          try:
+            result, direct_backend_meta = self._transcribe_live_chunk_direct_faster_whisper(
+              audio_arr=audio_arr,
+              language=language,
+              initial_prompt=initial_prompt,
+              beam_size_override=beam_size_override,
+            )
+          finally:
+            transcribe_call_finished_utc = _now_iso()
+            transcribe_call_duration_s = round(max(0.0, float(time.monotonic() - transcribe_call_t0)), 6)
           initial_prompt_applied = bool(direct_backend_meta.get("initial_prompt_applied"))
           initial_prompt_unsupported = bool(direct_backend_meta.get("initial_prompt_unsupported"))
           beam_override_applied = bool(direct_backend_meta.get("beam_size_override_applied"))
@@ -606,7 +621,13 @@ class PersistentWhisperxRunner:
               initial_prompt_unsupported = True
             if beam_size_override is not None:
               beam_override_unsupported = True
-          result = self.asr_model.transcribe(audio_arr, **transcribe_kwargs)  # type: ignore[union-attr]
+          transcribe_call_started_utc = _now_iso()
+          transcribe_call_t0 = time.monotonic()
+          try:
+            result = self.asr_model.transcribe(audio_arr, **transcribe_kwargs)  # type: ignore[union-attr]
+          finally:
+            transcribe_call_finished_utc = _now_iso()
+            transcribe_call_duration_s = round(max(0.0, float(time.monotonic() - transcribe_call_t0)), 6)
         # Debug: log segment details for confidence analysis
         try:
           segments = result.get("segments") or []
@@ -619,7 +640,32 @@ class PersistentWhisperxRunner:
             print(f"INFO seg_{idx} dur={seg_dur}s text={_json.dumps(seg_text, ensure_ascii=False)}", flush=True)
         except Exception:
           pass
+      if (
+        transcribe_call_started_utc is not None
+        and transcribe_call_finished_utc is not None
+        and transcribe_call_duration_s is not None
+      ):
+        print(
+          "ASR_TRANSCRIBE_CALL_TIMING "
+          + json.dumps(
+            {
+              "request_id": req_id,
+              "backend": (
+                "faster_whisper_direct"
+                if selected_live_chunk_backend == LIVE_CHUNK_BACKEND_FASTER_WHISPER_DIRECT
+                else "whisperx"
+              ),
+              "start_utc": str(transcribe_call_started_utc),
+              "end_utc": str(transcribe_call_finished_utc),
+              "duration_s": float(transcribe_call_duration_s),
+            },
+            ensure_ascii=False,
+          ),
+          flush=True,
+        )
       timings["transcribe_s"] = round(max(0.0, float(time.monotonic() - t0)), 6)
+      if transcribe_call_duration_s is not None:
+        timings["transcribe_call_s"] = round(max(0.0, float(transcribe_call_duration_s)), 6)
 
       aligned: dict[str, Any]
       t0 = time.monotonic()
