@@ -33,8 +33,7 @@ def _build_error_response(
     "schema_version": ASR_SCHEMA_VERSION,
     "request_id": str(req.get("request_id") or ""),
     "ok": False,
-    "profile_id": str(req.get("profile_id") or ""),
-    "resolved_options": dict(req.get("resolved_options") or {}),
+    "effective_options": dict(req.get("effective_options") or {}),
     "error": {
       "code": str(code),
       "message": str(message),
@@ -176,11 +175,9 @@ def _http_json_with_retry(
 
 def _with_consumer_id(request_payload: dict[str, Any], *, consumer_id: str) -> dict[str, Any]:
   req = dict(request_payload or {})
-  ctx = dict(req.get("context") or {})
   cid = str(consumer_id or "").strip()
   if cid:
-    ctx["consumer_id"] = cid
-  req["context"] = ctx
+    req["consumer_id"] = cid
   return req
 
 

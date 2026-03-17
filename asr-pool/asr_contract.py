@@ -5,12 +5,15 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from asr_profiles import AsrProfileError, resolve_profile_options
+from asr_options import AsrOptionsError, normalize_options
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
   sys.path.insert(0, str(_REPO_ROOT))
 
-from shared.asr.schema import ASR_SCHEMA_VERSION
+from shared.asr.schema import (
+  ASR_SCHEMA_VERSION,
+  ASR_SCHEMA_VERSIONS_SUPPORTED,
+)
 
 
 class AsrRequestError(ValueError):
@@ -27,7 +30,6 @@ def _normalize_outputs(raw: dict[str, Any] | None) -> dict[str, bool]:
     "segments": True,
     "srt": True,
     "srt_inline": False,
-    "word_timestamps": False,
   }
   for key in list(out.keys()):
     if key in src and src[key] is not None:
@@ -61,6 +63,48 @@ def _validate_audio(audio: dict[str, Any] | None) -> dict[str, Any]:
   return a
 
 
+def _normalize_priority(value: Any) -> str:
+  out = str(value or "normal").strip().lower() or "normal"
+  if out not in {"interactive", "normal", "background"}:
+    out = "normal"
+  return out
+
+
+def _normalize_routing(raw: dict[str, Any] | None) -> dict[str, Any]:
+  src = dict(raw or {})
+  allowed = {"fairness_key", "slot_affinity", "timeout_s"}
+  for key in list(src.keys()):
+    if key not in allowed:
+      raise AsrRequestError(
+        "ASR_UNKNOWN_ROUTING_KEY",
+        f"Unknown ASR routing key: {key}",
+        details={"routing_key": key, "allowed_routing_keys": sorted(allowed)},
+      )
+  out: dict[str, Any] = {}
+  fairness_key = str(src.get("fairness_key") or "").strip()
+  if fairness_key:
+    out["fairness_key"] = fairness_key
+  if "slot_affinity" in src and src.get("slot_affinity") is not None:
+    try:
+      out["slot_affinity"] = int(src.get("slot_affinity"))
+    except Exception:
+      raise AsrRequestError(
+        "ASR_ROUTING_SLOT_AFFINITY_INVALID",
+        "routing.slot_affinity must be an integer when provided",
+        details={"slot_affinity": src.get("slot_affinity")},
+      )
+  if "timeout_s" in src and src.get("timeout_s") is not None:
+    try:
+      out["timeout_s"] = max(1, int(src.get("timeout_s")))
+    except Exception:
+      raise AsrRequestError(
+        "ASR_ROUTING_TIMEOUT_INVALID",
+        "routing.timeout_s must be an integer when provided",
+        details={"timeout_s": src.get("timeout_s")},
+      )
+  return out
+
+
 def prepare_request(raw_request: dict[str, Any]) -> dict[str, Any]:
   req = deepcopy(dict(raw_request or {}))
   schema_version = str(req.get("schema_version") or "").strip()
@@ -68,34 +112,24 @@ def prepare_request(raw_request: dict[str, Any]) -> dict[str, Any]:
     raise AsrRequestError(
       "ASR_SCHEMA_UNSUPPORTED",
       f"Unsupported schema_version: {schema_version or '<missing>'}",
-      details={"expected": ASR_SCHEMA_VERSION},
+      details={"supported": list(ASR_SCHEMA_VERSIONS_SUPPORTED)},
     )
   request_id = str(req.get("request_id") or "").strip()
   if not request_id:
     raise AsrRequestError("ASR_REQUEST_ID_REQUIRED", "request_id is required")
-  profile_id = str(req.get("profile_id") or "").strip()
-  if not profile_id:
-    raise AsrRequestError("ASR_PROFILE_REQUIRED", "profile_id is required")
 
   req["audio"] = _validate_audio(req.get("audio"))
   req["outputs"] = _normalize_outputs(req.get("outputs"))
   req["options"] = dict(req.get("options") or {})
-  req["context"] = dict(req.get("context") or {})
-  if "speculative_seq" in req["context"] or "speculative_audio_end_ms" in req["context"]:
-    raise AsrRequestError(
-      "ASR_CONTEXT_KEY_UNSUPPORTED",
-      "Deprecated context keys are not supported; use preview_seq/preview_audio_end_ms",
-      details={"deprecated_keys": ["speculative_seq", "speculative_audio_end_ms"]},
-    )
-  req["priority"] = str(req.get("priority") or "normal").strip().lower() or "normal"
-  if req["priority"] not in {"interactive", "normal", "background"}:
-    req["priority"] = "normal"
-
+  req["schema_version"] = ASR_SCHEMA_VERSION
+  req["priority"] = _normalize_priority(req.get("priority"))
+  req["consumer_id"] = str(req.get("consumer_id") or "").strip()
+  req["routing"] = _normalize_routing(req.get("routing"))
   try:
-    resolved = resolve_profile_options(profile_id=profile_id, options=req.get("options"))
-  except AsrProfileError as e:
+    effective_options = normalize_options(req.get("options"))
+  except AsrOptionsError as e:
     raise AsrRequestError(e.code, str(e), details=e.details) from e
-  req["resolved_options"] = resolved
+  req["effective_options"] = effective_options
   return req
 
 
@@ -106,15 +140,18 @@ def build_error_response(
   message: str,
   retryable: bool = False,
   details: dict[str, Any] | None = None,
-  resolved_options: dict[str, Any] | None = None,
+  effective_options: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
   req = dict(request or {})
   return {
     "schema_version": ASR_SCHEMA_VERSION,
     "request_id": str(req.get("request_id") or ""),
     "ok": False,
-    "profile_id": str(req.get("profile_id") or ""),
-    "resolved_options": dict(resolved_options if resolved_options is not None else (req.get("resolved_options") or {})),
+    "effective_options": dict(
+      effective_options
+      if effective_options is not None
+      else (req.get("effective_options") or {})
+    ),
     "error": {
       "code": str(code),
       "message": str(message),
