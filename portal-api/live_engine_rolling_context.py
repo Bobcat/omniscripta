@@ -11,6 +11,7 @@ from typing import Any, Callable, Mapping
 from fastapi import WebSocket, WebSocketDisconnect, status
 
 from live_chunk_transcribe import LiveChunkBatchBridge
+from live_vad_silero import LiveSileroVadGate, LiveSileroVadSettings
 from live_protocol import (
     PROTOCOL_VERSION,
     control_ack_event,
@@ -39,6 +40,13 @@ def _safe_float(value: Any) -> float | None:
 
 
 def _normalize_optional_language(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _normalize_optional_text(value: Any) -> str | None:
     if value is None:
         return None
     text = str(value).strip()
@@ -116,6 +124,18 @@ async def run_live_session_ws_rolling_context(
     LIVE_ROLLING_PACING_STARTUP_MIN_INFER_AUDIO_MS = int(_cfg(config, "LIVE_ROLLING_PACING_STARTUP_MIN_INFER_AUDIO_MS"))
     LIVE_ROLLING_PACING_STARTUP_MIN_NEW_AUDIO_MS = int(_cfg(config, "LIVE_ROLLING_PACING_STARTUP_MIN_NEW_AUDIO_MS"))
     LIVE_ROLLING_PACING_RUNNER_SLOTS = int(_cfg(config, "LIVE_ROLLING_PACING_RUNNER_SLOTS"))
+    LIVE_ROLLING_VAD_ENABLED = bool(_cfg(config, "LIVE_ROLLING_VAD_ENABLED"))
+    LIVE_ROLLING_VAD_WHISPERX_VENV = _normalize_optional_text(_cfg(config, "LIVE_ROLLING_VAD_WHISPERX_VENV"))
+    LIVE_ROLLING_VAD_THRESHOLD = float(_cfg(config, "LIVE_ROLLING_VAD_THRESHOLD"))
+    LIVE_ROLLING_VAD_MAX_SPEECH_DURATION_S = float(_cfg(config, "LIVE_ROLLING_VAD_MAX_SPEECH_DURATION_S"))
+    LIVE_ROLLING_VAD_MIN_SPEECH_MS = int(_cfg(config, "LIVE_ROLLING_VAD_MIN_SPEECH_MS"))
+    LIVE_ROLLING_VAD_HANGOVER_MS = int(_cfg(config, "LIVE_ROLLING_VAD_HANGOVER_MS"))
+    LIVE_ROLLING_SPEECH_GATE_SILENCE_ENTER_MS = int(_cfg(config, "LIVE_ROLLING_SPEECH_GATE_SILENCE_ENTER_MS"))
+    LIVE_ROLLING_SPEECH_GATE_REARM_HITS = int(_cfg(config, "LIVE_ROLLING_SPEECH_GATE_REARM_HITS"))
+    LIVE_ROLLING_SPEECH_GATE_REARM_WINDOW_MS = int(_cfg(config, "LIVE_ROLLING_SPEECH_GATE_REARM_WINDOW_MS"))
+    LIVE_ROLLING_SPEECH_GATE_FORCE_COMMIT_SILENCE_MS = int(
+        _cfg(config, "LIVE_ROLLING_SPEECH_GATE_FORCE_COMMIT_SILENCE_MS")
+    )
     session_live_asr_language = LIVE_ASR_LANGUAGE
 
     poll_interval_s = max(0.02, float(LIVE_ROLLING_POLL_INTERVAL_MS) / 1000.0)
@@ -137,6 +157,26 @@ async def run_live_session_ws_rolling_context(
     startup_emit_ms = int(max(1, LIVE_ROLLING_PACING_STARTUP_EMIT_MS))
     startup_min_infer_audio_ms = int(max(0, LIVE_ROLLING_PACING_STARTUP_MIN_INFER_AUDIO_MS))
     startup_min_new_audio_ms = int(max(0, LIVE_ROLLING_PACING_STARTUP_MIN_NEW_AUDIO_MS))
+    vad_enabled = bool(LIVE_ROLLING_VAD_ENABLED)
+    vad_threshold = float(max(0.0, min(1.0, LIVE_ROLLING_VAD_THRESHOLD)))
+    vad_max_speech_duration_s = float(max(0.1, LIVE_ROLLING_VAD_MAX_SPEECH_DURATION_S))
+    vad_min_speech_ms = int(max(0, LIVE_ROLLING_VAD_MIN_SPEECH_MS))
+    vad_hangover_ms = int(max(0, LIVE_ROLLING_VAD_HANGOVER_MS))
+    speech_gate_silence_enter_ms = int(max(100, LIVE_ROLLING_SPEECH_GATE_SILENCE_ENTER_MS))
+    speech_gate_rearm_hits = int(max(1, LIVE_ROLLING_SPEECH_GATE_REARM_HITS))
+    speech_gate_rearm_window_ms = int(max(100, LIVE_ROLLING_SPEECH_GATE_REARM_WINDOW_MS))
+    speech_gate_force_commit_silence_ms = int(max(100, LIVE_ROLLING_SPEECH_GATE_FORCE_COMMIT_SILENCE_MS))
+    speech_gate_force_threshold_ms = int(max(speech_gate_silence_enter_ms, speech_gate_force_commit_silence_ms))
+    speech_gate_rearm_window_s = float(speech_gate_rearm_window_ms) / 1000.0
+    vad_settings = LiveSileroVadSettings(
+        enabled=bool(vad_enabled),
+        whisperx_venv=_normalize_optional_text(LIVE_ROLLING_VAD_WHISPERX_VENV),
+        threshold=vad_threshold,
+        max_speech_duration_s=vad_max_speech_duration_s,
+        min_speech_ms=vad_min_speech_ms,
+        hangover_ms=vad_hangover_ms,
+    )
+    vad_gate: LiveSileroVadGate | None = None
     pacing_effective_emit_ms = int(
         max(
             LIVE_ROLLING_MIN_EMIT_INTERVAL_MS,
@@ -167,6 +207,19 @@ async def run_live_session_ws_rolling_context(
             session_live_asr_language = snap_lang
     except Exception:
         session_live_asr_language = LIVE_ASR_LANGUAGE
+    if vad_enabled:
+        try:
+            vad_gate = LiveSileroVadGate(
+                settings=vad_settings,
+                sample_rate_hz=LIVE_AUDIO_SAMPLE_RATE_HZ,
+            )
+        except Exception as e:
+            try:
+                await websocket.close(code=status.WS_1011_INTERNAL_ERROR, reason="live_vad_init_failed")
+            except Exception:
+                pass
+            LIVE_SESSIONS.close_session(session_id, reason=f"live_vad_init_failed:{type(e).__name__}")
+            return
 
     stop_reason = "client_disconnected"
     websocket_closed = False
@@ -224,6 +277,10 @@ async def run_live_session_ws_rolling_context(
     rolling_last_preview_audio_end_fallback_ms = 0
     rolling_pacing_epoch_mono_ms = 0
     rolling_pacing_last_slot_index = -1
+    rolling_speech_gate_state = "quiet" if vad_enabled else "active"
+    rolling_speech_gate_recent_hits_mono: list[float] = []
+    rolling_last_recent_speech_mono = 0.0
+    rolling_speech_gate_rearm_from_ms = 0
     rolling_guardrail_metrics: dict[str, int] = {
         "force_commit_repeats_count": 0,
         "decode_window_cap_count": 0,
@@ -237,6 +294,16 @@ async def run_live_session_ws_rolling_context(
         "min_new_audio_skips": 0,
         "window_no_progress_skips": 0,
         "stale_completion_ignored_count": 0,
+        "vad_checks": 0,
+        "vad_speech_allows": 0,
+        "vad_hangover_allows": 0,
+        "vad_silence_skips": 0,
+        "vad_errors": 0,
+        "speech_gate_quiet_skips": 0,
+        "speech_gate_rearm_count": 0,
+        "speech_gate_state_transitions": 0,
+        "speech_gate_silence_flush_count": 0,
+        "speech_gate_forced_commit_count": 0,
     }
     last_result_event_signature = ""
 
@@ -319,6 +386,128 @@ async def run_live_session_ws_rolling_context(
     def _preview_signature(value: str) -> str:
         return " ".join(str(value or "").strip().lower().split())
 
+    def _set_speech_gate_state(
+        *,
+        next_state: str,
+        reason: str,
+        now_mono: float,
+        rearm_from_ms: int | None = None,
+    ) -> None:
+        nonlocal rolling_speech_gate_state
+        nonlocal rolling_speech_gate_recent_hits_mono
+        nonlocal rolling_last_recent_speech_mono
+        nonlocal rolling_speech_gate_rearm_from_ms
+        safe_next = str(next_state or "").strip().lower()
+        if safe_next not in {"quiet", "active", "flush"}:
+            return
+        if safe_next == rolling_speech_gate_state:
+            return
+        prev = str(rolling_speech_gate_state or "")
+        rolling_speech_gate_state = safe_next
+        if safe_next == "quiet":
+            rolling_speech_gate_recent_hits_mono = []
+            rolling_last_recent_speech_mono = 0.0
+            base_rearm_from_ms = int(max(0, rolling_processed_offset_ms))
+            if rearm_from_ms is not None:
+                base_rearm_from_ms = int(max(base_rearm_from_ms, int(rearm_from_ms)))
+            rolling_speech_gate_rearm_from_ms = int(base_rearm_from_ms)
+        elif safe_next == "active":
+            rolling_speech_gate_recent_hits_mono = []
+            rolling_last_recent_speech_mono = float(max(0.0, now_mono))
+        rolling_guardrail_metrics["speech_gate_state_transitions"] = int(
+            max(0, int(rolling_guardrail_metrics.get("speech_gate_state_transitions") or 0)) + 1
+        )
+        _append_log(
+            "rolling_speech_gate_transition",
+            prev_state=prev,
+            next_state=safe_next,
+            reason=str(reason or ""),
+        )
+
+    def _recent_pcm_window(*, end_ms: int, window_ms: int, min_t0_ms: int | None = None) -> bytes:
+        safe_end_ms = int(max(0, end_ms))
+        safe_window_ms = int(max(1, window_ms))
+        t0_ms = int(max(rolling_pcm_base_ms, safe_end_ms - safe_window_ms))
+        if min_t0_ms is not None:
+            t0_ms = int(max(t0_ms, int(max(0, min_t0_ms))))
+        t1_ms = int(max(t0_ms, safe_end_ms))
+        start_b = _ms_to_byte_offset(
+            int(max(0, t0_ms - rolling_pcm_base_ms)),
+            bytes_per_second=LIVE_AUDIO_BYTES_PER_SECOND,
+            sample_width_bytes=LIVE_AUDIO_SAMPLE_WIDTH_BYTES,
+        )
+        end_b = _ms_to_byte_offset(
+            int(max(0, t1_ms - rolling_pcm_base_ms)),
+            bytes_per_second=LIVE_AUDIO_BYTES_PER_SECOND,
+            sample_width_bytes=LIVE_AUDIO_SAMPLE_WIDTH_BYTES,
+        )
+        end_b = int(max(start_b, min(end_b, len(rolling_pcm))))
+        if end_b <= start_b:
+            return b""
+        return bytes(rolling_pcm[start_b:end_b])
+
+    def _recent_speech_hit(
+        *,
+        now_mono: float,
+        end_ms: int,
+        min_t0_ms: int | None = None,
+        window_ms: int | None = None,
+    ) -> dict[str, Any]:
+        rolling_guardrail_metrics["vad_checks"] = int(
+            max(0, int(rolling_guardrail_metrics.get("vad_checks") or 0)) + 1
+        )
+        effective_window_ms = int(max(1, int(window_ms or speech_gate_rearm_window_ms)))
+        pcm_recent = _recent_pcm_window(
+            end_ms=end_ms,
+            window_ms=effective_window_ms,
+            min_t0_ms=min_t0_ms,
+        )
+        if not pcm_recent:
+            rolling_guardrail_metrics["vad_silence_skips"] = int(
+                max(0, int(rolling_guardrail_metrics.get("vad_silence_skips") or 0)) + 1
+            )
+            return {
+                "speech_hit": False,
+                "reason": "empty_recent_window",
+                "speech_ms": 0,
+                "segments_count": 0,
+            }
+        try:
+            decision = vad_gate.should_enqueue_pcm16(
+                pcm_recent,
+                now_mono=now_mono,
+                allow_hangover=False,
+            ) if vad_gate is not None else {"allow": False, "reason": "disabled"}
+        except Exception as e:
+            rolling_guardrail_metrics["vad_errors"] = int(
+                max(0, int(rolling_guardrail_metrics.get("vad_errors") or 0)) + 1
+            )
+            return {
+                "speech_hit": False,
+                "error": f"{type(e).__name__}: {e}",
+                "reason": "vad_error",
+                "speech_ms": 0,
+                "segments_count": 0,
+            }
+
+        allow = bool(decision.get("allow"))
+        reason = str(decision.get("reason") or "").strip().lower()
+        speech_hit = bool(allow and reason == "speech")
+        if speech_hit:
+            rolling_guardrail_metrics["vad_speech_allows"] = int(
+                max(0, int(rolling_guardrail_metrics.get("vad_speech_allows") or 0)) + 1
+            )
+        else:
+            rolling_guardrail_metrics["vad_silence_skips"] = int(
+                max(0, int(rolling_guardrail_metrics.get("vad_silence_skips") or 0)) + 1
+            )
+        return {
+            "speech_hit": speech_hit,
+            "reason": reason or ("speech" if speech_hit else "silence"),
+            "speech_ms": int(max(0, int(decision.get("speech_ms") or 0))),
+            "segments_count": int(max(0, int(decision.get("segments_count") or 0))),
+        }
+
     def _consume_pacing_slot(*, now_mono: float) -> bool:
         nonlocal rolling_pacing_epoch_mono_ms
         nonlocal rolling_pacing_last_slot_index
@@ -353,6 +542,9 @@ async def run_live_session_ws_rolling_context(
         avg_segs = (float(segs_sum) / float(calls_done)) if calls_done > 0 else None
         avg_ratio = (ratio_sum / float(calls_done)) if calls_done > 0 else None
         inflight_count = 1 if rolling_inflight is not None else 0
+        silence_elapsed_ms = None
+        if rolling_last_recent_speech_mono > 0.0:
+            silence_elapsed_ms = int(max(0.0, float(time.monotonic() - rolling_last_recent_speech_mono) * 1000.0))
         return {
             "inflight": bool(inflight_count > 0),
             "inflight_count": int(inflight_count),
@@ -371,6 +563,37 @@ async def run_live_session_ws_rolling_context(
                 "startup_emit_ms": int(max(1, startup_emit_ms)),
                 "startup_min_infer_audio_ms": int(max(0, startup_min_infer_audio_ms)),
                 "startup_min_new_audio_ms": int(max(0, startup_min_new_audio_ms)),
+            },
+            "vad": (
+                {
+                    "enabled": True,
+                    "config": dict(vad_gate.config_payload()),
+                    "state": dict(vad_gate.state_payload()),
+                }
+                if vad_gate is not None
+                else {
+                    "enabled": False,
+                    "config": {
+                        "provider": "silero",
+                        "threshold": float(vad_threshold),
+                        "max_speech_duration_s": float(vad_max_speech_duration_s),
+                        "min_speech_ms": int(vad_min_speech_ms),
+                        "hangover_ms": int(vad_hangover_ms),
+                        "whisperx_venv": str(vad_settings.whisperx_venv or ""),
+                        "sample_rate_hz": int(LIVE_AUDIO_SAMPLE_RATE_HZ),
+                    },
+                    "state": {},
+                }
+            ),
+            "speech_gate": {
+                "state": str(rolling_speech_gate_state or ""),
+                "recent_hits_count": int(max(0, len(rolling_speech_gate_recent_hits_mono))),
+                "silence_elapsed_ms": silence_elapsed_ms,
+                "rearm_from_ms": int(max(0, rolling_speech_gate_rearm_from_ms)),
+                "silence_enter_ms": int(max(100, speech_gate_silence_enter_ms)),
+                "rearm_hits": int(max(1, speech_gate_rearm_hits)),
+                "rearm_window_ms": int(max(100, speech_gate_rearm_window_ms)),
+                "force_commit_silence_ms": int(max(100, speech_gate_force_commit_silence_ms)),
             },
             "guardrails": dict(rolling_guardrail_metrics),
             "config": {
@@ -392,6 +615,16 @@ async def run_live_session_ws_rolling_context(
                 "pacing_startup_emit_ms": int(max(1, startup_emit_ms)),
                 "pacing_startup_min_infer_audio_ms": int(max(0, startup_min_infer_audio_ms)),
                 "pacing_startup_min_new_audio_ms": int(max(0, startup_min_new_audio_ms)),
+                "vad_enabled": bool(vad_enabled),
+                "vad_threshold": float(vad_threshold),
+                "vad_max_speech_duration_s": float(vad_max_speech_duration_s),
+                "vad_min_speech_ms": int(vad_min_speech_ms),
+                "vad_hangover_ms": int(vad_hangover_ms),
+                "vad_whisperx_venv": str(vad_settings.whisperx_venv or ""),
+                "speech_gate_silence_enter_ms": int(max(100, speech_gate_silence_enter_ms)),
+                "speech_gate_rearm_hits": int(max(1, speech_gate_rearm_hits)),
+                "speech_gate_rearm_window_ms": int(max(100, speech_gate_rearm_window_ms)),
+                "speech_gate_force_commit_silence_ms": int(max(100, speech_gate_force_commit_silence_ms)),
                 "diarize_enabled": bool(LIVE_DIARIZE_ENABLED),
                 "diarize_speaker_mode": str(LIVE_DIARIZE_SPEAKER_MODE),
                 "diarize_min_speakers": int(LIVE_DIARIZE_MIN_SPEAKERS),
@@ -666,6 +899,10 @@ async def run_live_session_ws_rolling_context(
         nonlocal rolling_last_submitted_t1_ms
         nonlocal rolling_last_emit_mono
         nonlocal finalization_state
+        nonlocal rolling_speech_gate_state
+        nonlocal rolling_speech_gate_recent_hits_mono
+        nonlocal rolling_last_recent_speech_mono
+        nonlocal rolling_speech_gate_rearm_from_ms
 
         if chunk_bridge is None:
             return
@@ -682,8 +919,13 @@ async def run_live_session_ws_rolling_context(
         _maybe_apply_hard_clip(end_ms=end_ms)
         if end_ms <= rolling_processed_offset_ms:
             return
-        startup_active = (not force) and (startup_duration_ms > 0) and (int(end_ms) < int(startup_duration_ms))
-        if not force:
+        use_force = bool(force)
+        startup_active = (not use_force) and (startup_duration_ms > 0) and (int(end_ms) < int(startup_duration_ms))
+        forced_preview_committed = False
+
+        # Cadence gate first: speech state transitions should only be evaluated on
+        # actual emit decision moments (or explicit forced emits).
+        if not use_force:
             if startup_active:
                 elapsed_since_emit_ms = int(max(0.0, float(now_mono - float(rolling_last_emit_mono))) * 1000.0)
                 if (rolling_last_emit_mono > 0.0) and (elapsed_since_emit_ms < int(startup_emit_ms)):
@@ -694,16 +936,107 @@ async def run_live_session_ws_rolling_context(
             elif not _consume_pacing_slot(now_mono=now_mono):
                 return
 
+        if (not use_force) and (vad_gate is not None):
+            # Speech gate uses only new/unsubmitted audio to avoid rearming on old
+            # context and to prevent silence hallucinations.
+            pending_t0_ms = int(max(rolling_processed_offset_ms, rolling_last_submitted_t1_ms))
+            pending_ms = int(max(0, end_ms - pending_t0_ms))
+            gate_max_lookback_ms = int(max(speech_gate_rearm_window_ms, 4000))
+            gate_window_ms = int(
+                max(
+                    speech_gate_rearm_window_ms,
+                    min(gate_max_lookback_ms, pending_ms),
+                )
+            )
+            gate_min_t0_ms = int(max(0, pending_t0_ms)) if pending_ms > 0 else int(max(0, end_ms))
+
+            vad_recent = _recent_speech_hit(
+                now_mono=now_mono,
+                end_ms=end_ms,
+                min_t0_ms=gate_min_t0_ms,
+                window_ms=gate_window_ms,
+            )
+            if "error" in vad_recent:
+                finalization_state = "error"
+                _append_log(
+                    "rolling_vad_error",
+                    error=str(vad_recent.get("error") or "vad_error"),
+                )
+                await _update_state_and_emit_result()
+                return
+
+            speech_hit = bool(vad_recent.get("speech_hit"))
+            if speech_hit:
+                rolling_last_recent_speech_mono = float(max(0.0, now_mono))
+                cutoff_mono = float(max(0.0, now_mono - speech_gate_rearm_window_s))
+                rolling_speech_gate_recent_hits_mono = [
+                    float(ts) for ts in rolling_speech_gate_recent_hits_mono if float(ts) >= cutoff_mono
+                ]
+                rolling_speech_gate_recent_hits_mono.append(float(now_mono))
+            else:
+                cutoff_mono = float(max(0.0, now_mono - speech_gate_rearm_window_s))
+                rolling_speech_gate_recent_hits_mono = [
+                    float(ts) for ts in rolling_speech_gate_recent_hits_mono if float(ts) >= cutoff_mono
+                ]
+
+            if rolling_speech_gate_state == "quiet":
+                if len(rolling_speech_gate_recent_hits_mono) >= int(max(1, speech_gate_rearm_hits)):
+                    _set_speech_gate_state(
+                        next_state="active",
+                        reason="speech_rearm_hits",
+                        now_mono=now_mono,
+                    )
+                    rolling_guardrail_metrics["speech_gate_rearm_count"] = int(
+                        max(0, int(rolling_guardrail_metrics.get("speech_gate_rearm_count") or 0)) + 1
+                    )
+                else:
+                    rolling_guardrail_metrics["speech_gate_quiet_skips"] = int(
+                        max(0, int(rolling_guardrail_metrics.get("speech_gate_quiet_skips") or 0)) + 1
+                    )
+                    return
+            elif rolling_speech_gate_state == "active":
+                silence_elapsed_ms = int(max(0.0, float(now_mono - rolling_last_recent_speech_mono) * 1000.0))
+                if rolling_last_recent_speech_mono <= 0.0 or silence_elapsed_ms >= int(max(100, speech_gate_force_threshold_ms)):
+                    committed = _commit_preview_tail_if_needed(
+                        include_recording_end=False,
+                        max_t1_ms=(int(rolling_last_submitted_t1_ms) if int(rolling_last_submitted_t1_ms) > 0 else None),
+                    )
+                    if committed:
+                        forced_preview_committed = True
+                        rolling_guardrail_metrics["speech_gate_forced_commit_count"] = int(
+                            max(0, int(rolling_guardrail_metrics.get("speech_gate_forced_commit_count") or 0)) + 1
+                        )
+                        _append_log(
+                            "rolling_speech_gate_forced_commit",
+                            silence_elapsed_ms=int(max(0, silence_elapsed_ms)),
+                            threshold_ms=int(max(100, speech_gate_force_threshold_ms)),
+                        )
+                    _set_speech_gate_state(
+                        next_state="quiet",
+                        reason="silence_force_commit",
+                        now_mono=now_mono,
+                        rearm_from_ms=pending_t0_ms,
+                    )
+
+            # Strict silence protection: no VAD speech hit means no enqueue.
+            if not speech_hit:
+                rolling_guardrail_metrics["speech_gate_quiet_skips"] = int(
+                    max(0, int(rolling_guardrail_metrics.get("speech_gate_quiet_skips") or 0)) + 1
+                )
+                if forced_preview_committed:
+                    await _update_state_and_emit_result()
+                return
+
         effective_min_infer_audio_ms = int(LIVE_ROLLING_MIN_INFER_AUDIO_MS)
         if startup_active and startup_min_infer_audio_ms > 0:
             effective_min_infer_audio_ms = int(max(1, startup_min_infer_audio_ms))
         unprocessed_ms = int(max(0, end_ms - rolling_processed_offset_ms))
-        if (not force) and (unprocessed_ms < effective_min_infer_audio_ms):
+        if (not use_force) and (unprocessed_ms < effective_min_infer_audio_ms):
             return
         effective_min_new_audio_ms = int(min_new_audio_ms)
         if startup_active and startup_min_new_audio_ms > 0:
             effective_min_new_audio_ms = int(max(0, startup_min_new_audio_ms))
-        if (not force) and rolling_last_submitted_t1_ms > 0:
+        if (not use_force) and rolling_last_submitted_t1_ms > 0:
             delta_new_audio_ms = int(max(0, end_ms - rolling_last_submitted_t1_ms))
             if delta_new_audio_ms < effective_min_new_audio_ms:
                 rolling_guardrail_metrics["min_new_audio_skips"] = int(
@@ -728,7 +1061,7 @@ async def run_live_session_ws_rolling_context(
                     infer_t1_ms=int(infer_t1_ms),
                     max_decode_window_ms=int(max_decode_window_ms),
                 )
-        if (not force) and infer_t1_ms <= rolling_last_submitted_t1_ms:
+        if (not use_force) and infer_t1_ms <= rolling_last_submitted_t1_ms:
             rolling_guardrail_metrics["window_no_progress_skips"] = int(
                 max(0, int(rolling_guardrail_metrics.get("window_no_progress_skips") or 0)) + 1
             )
@@ -752,6 +1085,7 @@ async def run_live_session_ws_rolling_context(
             return
 
         infer_seq = int(max(0, rolling_infer_seq_next))
+
         try:
             job = chunk_bridge.enqueue_chunk_pcm16(
                 session_id=session_id,
@@ -797,6 +1131,8 @@ async def run_live_session_ws_rolling_context(
             t0_ms=int(infer_t0_ms),
             t1_ms=int(infer_t1_ms),
             audio_bytes=len(pcm),
+            forced=bool(use_force),
+            speech_gate_state=str(rolling_speech_gate_state or ""),
         )
 
     async def _poll_inference(*, force: bool = False) -> None:
@@ -804,6 +1140,7 @@ async def run_live_session_ws_rolling_context(
         nonlocal rolling_last_poll_mono
         nonlocal rolling_commit_index_next
         nonlocal rolling_processed_offset_ms
+        nonlocal rolling_last_submitted_t1_ms
         nonlocal rolling_last_applied_seq
         nonlocal rolling_last_preview_signature
         nonlocal rolling_same_preview_repeats
@@ -814,6 +1151,9 @@ async def run_live_session_ws_rolling_context(
         nonlocal finalization_state
         nonlocal rolling_gpu_proxy_transcribe_s
         nonlocal rolling_gpu_proxy_pipeline_s
+        nonlocal rolling_speech_gate_state
+        nonlocal rolling_speech_gate_recent_hits_mono
+        nonlocal rolling_last_recent_speech_mono
 
         if chunk_bridge is None or rolling_inflight is None:
             return
@@ -1127,6 +1467,23 @@ async def run_live_session_ws_rolling_context(
                 error=err,
             )
 
+        if (vad_gate is not None) and (rolling_speech_gate_state == "flush"):
+            flush_window_end_ms = int(max(t0_ms, t1_ms))
+            _commit_preview_tail_if_needed(include_recording_end=False, max_t1_ms=flush_window_end_ms)
+            rolling_processed_offset_ms = int(max(rolling_processed_offset_ms, flush_window_end_ms))
+            rolling_last_submitted_t1_ms = int(max(rolling_last_submitted_t1_ms, flush_window_end_ms))
+            rolling_speech_gate_recent_hits_mono = []
+            rolling_last_recent_speech_mono = 0.0
+            rolling_guardrail_metrics["speech_gate_silence_flush_count"] = int(
+                max(0, int(rolling_guardrail_metrics.get("speech_gate_silence_flush_count") or 0)) + 1
+            )
+            _set_speech_gate_state(
+                next_state="quiet",
+                reason="flush_completed",
+                now_mono=time.monotonic(),
+                rearm_from_ms=flush_window_end_ms,
+            )
+
         rolling_inflight = None
         if finalization_state not in {"error", "ready"}:
             finalization_state = "recording" if str(recording_state or "") == "recording" else "processing_chunks"
@@ -1139,7 +1496,11 @@ async def run_live_session_ws_rolling_context(
     async def _drain_inflight_only(*, force_poll: bool = True) -> None:
         await _poll_inference(force=force_poll)
 
-    def _commit_preview_tail_if_needed() -> None:
+    def _commit_preview_tail_if_needed(
+        *,
+        include_recording_end: bool = True,
+        max_t1_ms: int | None = None,
+    ) -> bool:
         nonlocal rolling_commit_index_next
         nonlocal rolling_processed_offset_ms
         nonlocal rolling_last_preview_signature
@@ -1149,32 +1510,34 @@ async def run_live_session_ws_rolling_context(
         nonlocal rolling_last_preview_text
         nonlocal rolling_last_preview_audio_end_fallback_ms
         if recording_duration_ms <= rolling_processed_offset_ms:
-            return
+            return False
         try:
             result = LIVE_SESSIONS.live_result_snapshot(session_id)
         except Exception:
-            return
+            return False
         preview = result.get("preview") or {}
         preview_text = str(preview.get("text") or "").strip()
         if not preview_text:
             preview_text = str(rolling_last_preview_text or "").strip()
         if not preview_text:
-            return
+            return False
 
         preview_audio_end_ms = int(max(0, int(preview.get("audio_end_ms") or 0)))
         if preview_audio_end_ms <= 0:
             preview_audio_end_ms = int(max(0, rolling_last_preview_audio_end_fallback_ms))
 
         commit_t0 = int(max(0, rolling_processed_offset_ms))
-        commit_t1 = int(
-            max(
-                commit_t0,
-                int(preview_audio_end_ms),
-                int(max(0, recording_duration_ms)),
-            )
-        )
+        commit_t1_candidates = [int(commit_t0), int(preview_audio_end_ms)]
+        if include_recording_end:
+            commit_t1_candidates.append(int(max(0, recording_duration_ms)))
+        commit_t1 = int(max(commit_t1_candidates))
+        if max_t1_ms is not None:
+            commit_t1 = int(min(commit_t1, int(max(0, max_t1_ms))))
         if commit_t1 <= commit_t0:
-            commit_t1 = int(max(commit_t0 + 1, recording_duration_ms))
+            if include_recording_end:
+                commit_t1 = int(max(commit_t0 + 1, recording_duration_ms))
+            else:
+                return False
         seg = {
             "segment_id": f"s{int(max(0, rolling_commit_index_next)) + 1:04d}",
             "text": preview_text,
@@ -1205,8 +1568,9 @@ async def run_live_session_ws_rolling_context(
             rolling_last_preview_text = ""
             rolling_last_preview_audio_end_fallback_ms = 0
             _append_log("rolling_tail_preview_committed", t0_ms=commit_t0, t1_ms=commit_t1, chars=len(preview_text))
+            return True
         except Exception:
-            pass
+            return False
 
     try:
         ready_payload = ready_event(
@@ -1262,6 +1626,16 @@ async def run_live_session_ws_rolling_context(
                     "pacing_startup_min_infer_audio_ms": int(max(0, startup_min_infer_audio_ms)),
                     "pacing_startup_min_new_audio_ms": int(max(0, startup_min_new_audio_ms)),
                     "pacing_phase_ms": int(max(0, pacing_phase_ms)),
+                    "vad_enabled": bool(vad_enabled),
+                    "vad_threshold": float(vad_threshold),
+                    "vad_max_speech_duration_s": float(vad_max_speech_duration_s),
+                    "vad_min_speech_ms": int(vad_min_speech_ms),
+                    "vad_hangover_ms": int(vad_hangover_ms),
+                    "vad_whisperx_venv": str(vad_settings.whisperx_venv or ""),
+                    "speech_gate_silence_enter_ms": int(max(100, speech_gate_silence_enter_ms)),
+                    "speech_gate_rearm_hits": int(max(1, speech_gate_rearm_hits)),
+                    "speech_gate_rearm_window_ms": int(max(100, speech_gate_rearm_window_ms)),
+                    "speech_gate_force_commit_silence_ms": int(max(100, speech_gate_force_commit_silence_ms)),
                     "language": session_live_asr_language,
                     "diarize_enabled": bool(LIVE_DIARIZE_ENABLED),
                     "diarize_speaker_mode": str(LIVE_DIARIZE_SPEAKER_MODE),
