@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import mimetypes
 import random
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Callable
 from urllib import error as urlerror
@@ -15,9 +17,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
   sys.path.insert(0, str(_REPO_ROOT))
 
-from shared.asr.blob_store import cleanup_blob_store_if_due, upload_local_path_as_blob_ref
 from shared.asr.schema import ASR_SCHEMA_VERSION
-from shared.app_config import get_str, get_int, get_float, get_bool
+from shared.app_config import get_str, get_int, get_float
 
 
 def _build_error_response(
@@ -181,40 +182,140 @@ def _with_consumer_id(request_payload: dict[str, Any], *, consumer_id: str) -> d
   return req
 
 
+def _multipart_content_type_for_path(path: Path) -> str:
+  guessed, _enc = mimetypes.guess_type(str(path.name))
+  return str(guessed or "application/octet-stream")
+
+
+def _build_multipart_submit_body(
+  *,
+  request_payload: dict[str, Any],
+  audio_path: Path,
+) -> tuple[bytes, str]:
+  boundary = f"----transcribe-{uuid.uuid4().hex}"
+  request_bytes = json.dumps(request_payload, ensure_ascii=False).encode("utf-8")
+  file_bytes = audio_path.read_bytes()
+  filename = str(audio_path.name or "audio.bin").replace("\"", "_")
+  file_content_type = _multipart_content_type_for_path(audio_path)
+  rows: list[bytes] = []
+  rows.append(f"--{boundary}\r\n".encode("ascii"))
+  rows.append(b"Content-Disposition: form-data; name=\"request_json\"\r\n")
+  rows.append(b"Content-Type: application/json; charset=utf-8\r\n\r\n")
+  rows.append(request_bytes)
+  rows.append(b"\r\n")
+  rows.append(f"--{boundary}\r\n".encode("ascii"))
+  rows.append(f"Content-Disposition: form-data; name=\"audio_file\"; filename=\"{filename}\"\r\n".encode("utf-8"))
+  rows.append(f"Content-Type: {file_content_type}\r\n\r\n".encode("ascii"))
+  rows.append(file_bytes)
+  rows.append(b"\r\n")
+  rows.append(f"--{boundary}--\r\n".encode("ascii"))
+  return b"".join(rows), f"multipart/form-data; boundary={boundary}"
+
+
+def _http_multipart_once(
+  *,
+  method: str,
+  url: str,
+  token: str,
+  timeout_s: float,
+  body_bytes: bytes,
+  content_type: str,
+) -> tuple[int, dict[str, Any]]:
+  req = urlrequest.Request(url, data=bytes(body_bytes), method=str(method).upper())
+  req.add_header("Content-Type", str(content_type))
+  if token:
+    req.add_header("X-ASR-Token", token)
+  try:
+    with urlrequest.urlopen(req, timeout=float(timeout_s)) as resp:
+      return int(getattr(resp, "status", 200) or 200), _json_or_empty(resp.read())
+  except urlerror.HTTPError as e:
+    return int(getattr(e, "code", 500) or 500), _json_or_empty(e.read())
+
+
+def _http_multipart_with_retry(
+  *,
+  method: str,
+  url: str,
+  token: str,
+  timeout_s: float,
+  body_bytes: bytes,
+  content_type: str,
+  attempts: int,
+  backoff_base_s: float,
+  backoff_max_s: float,
+  jitter_s: float,
+) -> tuple[int, dict[str, Any], int]:
+  max_attempts = max(1, int(attempts))
+  last_exc: Exception | None = None
+  for attempt in range(1, max_attempts + 1):
+    try:
+      status_code, body = _http_multipart_once(
+        method=method,
+        url=url,
+        token=token,
+        timeout_s=timeout_s,
+        body_bytes=body_bytes,
+        content_type=content_type,
+      )
+    except Exception as e:
+      last_exc = e
+      if attempt >= max_attempts:
+        raise
+      sleep_s = _backoff_sleep_s(
+        retry_index=(attempt - 1),
+        base_s=backoff_base_s,
+        max_s=backoff_max_s,
+        jitter_s=jitter_s,
+      )
+      if sleep_s > 0.0:
+        time.sleep(sleep_s)
+      continue
+
+    if _retryable_http_status(status_code) and attempt < max_attempts:
+      sleep_s = _backoff_sleep_s(
+        retry_index=(attempt - 1),
+        base_s=backoff_base_s,
+        max_s=backoff_max_s,
+        jitter_s=jitter_s,
+      )
+      if sleep_s > 0.0:
+        time.sleep(sleep_s)
+      continue
+    return int(status_code), dict(body or {}), int(attempt)
+
+  if last_exc is not None:
+    raise last_exc
+  return 500, {}, int(max_attempts)
+
+
 def _prepare_submit_payload(
   *,
   request_payload: dict[str, Any],
   consumer_id: str,
-) -> tuple[dict[str, Any], dict[str, Any] | None, dict[str, Any] | None]:
+) -> tuple[dict[str, Any], Path | None, dict[str, Any] | None]:
   req = _with_consumer_id(dict(request_payload or {}), consumer_id=consumer_id)
-  request_id = str(req.get("request_id") or "").strip()
-  pool_base_url = _pool_base_url()
-  blob_meta: dict[str, Any] | None = None
-  if not get_bool("asr_remote.blob_enabled", True):
-    return req, blob_meta, None
   audio = dict(req.get("audio") or {})
   local_path = str(audio.get("local_path") or "").strip()
   if not local_path:
-    return req, blob_meta, None
-  try:
-    blob_ref, blob_info = upload_local_path_as_blob_ref(
-      local_path=Path(local_path),
-      request_id=(request_id or f"req_{int(time.time() * 1000)}"),
-    )
-    audio.pop("local_path", None)
-    audio["blob_ref"] = str(blob_ref)
-    req["audio"] = audio
-    blob_meta = dict(blob_info or {})
-    cleanup_blob_store_if_due()
-    return req, blob_meta, None
-  except Exception as e:
     return req, None, _build_error_response(
       request=req,
-      code="ASR_REMOTE_BLOB_UPLOAD_FAILED",
-      message=f"Failed to upload audio blob for remote ASR: {type(e).__name__}: {e}",
-      retryable=True,
-      details={"exc_type": type(e).__name__, "request_id": request_id, "pool_base_url": pool_base_url},
+      code="ASR_REMOTE_INPUT_PATH_REQUIRED",
+      message="audio.local_path is required for multipart ASR submit",
+      retryable=False,
+      details={},
     )
+  src = Path(local_path).expanduser().resolve()
+  if not src.exists() or not src.is_file():
+    return req, None, _build_error_response(
+      request=req,
+      code="ASR_REMOTE_INPUT_PATH_MISSING",
+      message=f"ASR input file not found: {src}",
+      retryable=False,
+      details={"local_path": str(src)},
+    )
+  audio["local_path"] = str(src)
+  req["audio"] = audio
+  return req, src, None
 
 
 def submit_remote_pool_request(
@@ -222,7 +323,7 @@ def submit_remote_pool_request(
   request_payload: dict[str, Any],
   consumer_id: str,
 ) -> dict[str, Any]:
-  req, _blob_meta, prep_error = _prepare_submit_payload(
+  req, audio_path, prep_error = _prepare_submit_payload(
     request_payload=request_payload,
     consumer_id=consumer_id,
   )
@@ -245,13 +346,49 @@ def submit_remote_pool_request(
   retry_jitter_s = _retry_jitter_s()
   request_id = str(req.get("request_id") or "").strip()
   submit_url = urlparse.urljoin(pool_base_url + "/", "asr/v1/requests")
+  if audio_path is None:
+    return {
+      "ok": False,
+      "request_id": str(request_id),
+      "prepared_request": req,
+      "error_response": _build_error_response(
+        request=req,
+        code="ASR_REMOTE_INPUT_PATH_REQUIRED",
+        message="audio.local_path is required for multipart ASR submit",
+        retryable=False,
+        details={},
+      ),
+      "submit_lifecycle": {},
+      "http_status": 0,
+    }
   try:
-    status_code, submit_body, attempts_used = _http_json_with_retry(
+    body_bytes, content_type = _build_multipart_submit_body(
+      request_payload=req,
+      audio_path=audio_path,
+    )
+  except Exception as e:
+    return {
+      "ok": False,
+      "request_id": str(request_id),
+      "prepared_request": req,
+      "error_response": _build_error_response(
+        request=req,
+        code="ASR_REMOTE_MULTIPART_BUILD_FAILED",
+        message=f"Failed to build multipart ASR submit payload: {type(e).__name__}: {e}",
+        retryable=False,
+        details={"exc_type": type(e).__name__},
+      ),
+      "submit_lifecycle": {},
+      "http_status": 0,
+    }
+  try:
+    status_code, submit_body, attempts_used = _http_multipart_with_retry(
       method="POST",
       url=submit_url,
       token=token,
       timeout_s=http_timeout_s,
-      payload=req,
+      body_bytes=body_bytes,
+      content_type=content_type,
       attempts=retry_attempts,
       backoff_base_s=retry_base_delay_s,
       backoff_max_s=retry_max_delay_s,
@@ -423,6 +560,66 @@ def fetch_remote_request_status(
     "status_code": int(status_code),
     "body": dict(body or {}),
   }
+
+
+def fetch_remote_request_srt(
+  *,
+  request_id: str,
+) -> dict[str, Any]:
+  rid = str(request_id or "").strip()
+  if not rid:
+    return {
+      "ok": False,
+      "status_code": 400,
+      "body": {
+        "code": "ASR_REQUEST_ID_REQUIRED",
+        "message": "request_id is required",
+        "retryable": False,
+      },
+      "data": b"",
+      "content_type": "",
+    }
+
+  pool_base_url = _pool_base_url()
+  token = get_str("asr_pool.token", "")
+  timeout_s = max(5.0, _http_timeout_s())
+  safe_rid = urlparse.quote(rid, safe="")
+  url = urlparse.urljoin(pool_base_url + "/", f"asr/v1/requests/{safe_rid}/artifacts/srt")
+  req = urlrequest.Request(url, method="GET")
+  if token:
+    req.add_header("X-ASR-Token", token)
+  try:
+    with urlrequest.urlopen(req, timeout=float(timeout_s)) as resp:
+      status_code = int(getattr(resp, "status", 200) or 200)
+      data = resp.read()
+      content_type = str(resp.headers.get("Content-Type") or "").strip()
+      return {
+        "ok": bool(status_code == 200),
+        "status_code": int(status_code),
+        "body": {},
+        "data": bytes(data),
+        "content_type": content_type,
+      }
+  except urlerror.HTTPError as e:
+    return {
+      "ok": False,
+      "status_code": int(getattr(e, "code", 500) or 500),
+      "body": _json_or_empty(e.read()),
+      "data": b"",
+      "content_type": "",
+    }
+  except Exception as e:
+    return {
+      "ok": False,
+      "status_code": 0,
+      "body": {
+        "code": "ASR_REMOTE_ARTIFACT_FETCH_IO_FAILURE",
+        "message": f"{type(e).__name__}: {e}",
+        "retryable": True,
+      },
+      "data": b"",
+      "content_type": "",
+    }
 
 
 def _parse_sse_event(*, event_name: str, data_lines: list[str]) -> tuple[str, dict[str, Any]]:

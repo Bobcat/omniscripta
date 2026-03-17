@@ -225,8 +225,7 @@
     "retry_attempts": 3,
     "retry_base_delay_s": 0.2,
     "retry_max_delay_s": 2.0,
-    "retry_jitter_s": 0.1,
-    "blob_enabled": true
+    "retry_jitter_s": 0.1
   },
   
   "asr_blob": {

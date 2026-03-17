@@ -6,7 +6,6 @@ import json
 import os
 import queue
 import re
-import shutil
 import socket
 import sys
 import threading
@@ -29,6 +28,7 @@ from progress_predictor import build_prediction, phase_order_for_job
 from asr_client_remote import (
   fetch_remote_pending_status,
   fetch_remote_request_status,
+  fetch_remote_request_srt,
   stream_remote_completions_forever,
   submit_remote_pool_request,
 )
@@ -1033,6 +1033,41 @@ def _prepare_live_chunk_request(*, job: object, job_cfg: dict[str, Any]) -> dict
   return request
 
 
+def _srt_filename_from_response(*, response: dict[str, Any], fallback: str) -> str:
+  result_obj = dict(response.get("result") or {})
+  artifacts = dict(result_obj.get("artifacts") or {})
+  srt_path_str = str(artifacts.get("srt_path") or "").strip()
+  if srt_path_str:
+    name = str(Path(srt_path_str).name or "").strip()
+    if name:
+      return name
+  safe = str(fallback or "").strip()
+  if safe.lower().endswith(".srt"):
+    return safe
+  return f"{safe or 'transcript'}.srt"
+
+
+def _download_remote_srt_to_path(*, request_id: str, dst_path: Path, allow_empty: bool = False) -> Path:
+  rid = str(request_id or "").strip()
+  if not rid:
+    raise RuntimeError("Missing request_id for remote SRT fetch")
+  fetched = fetch_remote_request_srt(request_id=rid)
+  if not bool(fetched.get("ok", False)):
+    status_code = int(fetched.get("status_code") or 0)
+    body = dict(fetched.get("body") or {})
+    code = str(body.get("code") or "ASR_REMOTE_SRT_FETCH_FAILED")
+    msg = str(body.get("message") or f"Failed to fetch remote SRT (http={status_code})")
+    raise RuntimeError(f"{code}: {msg}")
+  data = bytes(fetched.get("data") or b"")
+  if not data and not bool(allow_empty):
+    raise RuntimeError("Remote SRT fetch returned empty payload")
+  dst_path.parent.mkdir(parents=True, exist_ok=True)
+  tmp = dst_path.with_suffix(dst_path.suffix + ".tmp")
+  tmp.write_bytes(data)
+  os.replace(tmp, dst_path)
+  return dst_path.resolve()
+
+
 def _finalize_live_chunk_completed(
   *,
   pending: _PendingLiveJob,
@@ -1045,20 +1080,20 @@ def _finalize_live_chunk_completed(
   if speaker_mode_raw in {"off", "disabled", "no_speaker", "nospeaker", "no-speaker"}:
     speaker_mode_raw = "none"
   align_enabled = bool(get_setting("live_chunk.align_enabled", False))
-  result_obj = dict(response.get("result") or {})
-  artifacts = dict(result_obj.get("artifacts") or {})
-  srt_path_str = str(artifacts.get("srt_path") or "").strip()
-  if not srt_path_str:
-    raise RuntimeError("ASR backend response missing result.artifacts.srt_path")
-  srt_path = Path(srt_path_str)
-  if not srt_path.exists():
-    raise RuntimeError(f"ASR backend SRT path missing: {srt_path}")
-  local_srt_path = (job.whisperx_dir / srt_path.name).resolve()
-  if srt_path.resolve() != local_srt_path:
-    local_srt_path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(srt_path, local_srt_path)
-  else:
-    local_srt_path.parent.mkdir(parents=True, exist_ok=True)
+  srt_name = _srt_filename_from_response(
+    response=response,
+    fallback=str(getattr(job, "job_id", "") or "live_chunk"),
+  )
+  local_srt_path = (job.whisperx_dir / srt_name).resolve()
+  try:
+    local_srt_path = _download_remote_srt_to_path(
+      request_id=str(pending.request_id or ""),
+      dst_path=local_srt_path,
+      # Live chunks can be silence-only; empty SRT is a valid result.
+      allow_empty=True,
+    )
+  except Exception as e:
+    raise RuntimeError(f"Failed to fetch SRT artifact from ASR pool: {e!r}") from e
 
   timings = dict(response.get("timings") or {})
   timing_rows: list[tuple[str, float]] = []
@@ -1686,7 +1721,7 @@ def _prepare_upload_job_for_submit(
 
   raw_asr_request = {
     "schema_version": "asr_v2",
-    "request_id": f"{job.job_id}:upload_whisperx",
+    "request_id": str(job.job_id),
     "routing": {
       "slot_affinity": 0,
     },
@@ -1799,25 +1834,15 @@ def _finalize_upload_job_terminal(
     _record_upload_phase_timing(pending=pending, name=phase_name, elapsed_s=elapsed_s)
     pending.progress_finish_phase(phase_name, elapsed_s)
 
-  asr_result = dict(asr_response.get("result") or {})
-  asr_artifacts = dict(asr_result.get("artifacts") or {})
-  srt_path_str = str(asr_artifacts.get("srt_path") or "").strip()
-  if not srt_path_str:
-    raise RuntimeError("ASR backend response missing result.artifacts.srt_path")
-  srt_path = Path(srt_path_str)
-  if not srt_path.exists():
-    raise RuntimeError(f"ASR backend SRT path missing: {srt_path}")
   # Keep upload job contract stable: transcript endpoint expects SRT in job.whisperx_dir.
   local_srt_path = (job.whisperx_dir / f"{pending.snippet_path.stem}.srt").resolve()
   try:
-    if srt_path.resolve() != local_srt_path:
-      local_srt_path.parent.mkdir(parents=True, exist_ok=True)
-      shutil.copy2(srt_path, local_srt_path)
-    else:
-      local_srt_path.parent.mkdir(parents=True, exist_ok=True)
+    srt_path = _download_remote_srt_to_path(
+      request_id=str(pending.request_id or ""),
+      dst_path=local_srt_path,
+    )
   except Exception as e:
-    raise RuntimeError(f"Failed to stage SRT into job workspace: {e!r}") from e
-  srt_path = local_srt_path
+    raise RuntimeError(f"Failed to fetch SRT artifact from ASR pool: {e!r}") from e
 
   wx_timings = dict(asr_response.get("timings") or {})
   wx_elapsed = time.monotonic() - pending.wx_t0_mono

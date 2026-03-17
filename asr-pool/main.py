@@ -2,18 +2,22 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
+import shutil
 import sys
 import time
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from email.parser import BytesParser
+from email.policy import default as email_policy_default
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Header, Query, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -63,7 +67,61 @@ def _parse_utc_unix(value: str | None) -> float | None:
         return None
 
 
-from shared.asr.blob_store import AsrBlobError, resolve_blob_ref_to_local_path
+_SAFE_TOKEN_RE = re.compile(r"[^a-zA-Z0-9._-]+")
+
+
+def _safe_token(value: str, *, fallback: str = "request") -> str:
+    text = _SAFE_TOKEN_RE.sub("_", str(value or "").strip())
+    text = text.strip("._-")
+    return text or fallback
+
+
+def _safe_suffix(*, filename: str, audio_format: str) -> str:
+    suffix = str(Path(str(filename or "")).suffix or "").strip().lower()
+    if not suffix and audio_format:
+        fmt = str(audio_format).strip().lower()
+        if fmt:
+            suffix = f".{fmt}"
+    clean = "".join(ch for ch in suffix if ch.isalnum() or ch in {".", "_", "-"}).strip()
+    if clean and not clean.startswith("."):
+        clean = "." + clean
+    clean = clean[:16]
+    return clean or ".bin"
+
+
+def _parse_multipart_submit_payload(*, content_type: str, body: bytes) -> tuple[str, str, bytes]:
+    ctype = str(content_type or "").strip().lower()
+    if "multipart/form-data" not in ctype:
+        raise ValueError("Expected Content-Type multipart/form-data")
+    if not body:
+        raise ValueError("Empty multipart request body")
+    header = f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode("utf-8")
+    msg = BytesParser(policy=email_policy_default).parsebytes(header + bytes(body))
+    if not msg.is_multipart():
+        raise ValueError("Malformed multipart request body")
+    request_json = None
+    audio_filename = ""
+    audio_bytes = None
+    for part in msg.iter_parts():
+        disposition = str(part.get("Content-Disposition") or "").lower()
+        if "form-data" not in disposition:
+            continue
+        field_name = str(part.get_param("name", header="content-disposition") or "").strip()
+        payload = bytes(part.get_payload(decode=True) or b"")
+        if field_name == "request_json":
+            request_json = payload.decode("utf-8", errors="replace")
+            continue
+        if field_name == "audio_file":
+            audio_filename = str(part.get_filename() or "").strip()
+            audio_bytes = payload
+            continue
+    if request_json is None:
+        raise ValueError("Missing multipart field request_json")
+    if audio_bytes is None:
+        raise ValueError("Missing multipart field audio_file")
+    return request_json, audio_filename, bytes(audio_bytes)
+
+
 from asr_contract import (
     AsrRequestError,
     build_error_response,
@@ -1061,6 +1119,7 @@ class AsrPoolService:
                 removable_by_ttl.append(str(rid))
         for rid in removable_by_ttl:
             self._records.pop(rid, None)
+            self._cleanup_request_filesystem(rid)
             pruned_ttl += 1
 
         overflow = int(len(self._records) - int(self._records_max))
@@ -1075,6 +1134,7 @@ class AsrPoolService:
             terminal_rows.sort(key=lambda row: row[0])
             for _ref, rid in terminal_rows[:overflow]:
                 if self._records.pop(rid, None) is not None:
+                    self._cleanup_request_filesystem(rid)
                     pruned_overflow += 1
 
         pruned_total = int(pruned_ttl + pruned_overflow)
@@ -1101,6 +1161,24 @@ class AsrPoolService:
             return 0
         self._last_records_prune_mono = float(now_mono)
         return int(self._prune_records_unlocked(reason=str(reason or "periodic")))
+
+    def _cleanup_request_filesystem(self, request_id: str) -> None:
+        rid = str(request_id or "").strip()
+        if not rid:
+            return
+        roots = [
+            (self._work_root / rid).resolve(),
+            (self._work_root / "_uploads" / _safe_token(rid)).resolve(),
+        ]
+        for root in roots:
+            try:
+                root.relative_to(self._work_root)
+            except ValueError:
+                continue
+            try:
+                shutil.rmtree(root, ignore_errors=True)
+            except Exception:
+                continue
 
     async def _dequeue_next_request_id(self, slot_idx: int) -> str:
         async with self._cond:
@@ -1258,27 +1336,7 @@ class AsrPoolService:
                 self._maybe_prune_records_unlocked(reason="request_finished", force=False)
 
     def _execute_request(self, *, request: dict[str, Any], slot_idx: int, progress_path: Path | None = None) -> dict[str, Any]:
-        req = dict(request or {})
-        audio = dict(req.get("audio") or {})
-        local_path = str(audio.get("local_path") or "").strip()
-        blob_ref = str(audio.get("blob_ref") or "").strip()
-        blob_fetch_ms: float | None = None
-        if not local_path and blob_ref:
-            blob_t0 = time.monotonic()
-            try:
-                resolved = resolve_blob_ref_to_local_path(blob_ref)
-            except AsrBlobError as e:
-                return build_error_response(
-                    request=req,
-                    code=e.code,
-                    message=str(e),
-                    retryable=e.retryable,
-                    details=e.details,
-                )
-            blob_fetch_ms = max(0.0, (time.monotonic() - blob_t0) * 1000.0)
-            audio["local_path"] = str(resolved)
-            req["audio"] = audio
-        request = req
+        request = dict(request or {})
         request_id = str(request.get("request_id") or f"req_{int(time.time())}")
         job_root = (self._work_root / request_id / f"slot_{slot_idx}").resolve()
         out_dir = (job_root / "whisperx").resolve()
@@ -1296,12 +1354,7 @@ class AsrPoolService:
             )
         client = self._warm_clients[slot_idx]
         try:
-            resp = dict(client.transcribe(job=job, request=request, progress_path=progress_path) or {})
-            if blob_fetch_ms is not None and isinstance(resp, dict):
-                runtime = dict(resp.get("runtime") or {})
-                runtime["blob_fetch_ms"] = round(float(blob_fetch_ms), 3)
-                resp["runtime"] = runtime
-            return resp
+            return dict(client.transcribe(job=job, request=request, progress_path=progress_path) or {})
         except Exception as e:
             return build_error_response(
                 request=request,
@@ -1335,8 +1388,107 @@ async def _shutdown() -> None:
 
 
 @app.post("/asr/v1/requests")
-async def submit_asr_request(raw_payload: dict[str, Any], _auth: None = Depends(_auth_guard)) -> JSONResponse:
-    status_code, body = await POOL.submit(raw_payload if isinstance(raw_payload, dict) else {})
+async def submit_asr_request(
+    request: Request,
+    _auth: None = Depends(_auth_guard),
+) -> JSONResponse:
+    content_type = str(request.headers.get("content-type") or "").strip()
+    try:
+        raw_body = await request.body()
+    except Exception as e:
+        return _error(
+            400,
+            code="ASR_UPLOAD_READ_FAILED",
+            message=f"Failed to read upload body: {type(e).__name__}: {e}",
+            retryable=False,
+        )
+    try:
+        request_json, audio_filename, audio_bytes = _parse_multipart_submit_payload(
+            content_type=content_type,
+            body=bytes(raw_body),
+        )
+    except ValueError as e:
+        return _error(
+            400,
+            code="ASR_MULTIPART_INVALID",
+            message=str(e),
+            retryable=False,
+        )
+
+    try:
+        parsed = json.loads(str(request_json or ""))
+    except Exception:
+        return _error(
+            400,
+            code="ASR_REQUEST_JSON_INVALID",
+            message="Invalid multipart field request_json (expected JSON object)",
+            retryable=False,
+        )
+    if not isinstance(parsed, dict):
+        return _error(
+            400,
+            code="ASR_REQUEST_JSON_INVALID",
+            message="request_json must be a JSON object",
+            retryable=False,
+        )
+
+    raw_payload = dict(parsed)
+    request_id = str(raw_payload.get("request_id") or "").strip()
+    if not request_id:
+        return _error(
+            400,
+            code="ASR_REQUEST_ID_REQUIRED",
+            message="request_id is required",
+            retryable=False,
+        )
+    audio = dict(raw_payload.get("audio") or {})
+    upload_root = (POOL._work_root / "_uploads").resolve()
+    upload_dir = (upload_root / _safe_token(request_id)).resolve()
+    try:
+        upload_dir.relative_to(upload_root)
+    except ValueError:
+        return _error(
+            400,
+            code="ASR_UPLOAD_PATH_INVALID",
+            message="Invalid upload path for request_id",
+            retryable=False,
+            details={"request_id": request_id},
+        )
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    dst = (
+        upload_dir
+        / f"input{_safe_suffix(filename=str(audio_filename or ''), audio_format=str(audio.get('format') or ''))}"
+    ).resolve()
+    try:
+        dst.relative_to(upload_root)
+    except ValueError:
+        return _error(
+            400,
+            code="ASR_UPLOAD_PATH_INVALID",
+            message="Invalid upload target path",
+            retryable=False,
+            details={"request_id": request_id},
+        )
+    bytes_written = int(len(audio_bytes))
+    dst.write_bytes(audio_bytes)
+    if bytes_written <= 0:
+        try:
+            dst.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return _error(
+            400,
+            code="ASR_EMPTY_INPUT",
+            message="Uploaded audio file is empty",
+            retryable=False,
+            details={"request_id": request_id},
+        )
+    audio["local_path"] = str(dst)
+    audio.pop("blob_ref", None)
+    audio.pop("inline_base64", None)
+    raw_payload["audio"] = audio
+
+    status_code, body = await POOL.submit(raw_payload)
     return JSONResponse(status_code=int(status_code), content=body)
 
 
@@ -1344,6 +1496,58 @@ async def submit_asr_request(raw_payload: dict[str, Any], _auth: None = Depends(
 async def get_asr_request(request_id: str, _auth: None = Depends(_auth_guard)) -> JSONResponse:
     status_code, body = await POOL.get_request(request_id)
     return JSONResponse(status_code=int(status_code), content=body)
+
+
+@app.get("/asr/v1/requests/{request_id}/artifacts/srt")
+async def get_asr_request_srt(request_id: str, _auth: None = Depends(_auth_guard)):
+    status_code, body = await POOL.get_request(request_id)
+    if int(status_code) != 200:
+        return JSONResponse(status_code=int(status_code), content=body)
+    state = str(body.get("state") or "").strip().lower()
+    if state != "completed":
+        return _error(
+            409,
+            code="ASR_REQUEST_NOT_COMPLETED",
+            message="SRT artifact is only available for completed requests",
+            retryable=False,
+            details={"request_id": str(request_id), "state": state},
+        )
+    response = dict(body.get("response") or {})
+    result = dict(response.get("result") or {})
+    artifacts = dict(result.get("artifacts") or {})
+    srt_path_str = str(artifacts.get("srt_path") or "").strip()
+    if not srt_path_str:
+        return _error(
+            404,
+            code="ASR_ARTIFACT_NOT_FOUND",
+            message="Completed request has no SRT artifact path",
+            retryable=False,
+            details={"request_id": str(request_id)},
+        )
+    srt_path = Path(srt_path_str).resolve()
+    try:
+        srt_path.relative_to(POOL._work_root)
+    except ValueError:
+        return _error(
+            400,
+            code="ASR_ARTIFACT_PATH_INVALID",
+            message="SRT artifact path is outside pool work_root",
+            retryable=False,
+            details={"request_id": str(request_id)},
+        )
+    if not srt_path.exists() or not srt_path.is_file():
+        return _error(
+            404,
+            code="ASR_ARTIFACT_NOT_FOUND",
+            message="SRT artifact file is missing",
+            retryable=False,
+            details={"request_id": str(request_id)},
+        )
+    return FileResponse(
+        path=str(srt_path),
+        media_type="application/x-subrip",
+        filename=srt_path.name,
+    )
 
 
 @app.post("/asr/v1/requests/{request_id}/cancel")
