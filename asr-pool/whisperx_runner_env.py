@@ -9,7 +9,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
   sys.path.insert(0, str(_REPO_ROOT))
 
-from shared.app_config import get_bool, get_int, get_setting, get_str
+from shared.app_config import get_int, get_setting, get_str
 
 WHISPERX_ENV_FILE = Path.home() / ".config" / "whisperx" / "env"
 DEFAULT_WHISPERX_VENV = Path.home() / "whisperx" / ".venv"
@@ -21,9 +21,10 @@ def _load_server_config() -> dict[str, Any]:
     "device": get_str("asr_pool.whisperx.device", "cuda"),
     "compute_type": get_str("asr_pool.whisperx.compute_type", "int8"),
     "batch_size": get_int("asr_pool.whisperx.batch_size", 1, min_value=1),
+    "batch_size_default_cap": get_int("asr_pool.whisperx.batch_size_default_cap", 4, min_value=1),
     "chunk_size": get_int("asr_pool.whisperx.chunk_size", 20, min_value=1),
-    "chunk_size_live": get_int("asr_pool.whisperx.chunk_size_live", 10, min_value=1),
-    "live_chunk_backend": get_str("asr_pool.whisperx.live_chunk_backend", "whisperx"),
+    "chunk_size_low_latency": get_int("asr_pool.whisperx.chunk_size_low_latency", 10, min_value=1),
+    "low_latency_backend": get_str("asr_pool.whisperx.low_latency_backend", "whisperx"),
     "beam_size": get_int("asr_pool.whisperx.beam_size", 5, min_value=1),
     "align_model": get_str("asr_pool.whisperx.align_model", ""),
     "diarize_model": get_str("asr_pool.whisperx.diarize_model", ""),
@@ -53,12 +54,10 @@ def _load_server_config() -> dict[str, Any]:
     cfg["torch_num_threads"] = None
     cfg["torch_num_interop_threads"] = None
 
-  cfg["live_chunk_backend"] = str(cfg["live_chunk_backend"] or "whisperx").strip().lower() or "whisperx"
-  if cfg["live_chunk_backend"] not in {"whisperx", "faster_whisper_direct"}:
-    cfg["live_chunk_backend"] = "whisperx"
+  cfg["low_latency_backend"] = str(cfg["low_latency_backend"] or "whisperx").strip().lower() or "whisperx"
+  if cfg["low_latency_backend"] not in {"whisperx", "faster_whisper_direct"}:
+    raise ValueError(f"Invalid asr_pool.whisperx.low_latency_backend: {cfg['low_latency_backend']!r}")
 
-  # Keep this flag available in cfg for diagnostics parity.
-  cfg["vad_filter"] = bool(get_bool("asr_pool.whisperx.vad_filter", True))
   return cfg
 
 

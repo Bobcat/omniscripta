@@ -25,7 +25,7 @@ from shared.app_config import get_str, get_int, get_float, get_bool
 ROOT_PATH = get_str("asr_pool.root_path", "")
 app = FastAPI(root_path=ROOT_PATH)
 ASR_COMPLETIONS_STREAM_HEARTBEAT_S = get_float("worker_events.sse_heartbeat_s", 10.0, min_value=1.0)
-INTERACTIVE_NONLIVE_SESSION_KEY = "__interactive_nonlive__"
+INTERACTIVE_DEFAULT_FAIRNESS_KEY = "__interactive_default__"
 
 
 def _repo_root() -> Path:
@@ -110,9 +110,7 @@ class _Record:
     request_id: str
     payload_hash: str
     request: dict[str, Any]
-    profile_id: str
     priority: str
-    live_lane: str
     queue_key: str
     state: str
     submitted_at_utc: str
@@ -124,13 +122,14 @@ class _Record:
     response: dict[str, Any] | None = None
     error: dict[str, Any] | None = None
     consumer_id: str = ""
-    live_session_id: str = ""
-    live_chunk_index: int | None = None
+    fairness_key: str = ""
+    slot_affinity_requested: int | None = None
+    slot_affinity_effective: int | None = None
 
 
 class AsrPoolService:
     def __init__(self) -> None:
-        # Use config system with env fallback
+        # Use config system settings
         self._runner_slots = get_int("asr_pool.runner_slots", 2, min_value=1)
         self._queue_limits = {
             "interactive": get_int("asr_pool.queue_limits.interactive", 8, min_value=1),
@@ -435,11 +434,11 @@ class AsrPoolService:
         request_id = str(prepared.get("request_id") or "").strip()
         payload_hash = _json_hash(prepared)
         priority = str(prepared.get("priority") or "normal").strip().lower() or "normal"
-        live_lane = "single"
         queue_key = self._queue_key_for(priority=priority)
         consumer_id = self._consumer_id_from_request(prepared)
-        live_session_id, live_chunk_index = self._extract_live_metadata(prepared)
-        is_live = bool(live_session_id)
+        fairness_key, slot_affinity_requested, slot_affinity_effective = self._extract_routing_metadata(prepared)
+        if not fairness_key:
+            fairness_key = str(INTERACTIVE_DEFAULT_FAIRNESS_KEY)
 
         async with self._lock:
             self._maybe_prune_records_unlocked(reason="submit", force=False)
@@ -487,15 +486,14 @@ class AsrPoolService:
                 request_id=request_id,
                 payload_hash=payload_hash,
                 request=prepared,
-                profile_id=str(prepared.get("profile_id") or ""),
                 priority=priority,
-                live_lane=live_lane,
                 queue_key=queue_key,
                 state="queued",
                 submitted_at_utc=_iso_utc(),
                 consumer_id=str(consumer_id),
-                live_session_id=str(live_session_id),
-                live_chunk_index=(None if live_chunk_index is None else int(live_chunk_index)),
+                fairness_key=str(fairness_key or ""),
+                slot_affinity_requested=(None if slot_affinity_requested is None else int(slot_affinity_requested)),
+                slot_affinity_effective=(None if slot_affinity_effective is None else int(slot_affinity_effective)),
             )
             self._records[request_id] = rec
             self._queues[queue_key].append(request_id)
@@ -503,17 +501,16 @@ class AsrPoolService:
             self._emit_event(
                 "submit_accepted",
                 request_id=str(request_id),
-                profile_id=str(rec.profile_id),
                 priority=str(rec.priority),
                 consumer_id=str(rec.consumer_id or "unknown"),
-                live_lane=str(rec.live_lane),
-                live_session_id=str(rec.live_session_id or ""),
-                live_chunk_index=rec.live_chunk_index,
+                fairness_key=str(rec.fairness_key or ""),
+                slot_affinity_requested=rec.slot_affinity_requested,
+                slot_affinity_effective=rec.slot_affinity_effective,
                 queue_key=str(queue_key),
                 queue_position=int(queue_position),
                 queue_depth=self._queue_depth_snapshot_unlocked(),
             )
-            # Wake all runner loops so slot-affinity constraints (e.g. upload_full -> slot 0)
+            # Wake all runner loops so slot-affinity constraints (e.g. slot_affinity=0)
             # cannot deadlock when a non-eligible slot was the only waiter notified.
             self._cond.notify_all()
             return 202, self._to_lifecycle(rec)
@@ -557,7 +554,6 @@ class AsrPoolService:
                     "cancel_queued",
                     request_id=str(rec.request_id),
                     priority=str(rec.priority),
-                    live_lane=str(rec.live_lane),
                     queue_depth=self._queue_depth_snapshot_unlocked(),
                 )
             elif rec.state == "running":
@@ -566,7 +562,6 @@ class AsrPoolService:
                     "cancel_running",
                     request_id=str(rec.request_id),
                     priority=str(rec.priority),
-                    live_lane=str(rec.live_lane),
                 )
             else:
                 self._emit_event(
@@ -756,7 +751,7 @@ class AsrPoolService:
                 "scheduling_policy": {
                     "interactive_single_queue": True,
                     "interactive_round_robin_by_session": True,
-                    "interactive_nonlive_pseudo_session_key": str(INTERACTIVE_NONLIVE_SESSION_KEY),
+                    "interactive_default_fairness_key": str(INTERACTIVE_DEFAULT_FAIRNESS_KEY),
                     "interactive_burst_max": int(self._interactive_burst_max),
                     "fairness_mode": "burst_then_round_robin_interactive_sessions_and_noninteractive_priorities",
                 },
@@ -809,10 +804,10 @@ class AsrPoolService:
         return ["normal", "background"]
 
     def _interactive_session_key_for_record(self, rec: _Record) -> str:
-        live_session_id = str(rec.live_session_id or "").strip()
-        if live_session_id:
-            return live_session_id
-        return str(INTERACTIVE_NONLIVE_SESSION_KEY)
+        fairness_key = str(rec.fairness_key or "").strip()
+        if fairness_key:
+            return fairness_key
+        return str(INTERACTIVE_DEFAULT_FAIRNESS_KEY)
 
     def _interactive_sessions_snapshot_unlocked(self) -> list[str]:
         queue = self._queues["interactive"]
@@ -909,26 +904,23 @@ class AsrPoolService:
 
     @staticmethod
     def _consumer_id_from_request(request: dict[str, Any]) -> str:
-        ctx = dict(request.get("context") or {})
-        raw = str(ctx.get("consumer_id") or "").strip()
+        raw = str(request.get("consumer_id") or "").strip()
         return raw or "unknown"
 
     @staticmethod
-    def _extract_live_metadata(request: dict[str, Any]) -> tuple[str, int | None]:
-        ctx = dict(request.get("context") or {})
-        source_kind = str(ctx.get("source_kind") or "").strip().lower()
-        if source_kind != "live_chunk":
-            return "", None
-        session_id = str(ctx.get("live_session_id") or "").strip()
-        if not session_id:
-            return "", None
-        try:
-            chunk_index = int(ctx.get("live_chunk_index"))
-        except Exception:
-            chunk_index = None
-        if chunk_index is not None:
-            chunk_index = int(max(0, chunk_index))
-        return session_id, chunk_index
+    def _extract_routing_metadata(
+        request: dict[str, Any],
+    ) -> tuple[str, int | None, int | None]:
+        routing = dict(request.get("routing") or {})
+        fairness_key = str(routing.get("fairness_key") or "").strip()
+        slot_affinity_requested: int | None = None
+        if "slot_affinity" in routing and routing.get("slot_affinity") is not None:
+            try:
+                slot_affinity_requested = int(routing.get("slot_affinity"))
+            except Exception:
+                slot_affinity_requested = None
+        slot_affinity_effective: int | None = 0 if slot_affinity_requested == 0 else None
+        return fairness_key, slot_affinity_requested, slot_affinity_effective
 
     def _completion_event_for_record(self, rec: _Record) -> dict[str, Any]:
         self._completion_seq_next = int(max(1, int(self._completion_seq_next))) + 1
@@ -939,18 +931,16 @@ class AsrPoolService:
             "consumer_id": str(rec.consumer_id or "unknown"),
             "request_id": str(rec.request_id),
             "state": str(rec.state),
-            "profile_id": str(rec.profile_id),
             "priority": str(rec.priority),
-            "live_lane": str(rec.live_lane or "single"),
-            "live_session_id": str(rec.live_session_id or ""),
-            "live_chunk_index": rec.live_chunk_index,
+            "fairness_key": str(rec.fairness_key or ""),
+            "slot_affinity_requested": rec.slot_affinity_requested,
+            "slot_affinity_effective": rec.slot_affinity_effective,
             "submitted_at_utc": rec.submitted_at_utc,
             "started_at_utc": rec.started_at_utc,
             "finished_at_utc": rec.finished_at_utc,
             "retryable": rec.retryable,
             "response": rec.response,
             "error": rec.error,
-            "context": dict((rec.request or {}).get("context") or {}),
         }
 
     def _collect_completion_rows_unlocked(self, *, consumer_id: str, since_seq: int, limit: int) -> tuple[list[dict[str, Any]], int]:
@@ -1009,12 +999,12 @@ class AsrPoolService:
         return {
             "request_id": rec.request_id,
             "state": rec.state,
-            "profile_id": rec.profile_id,
+            "schema_version": str((rec.request or {}).get("schema_version") or ""),
             "priority": rec.priority,
             "consumer_id": str(rec.consumer_id or "unknown"),
-            "live_lane": str(rec.live_lane or "single"),
-            "live_session_id": str(rec.live_session_id or ""),
-            "live_chunk_index": rec.live_chunk_index,
+            "fairness_key": str(rec.fairness_key or ""),
+            "slot_affinity_requested": rec.slot_affinity_requested,
+            "slot_affinity_effective": rec.slot_affinity_effective,
             "queue_position": queue_position,
             "submitted_at_utc": rec.submitted_at_utc,
             "started_at_utc": rec.started_at_utc,
@@ -1118,7 +1108,7 @@ class AsrPoolService:
                 if self._stopping:
                     raise asyncio.CancelledError()
                 for key in self._dequeue_order_unlocked():
-                    # Keep heavy upload/background ASR single-flight across the pool.
+                    # Keep heavy background ASR single-flight across the pool.
                     if key == "background" and self._has_running_background_unlocked():
                         continue
                     if key == "interactive":
@@ -1135,13 +1125,10 @@ class AsrPoolService:
                             continue
                         if rec.state != "queued":
                             continue
-                        # Upload full-profile requests may include align+diarize and can
-                        # overflow VRAM if multiple warm slots each load aux models.
-                        # Route these to slot 0 only; keep other traffic fully shared.
+                        # Optional generic slot-affinity hint.
                         if (
-                            key == "background"
-                            and str(rec.profile_id or "") == "upload_full"
-                            and int(slot_idx) != 0
+                            rec.slot_affinity_effective is not None
+                            and int(slot_idx) != int(rec.slot_affinity_effective)
                         ):
                             queue.appendleft(rid)
                             break
@@ -1177,9 +1164,7 @@ class AsrPoolService:
                 self._emit_event(
                     "request_started",
                     request_id=str(rec.request_id),
-                    profile_id=str(rec.profile_id),
                     priority=str(rec.priority),
-                    live_lane=str(rec.live_lane),
                     queue_key=str(rec.queue_key),
                     slot_idx=int(slot_idx),
                     timeout_s=int(timeout_s),
@@ -1258,9 +1243,7 @@ class AsrPoolService:
                 self._emit_event(
                     "request_finished",
                     request_id=str(rec2.request_id),
-                    profile_id=str(rec2.profile_id),
                     priority=str(rec2.priority),
-                    live_lane=str(rec2.live_lane),
                     slot_idx=int(slot_idx),
                     state=str(rec2.state),
                     ok=bool(ok),

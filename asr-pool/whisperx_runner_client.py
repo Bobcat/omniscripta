@@ -31,7 +31,10 @@ def _fingerprint_cfg(cfg: dict[str, Any]) -> str:
     "device",
     "compute_type",
     "batch_size",
+    "batch_size_default_cap",
     "chunk_size",
+    "chunk_size_low_latency",
+    "low_latency_backend",
     "beam_size",
     "align_model",
     "torch_num_threads",
@@ -62,7 +65,7 @@ class _AsrPoolWarmRunnerClient:
     self._server_init_path: Path | None = None
 
   def prewarm(self) -> None:
-    # Force eager model load without waiting for a first live request.
+    # Force eager model load instead of waiting for the first transcribe request.
     with self._lock:
       self._ensure_runner_locked()
       proc = self._proc
@@ -200,18 +203,6 @@ class _AsrPoolWarmRunnerClient:
   def shutdown(self, *, reason: str = "manual") -> None:
     with self._lock:
       self._shutdown_locked(reason=reason)
-
-  def maybe_shutdown_idle(self) -> None:
-    idle_s = max(0.0, get_float("asr_pool.warm.idle_s", 120.0, min_value=0.0))
-    if idle_s <= 0:
-      return
-    with self._lock:
-      if self._proc is None or self._proc.poll() is not None:
-        return
-      if self._last_used_t <= 0:
-        return
-      if (time.monotonic() - self._last_used_t) >= idle_s:
-        self._shutdown_locked(reason="idle_timeout")
 
   def transcribe(self, *, job: Any, request: dict[str, Any], progress_path: Path | None = None) -> dict[str, Any]:
     request_timeout_s = max(1.0, get_float("asr_pool.warm.request_timeout_s", 120.0, min_value=0.0))

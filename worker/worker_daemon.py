@@ -955,7 +955,7 @@ def _prepare_live_chunk_request(*, job: object, job_cfg: dict[str, Any]) -> dict
   max_speakers = opts.get("max_speakers")
   initial_prompt = str(opts.get("initial_prompt") or "").strip()
   beam_size = opts.get("beam_size")
-  live_lane = "single"
+  live_session_id = str(opts.get("live_session_id") or "").strip()
 
   _write_status(
     job.status_path,
@@ -975,10 +975,12 @@ def _prepare_live_chunk_request(*, job: object, job_cfg: dict[str, Any]) -> dict
     pass
 
   raw_request = {
-    "schema_version": "asr_v1",
+    "schema_version": "asr_v2",
     "request_id": str(getattr(job, "job_id", "") or "live_chunk"),
-    "profile_id": get_str("live_chunk.asr_profile", "live_fast"),
     "priority": "interactive",
+    "routing": {
+      "fairness_key": (live_session_id or str(getattr(job, "job_id", "") or "live_chunk")),
+    },
     "audio": {
       "local_path": str(input_path),
       "format": str(input_path.suffix.lstrip(".") or "wav"),
@@ -987,24 +989,16 @@ def _prepare_live_chunk_request(*, job: object, job_cfg: dict[str, Any]) -> dict
       "duration_ms": int(max(1, snippet_seconds) * 1000),
     },
     "options": {
+      "latency_mode": "low",
       "align_enabled": bool(align_enabled),
       "diarize_enabled": bool(diarize_enabled),
       "speaker_mode": str(speaker_mode_raw),
-    },
-    "context": {
-      "source_kind": "live_chunk",
-      "live_session_id": str(opts.get("live_session_id") or ""),
-      "live_chunk_index": int(opts.get("live_chunk_index", 0) or 0),
-      "t0_offset_ms": int(opts.get("live_chunk_t0_ms", 0) or 0),
-      "live_lane": live_lane,
-      "job_id": str(getattr(job, "job_id", "") or ""),
     },
     "outputs": {
       "text": False,
       "segments": False,
       "srt": True,
       "srt_inline": False,
-      "word_timestamps": False,
     },
   }
   if language is not None:
@@ -1025,18 +1019,6 @@ def _prepare_live_chunk_request(*, job: object, job_cfg: dict[str, Any]) -> dict
     try:
       if max_speakers is not None:
         raw_request["options"]["max_speakers"] = max(1, int(max_speakers))
-    except Exception:
-      pass
-  preview_seq = opts.get("preview_seq")
-  if preview_seq is not None:
-    try:
-      raw_request["context"]["preview_seq"] = int(max(0, int(preview_seq)))
-    except Exception:
-      pass
-  preview_audio_end_ms = opts.get("preview_audio_end_ms")
-  if preview_audio_end_ms is not None:
-    try:
-      raw_request["context"]["preview_audio_end_ms"] = int(max(0, int(preview_audio_end_ms)))
     except Exception:
       pass
 
@@ -1097,9 +1079,9 @@ def _finalize_live_chunk_completed(
     except Exception:
       continue
 
-  resolved_options = dict(response.get("resolved_options") or {})
+  effective_options = dict(response.get("effective_options") or {})
   runtime_meta = dict(response.get("runtime") or {})
-  resolved_initial_prompt = str(resolved_options.get("initial_prompt") or "")
+  resolved_initial_prompt = str(effective_options.get("initial_prompt") or "")
   resolved_initial_prompt_words = len([tok for tok in resolved_initial_prompt.split() if tok])
   total_elapsed = max(0.0, float(time.monotonic() - float(pending.job_t0_mono)))
   timings_text = " | ".join([f"{name}={sec:.2f}s" for name, sec in timing_rows] + [f"total={total_elapsed:.2f}s"])
@@ -1141,8 +1123,7 @@ def _finalize_live_chunk_completed(
     speaker_lines_manifest_filename="",
     topics_status="skipped_live_chunk",
     topics_warning="",
-    align_enabled=bool(resolved_options.get("align_enabled", align_enabled)),
-    asr_profile_id=str(response.get("profile_id") or ""),
+    align_enabled=bool(effective_options.get("align_enabled", align_enabled)),
     asr_runner_kind=str(runtime_meta.get("runner_kind") or ""),
     asr_runner_reused=bool(runtime_meta.get("runner_reused", False)),
     asr_backend=str(runtime_meta.get("backend") or ""),
@@ -1704,14 +1685,17 @@ def _prepare_upload_job_for_submit(
   pending.wx_live_timing_keys = set()
 
   raw_asr_request = {
-    "schema_version": "asr_v1",
+    "schema_version": "asr_v2",
     "request_id": f"{job.job_id}:upload_whisperx",
-    "profile_id": "upload_full",
+    "routing": {
+      "slot_affinity": 0,
+    },
     "audio": {
       "local_path": str(pending.snippet_path.resolve()),
       "duration_ms": int(max(0, pending.snippet_seconds) * 1000),
     },
     "options": {
+      "latency_mode": "default",
       "language": pending.language,
       "speaker_mode": pending.speaker_mode,
       "min_speakers": min_speakers,
@@ -1719,19 +1703,12 @@ def _prepare_upload_job_for_submit(
       "diarize_enabled": bool(pending.speaker_mode != "none"),
       "align_enabled": True,
       "initial_prompt": opts.get("initial_prompt"),
-      "timestamps_mode": "segment",
-    },
-    "context": {
-      "source_kind": "upload_audio",
-      "job_id": str(job.job_id),
-      "orig_filename": str(pending.orig_filename or ""),
     },
     "outputs": {
       "text": False,
       "segments": False,
       "srt": True,
       "srt_inline": False,
-      "word_timestamps": False,
     },
     "priority": "background",
   }
@@ -1739,7 +1716,7 @@ def _prepare_upload_job_for_submit(
   try:
     _append_log(
       job.log_path,
-      f"[{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}] WORKER asr_request profile={asr_request.get('profile_id')} resolved_options={json.dumps(asr_request.get('resolved_options') or {}, ensure_ascii=False, sort_keys=True)}",
+      f"[{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}] WORKER asr_request schema={asr_request.get('schema_version')} routing={json.dumps(asr_request.get('routing') or {}, ensure_ascii=False, sort_keys=True)}",
     )
   except Exception:
     pass

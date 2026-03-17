@@ -134,6 +134,36 @@ LIVE_ROLLING_PACING_STARTUP_MIN_NEW_AUDIO_MS = get_int(
     min_value=0,
 )
 LIVE_ROLLING_PACING_RUNNER_SLOTS = get_int("asr_pool.runner_slots", 1, min_value=1)
+LIVE_ROLLING_VAD_ENABLED = get_bool("live.rolling.vad.enabled", False)
+LIVE_ROLLING_VAD_WHISPERX_VENV = _get_optional_setting_str("live.rolling.vad.whisperx_venv")
+LIVE_ROLLING_VAD_THRESHOLD = get_float("live.rolling.vad.threshold", 0.35, min_value=0.0)
+LIVE_ROLLING_VAD_MAX_SPEECH_DURATION_S = get_float(
+    "live.rolling.vad.max_speech_duration_s",
+    12.0,
+    min_value=0.1,
+)
+LIVE_ROLLING_VAD_MIN_SPEECH_MS = get_int("live.rolling.vad.min_speech_ms", 120, min_value=0)
+LIVE_ROLLING_VAD_HANGOVER_MS = get_int("live.rolling.vad.hangover_ms", 600, min_value=0)
+LIVE_ROLLING_SPEECH_GATE_SILENCE_ENTER_MS = get_int(
+    "live.rolling.speech_gate.silence_enter_ms",
+    900,
+    min_value=100,
+)
+LIVE_ROLLING_SPEECH_GATE_REARM_HITS = get_int(
+    "live.rolling.speech_gate.rearm_hits",
+    2,
+    min_value=1,
+)
+LIVE_ROLLING_SPEECH_GATE_REARM_WINDOW_MS = get_int(
+    "live.rolling.speech_gate.rearm_window_ms",
+    500,
+    min_value=100,
+)
+LIVE_ROLLING_SPEECH_GATE_FORCE_COMMIT_SILENCE_MS = get_int(
+    "live.rolling.speech_gate.force_commit_silence_ms",
+    1500,
+    min_value=100,
+)
 
 _LIVE_SESSION_LANGUAGE_RE = re.compile(r"^[a-z]{2,3}(?:[-_][a-z0-9]{2,8})?$")
 LIVE_SESSIONS = LiveSessionManager(
@@ -174,6 +204,16 @@ def _live_engine_rolling_context_config() -> dict[str, Any]:
         "LIVE_ROLLING_PACING_STARTUP_MIN_INFER_AUDIO_MS": LIVE_ROLLING_PACING_STARTUP_MIN_INFER_AUDIO_MS,
         "LIVE_ROLLING_PACING_STARTUP_MIN_NEW_AUDIO_MS": LIVE_ROLLING_PACING_STARTUP_MIN_NEW_AUDIO_MS,
         "LIVE_ROLLING_PACING_RUNNER_SLOTS": LIVE_ROLLING_PACING_RUNNER_SLOTS,
+        "LIVE_ROLLING_VAD_ENABLED": LIVE_ROLLING_VAD_ENABLED,
+        "LIVE_ROLLING_VAD_WHISPERX_VENV": LIVE_ROLLING_VAD_WHISPERX_VENV,
+        "LIVE_ROLLING_VAD_THRESHOLD": LIVE_ROLLING_VAD_THRESHOLD,
+        "LIVE_ROLLING_VAD_MAX_SPEECH_DURATION_S": LIVE_ROLLING_VAD_MAX_SPEECH_DURATION_S,
+        "LIVE_ROLLING_VAD_MIN_SPEECH_MS": LIVE_ROLLING_VAD_MIN_SPEECH_MS,
+        "LIVE_ROLLING_VAD_HANGOVER_MS": LIVE_ROLLING_VAD_HANGOVER_MS,
+        "LIVE_ROLLING_SPEECH_GATE_SILENCE_ENTER_MS": LIVE_ROLLING_SPEECH_GATE_SILENCE_ENTER_MS,
+        "LIVE_ROLLING_SPEECH_GATE_REARM_HITS": LIVE_ROLLING_SPEECH_GATE_REARM_HITS,
+        "LIVE_ROLLING_SPEECH_GATE_REARM_WINDOW_MS": LIVE_ROLLING_SPEECH_GATE_REARM_WINDOW_MS,
+        "LIVE_ROLLING_SPEECH_GATE_FORCE_COMMIT_SILENCE_MS": LIVE_ROLLING_SPEECH_GATE_FORCE_COMMIT_SILENCE_MS,
     }
 
 

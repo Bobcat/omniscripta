@@ -17,11 +17,11 @@ from typing import Any
 from whisperx_runner_imports import _apply_torch_thread_tuning, _as_positive_int, _cleanup_torch
 
 
-LIVE_CHUNK_BACKEND_WHISPERX = "whisperx"
-LIVE_CHUNK_BACKEND_FASTER_WHISPER_DIRECT = "faster_whisper_direct"
-LIVE_CHUNK_BACKEND_ALLOWED = {
-  LIVE_CHUNK_BACKEND_WHISPERX,
-  LIVE_CHUNK_BACKEND_FASTER_WHISPER_DIRECT,
+LOW_LATENCY_BACKEND_WHISPERX = "whisperx"
+LOW_LATENCY_BACKEND_FASTER_WHISPER_DIRECT = "faster_whisper_direct"
+LOW_LATENCY_BACKEND_ALLOWED = {
+  LOW_LATENCY_BACKEND_WHISPERX,
+  LOW_LATENCY_BACKEND_FASTER_WHISPER_DIRECT,
 }
 
 
@@ -140,15 +140,13 @@ class PersistentWhisperxRunner:
       int(self.cfg.get("chunk_size", 30) or 30),
     )
 
-  def _resolve_live_chunk_backend(self) -> tuple[str, str]:
-    raw = str(self.cfg.get("live_chunk_backend") or "").strip().lower()
-    if not raw:
-      return LIVE_CHUNK_BACKEND_WHISPERX, "default_whisperx"
-    if raw in LIVE_CHUNK_BACKEND_ALLOWED:
+  def _resolve_low_latency_backend(self) -> tuple[str, str]:
+    raw = str(self.cfg.get("low_latency_backend") or "").strip().lower()
+    if raw in LOW_LATENCY_BACKEND_ALLOWED:
       return raw, "configured"
-    return LIVE_CHUNK_BACKEND_WHISPERX, "invalid_config_fallback_whisperx"
+    raise RuntimeError(f"Invalid low_latency_backend configuration: {raw!r}")
 
-  def _transcribe_live_chunk_direct_faster_whisper(
+  def _transcribe_direct_faster_whisper(
     self,
     *,
     audio_arr: Any,
@@ -395,22 +393,36 @@ class PersistentWhisperxRunner:
   def transcribe(self, envelope: dict[str, Any], *, progress_path: Path | None = None) -> dict[str, Any]:
     request = dict(envelope.get("request") or {})
     work = dict(envelope.get("work") or {})
+    req_schema_version = str(request.get("schema_version") or "").strip().lower()
     req_id = str(request.get("request_id") or "")
-    profile_id = str(request.get("profile_id") or "")
-    resolved = dict(request.get("resolved_options") or {})
+    effective_options = dict(request.get("effective_options") or {})
     outputs = dict(request.get("outputs") or {})
     audio = dict(request.get("audio") or {})
     local_path = Path(str(audio.get("local_path") or ""))
     out_dir_raw = str(work.get("whisperx_out_dir") or "").strip()
     out_dir = Path(out_dir_raw) if out_dir_raw else Path()
 
-    if not local_path.exists():
+    if req_schema_version != "asr_v2":
       return {
-        "schema_version": "asr_v1",
+        "schema_version": "asr_v2",
         "request_id": req_id,
         "ok": False,
-        "profile_id": profile_id,
-        "resolved_options": resolved,
+        "effective_options": effective_options,
+        "error": {
+          "code": "ASR_SCHEMA_UNSUPPORTED",
+          "message": f"Unsupported schema_version: {req_schema_version or '<missing>'}",
+          "retryable": False,
+          "details": {"supported": ["asr_v2"]},
+        },
+        "warnings": [],
+      }
+
+    if not local_path.exists():
+      return {
+        "schema_version": "asr_v2",
+        "request_id": req_id,
+        "ok": False,
+        "effective_options": effective_options,
         "error": {
           "code": "ASR_INPUT_NOT_FOUND",
           "message": f"ASR input not found: {local_path}",
@@ -422,11 +434,10 @@ class PersistentWhisperxRunner:
     unsupported_outputs = [k for k in ("text", "segments") if bool(outputs.get(k, False))]
     if unsupported_outputs:
       return {
-        "schema_version": "asr_v1",
+        "schema_version": "asr_v2",
         "request_id": req_id,
         "ok": False,
-        "profile_id": profile_id,
-        "resolved_options": resolved,
+        "effective_options": effective_options,
         "error": {
           "code": "ASR_UNSUPPORTED_OUTPUT",
           "message": "persistent ASR pool runner does not populate requested outputs",
@@ -437,11 +448,10 @@ class PersistentWhisperxRunner:
       }
     if not out_dir_raw:
       return {
-        "schema_version": "asr_v1",
+        "schema_version": "asr_v2",
         "request_id": req_id,
         "ok": False,
-        "profile_id": profile_id,
-        "resolved_options": resolved,
+        "effective_options": effective_options,
         "error": {
           "code": "ASR_OUTPUT_DIR_REQUIRED",
           "message": "Missing work.whisperx_out_dir",
@@ -456,11 +466,10 @@ class PersistentWhisperxRunner:
       file_size = -1
     if file_size == 0:
       return {
-        "schema_version": "asr_v1",
+        "schema_version": "asr_v2",
         "request_id": req_id,
         "ok": False,
-        "profile_id": profile_id,
-        "resolved_options": resolved,
+        "effective_options": effective_options,
         "error": {
           "code": "ASR_EMPTY_INPUT",
           "message": "ASR input audio file is empty",
@@ -473,11 +482,10 @@ class PersistentWhisperxRunner:
       frame_count = _wave_frame_count(local_path)
       if frame_count is None:
         return {
-          "schema_version": "asr_v1",
+          "schema_version": "asr_v2",
           "request_id": req_id,
           "ok": False,
-          "profile_id": profile_id,
-          "resolved_options": resolved,
+          "effective_options": effective_options,
           "error": {
             "code": "ASR_INVALID_AUDIO",
             "message": "ASR input audio could not be parsed as WAV",
@@ -488,11 +496,10 @@ class PersistentWhisperxRunner:
         }
       if frame_count <= 0:
         return {
-          "schema_version": "asr_v1",
+          "schema_version": "asr_v2",
           "request_id": req_id,
           "ok": False,
-          "profile_id": profile_id,
-          "resolved_options": resolved,
+          "effective_options": effective_options,
           "error": {
             "code": "ASR_EMPTY_INPUT",
             "message": "ASR input audio contains no frames",
@@ -502,37 +509,39 @@ class PersistentWhisperxRunner:
           "warnings": [],
         }
 
-    language = _normalize_optional_language(resolved.get("language"))
-    align_enabled = bool(resolved.get("align_enabled", True))
-    diarize_enabled = bool(resolved.get("diarize_enabled", False))
-    speaker_mode = str(resolved.get("speaker_mode") or "none").strip().lower() or "none"
-    min_speakers = resolved.get("min_speakers")
-    max_speakers = resolved.get("max_speakers")
+    language = _normalize_optional_language(effective_options.get("language"))
+    align_enabled = bool(effective_options.get("align_enabled", True))
+    diarize_enabled = bool(effective_options.get("diarize_enabled", False))
+    speaker_mode = str(effective_options.get("speaker_mode") or "none").strip().lower() or "none"
+    min_speakers = effective_options.get("min_speakers")
+    max_speakers = effective_options.get("max_speakers")
     diarize_model = str(self.cfg.get("diarize_model") or "").strip() or None
-    initial_prompt = str(resolved.get("initial_prompt") or "").strip() or None
+    initial_prompt = str(effective_options.get("initial_prompt") or "").strip() or None
     beam_size_override: int | None = None
     try:
-      if resolved.get("beam_size") is not None:
-        beam_size_override = max(1, int(resolved.get("beam_size")))
+      if effective_options.get("beam_size") is not None:
+        beam_size_override = max(1, int(effective_options.get("beam_size")))
     except Exception:
       beam_size_override = None
     if speaker_mode in {"none", "off", "disabled", "no_speaker", "nospeaker", "no-speaker"}:
       speaker_mode = "none"
     elif speaker_mode not in {"auto", "fixed"}:
       speaker_mode = "auto"
-    normalized_profile_id = str(profile_id or "").strip().lower()
-    upload_mode = normalized_profile_id == "upload_full"
-    live_chunk_mode = (normalized_profile_id in {"live_chunk", "live_fast"}) or bool(resolved.get("live_chunk_mode"))
-    configured_live_chunk_backend, live_chunk_backend_cfg_reason = self._resolve_live_chunk_backend()
-    if live_chunk_mode and configured_live_chunk_backend == LIVE_CHUNK_BACKEND_FASTER_WHISPER_DIRECT:
-      selected_live_chunk_backend = LIVE_CHUNK_BACKEND_FASTER_WHISPER_DIRECT
-      selected_live_chunk_backend_reason = live_chunk_backend_cfg_reason
-    elif live_chunk_mode:
-      selected_live_chunk_backend = LIVE_CHUNK_BACKEND_WHISPERX
-      selected_live_chunk_backend_reason = live_chunk_backend_cfg_reason
+    latency_mode = str(effective_options.get("latency_mode") or "default").strip().lower()
+    if latency_mode not in {"low", "default"}:
+      latency_mode = "default"
+    low_latency_mode = latency_mode == "low"
+    aux_sensitive_mode = bool(align_enabled) or bool(diarize_enabled and speaker_mode != "none")
+    configured_low_latency_backend, low_latency_backend_cfg_reason = self._resolve_low_latency_backend()
+    if low_latency_mode and configured_low_latency_backend == LOW_LATENCY_BACKEND_FASTER_WHISPER_DIRECT:
+      selected_low_latency_backend = LOW_LATENCY_BACKEND_FASTER_WHISPER_DIRECT
+      selected_low_latency_backend_reason = low_latency_backend_cfg_reason
+    elif low_latency_mode:
+      selected_low_latency_backend = LOW_LATENCY_BACKEND_WHISPERX
+      selected_low_latency_backend_reason = low_latency_backend_cfg_reason
     else:
-      selected_live_chunk_backend = LIVE_CHUNK_BACKEND_WHISPERX
-      selected_live_chunk_backend_reason = "non_live_chunk_profile"
+      selected_low_latency_backend = LOW_LATENCY_BACKEND_WHISPERX
+      selected_low_latency_backend_reason = "latency_mode_default"
 
     timings: dict[str, float] = {}
     t_total = time.monotonic()
@@ -542,17 +551,17 @@ class PersistentWhisperxRunner:
     get_writer = self.get_writer
     assert whisperx is not None and torch is not None and get_writer is not None
 
-    if upload_mode:
-      # Upload requests run with extra ASR stages (align/diarize). Drop previous
-      # aux-model retention first to avoid cumulative VRAM pressure across uploads.
+    if aux_sensitive_mode:
+      # Requests that use align/diarize can retain extra aux-model VRAM.
+      # Release before request to keep a stable baseline.
       self._release_aux_models()
 
     try:
       _write_progress(progress_path, stage="prepare")
-      # Keep one warm ASR model for live chunks regardless of per-call language hints.
+      # Keep one warm ASR model for low-latency requests regardless of per-call language hints.
       # Per-call language is still passed to transcribe(); this only avoids model
       # cache churn when sessions mix explicit language and auto-detect.
-      model_cache_language = None if live_chunk_mode else language
+      model_cache_language = None if low_latency_mode else language
       # Prepare/load model lazily and keep it warm across requests.
       model_reused, prepare_s = self._ensure_asr_model(language=model_cache_language)
       timings["prepare_s"] = round(float(prepare_s), 6)
@@ -573,16 +582,19 @@ class PersistentWhisperxRunner:
       if language is not None:
         # Keep model cache language-agnostic, but still pass per-call language hints.
         transcribe_kwargs["language"] = str(language)
-      if upload_mode:
+      if not low_latency_mode:
         try:
-          upload_batch_size = int(self.cfg.get("upload_batch_size", 4) or 4)
+          batch_size_default_cap = int(self.cfg.get("batch_size_default_cap", 4) or 4)
         except Exception:
-          upload_batch_size = 4
-        if upload_batch_size > 0:
-          transcribe_kwargs["batch_size"] = max(1, min(int(transcribe_kwargs["batch_size"]), int(upload_batch_size)))
+          batch_size_default_cap = 4
+        if batch_size_default_cap > 0:
+          transcribe_kwargs["batch_size"] = max(
+            1,
+            min(int(transcribe_kwargs["batch_size"]), int(batch_size_default_cap)),
+          )
       else:
-        # Live/interactive: use smaller chunk_size for better latency with short audio windows
-        transcribe_kwargs["chunk_size"] = int(self.cfg.get("chunk_size_live", 10) or 10)
+        # Low-latency path: use smaller chunk_size for better responsiveness.
+        transcribe_kwargs["chunk_size"] = int(self.cfg.get("chunk_size_low_latency", 10) or 10)
 
       _write_progress(progress_path, stage="transcribe")
       transcribe_call_started_utc: str | None = None
@@ -590,11 +602,11 @@ class PersistentWhisperxRunner:
       transcribe_call_duration_s: float | None = None
       with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
         audio_arr = whisperx.load_audio(str(local_path))
-        if selected_live_chunk_backend == LIVE_CHUNK_BACKEND_FASTER_WHISPER_DIRECT:
+        if selected_low_latency_backend == LOW_LATENCY_BACKEND_FASTER_WHISPER_DIRECT:
           transcribe_call_started_utc = _now_iso()
           transcribe_call_t0 = time.monotonic()
           try:
-            result, direct_backend_meta = self._transcribe_live_chunk_direct_faster_whisper(
+            result, direct_backend_meta = self._transcribe_direct_faster_whisper(
               audio_arr=audio_arr,
               language=language,
               initial_prompt=initial_prompt,
@@ -655,7 +667,7 @@ class PersistentWhisperxRunner:
               "request_id": req_id,
               "backend": (
                 "faster_whisper_direct"
-                if selected_live_chunk_backend == LIVE_CHUNK_BACKEND_FASTER_WHISPER_DIRECT
+                if selected_low_latency_backend == LOW_LATENCY_BACKEND_FASTER_WHISPER_DIRECT
                 else "whisperx"
               ),
               "start_utc": str(transcribe_call_started_utc),
@@ -747,11 +759,10 @@ class PersistentWhisperxRunner:
         srts = sorted(out_dir.glob("*.srt"), key=lambda p: p.stat().st_mtime)
         if not srts:
           return {
-            "schema_version": "asr_v1",
+            "schema_version": "asr_v2",
             "request_id": req_id,
             "ok": False,
-            "profile_id": profile_id,
-            "resolved_options": resolved,
+            "effective_options": effective_options,
             "error": {
               "code": "ASR_OUTPUT_MISSING",
               "message": f"No .srt produced in {out_dir}",
@@ -782,17 +793,16 @@ class PersistentWhisperxRunner:
       runtime = {
         "backend": (
           "faster_whisper_direct"
-          if selected_live_chunk_backend == LIVE_CHUNK_BACKEND_FASTER_WHISPER_DIRECT
+          if selected_low_latency_backend == LOW_LATENCY_BACKEND_FASTER_WHISPER_DIRECT
           else "whisperx"
         ),
         "runner_kind": "persistent_local",
         "runner_reused": bool(model_reused),
         "device": str(self.cfg.get("device") or ""),
         "model": str(self.cfg.get("model") or ""),
-        "upload_mode": bool(upload_mode),
-        "live_chunk_mode": bool(live_chunk_mode),
-        "live_chunk_backend_selected": str(selected_live_chunk_backend),
-        "live_chunk_backend_reason": str(selected_live_chunk_backend_reason),
+        "latency_mode": str(latency_mode),
+        "low_latency_backend_selected": str(selected_low_latency_backend),
+        "low_latency_backend_reason": str(selected_low_latency_backend_reason),
         "segments_returned_count": int(segments_returned_count),
         "effective_batch_size": int(transcribe_kwargs.get("batch_size") or 0),
         "diarize_applied": bool(diarize_applied),
@@ -805,7 +815,7 @@ class PersistentWhisperxRunner:
       if diarizer_reused is not None:
         runtime["diarizer_reused"] = bool(diarizer_reused)
       if direct_backend_meta:
-        runtime["live_chunk_backend_direct_meta"] = dict(direct_backend_meta)
+        runtime["direct_backend_meta"] = dict(direct_backend_meta)
 
       warnings: list[str] = []
       if align_skipped_missing_language:
@@ -814,15 +824,14 @@ class PersistentWhisperxRunner:
         warnings.append("initial_prompt_unsupported_by_asr_pipeline")
       if beam_override_unsupported:
         warnings.append("beam_size_override_unsupported_by_asr_pipeline")
-      if selected_live_chunk_backend == LIVE_CHUNK_BACKEND_FASTER_WHISPER_DIRECT:
-        warnings.append("live_chunk_backend_faster_whisper_direct_experimental")
+      if selected_low_latency_backend == LOW_LATENCY_BACKEND_FASTER_WHISPER_DIRECT:
+        warnings.append("low_latency_backend_faster_whisper_direct_experimental")
 
       return {
-        "schema_version": "asr_v1",
+        "schema_version": "asr_v2",
         "request_id": req_id,
         "ok": True,
-        "profile_id": profile_id,
-        "resolved_options": resolved,
+        "effective_options": effective_options,
         "result": result_obj,
         "timings": timings,
         "runtime": runtime,
@@ -830,8 +839,8 @@ class PersistentWhisperxRunner:
       }
     finally:
       _write_progress(progress_path, stage="done")
-      if upload_mode:
-        # Keep inter-request VRAM baseline low for uploads and live traffic.
+      if aux_sensitive_mode:
+        # Keep inter-request VRAM baseline low when auxiliary models are used.
         self._release_aux_models()
 
   def shutdown(self) -> None:
@@ -891,11 +900,10 @@ def _handle_command(runner: PersistentWhisperxRunner, cmd_obj: dict[str, Any]) -
     except Exception:
       request = {}
     response = {
-      "schema_version": "asr_v1",
+      "schema_version": "asr_v2",
       "request_id": str(request.get("request_id") or ""),
       "ok": False,
-      "profile_id": str(request.get("profile_id") or ""),
-      "resolved_options": dict(request.get("resolved_options") or {}),
+      "effective_options": dict(request.get("effective_options") or {}),
       "error": {
         "code": "ASR_PERSISTENT_SERVER_FAILURE",
         "message": f"Persistent server error: {e!r}",

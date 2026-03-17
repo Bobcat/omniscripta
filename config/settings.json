@@ -42,6 +42,20 @@
           "min_infer_audio_ms": 250,
           "min_new_audio_ms": 200
         }
+      },
+      "vad": {
+        "enabled": true,
+        "whisperx_venv": "/home/gunnar/whisperx/.venv",
+        "threshold": 0.35,
+        "max_speech_duration_s": 12.0,
+        "min_speech_ms": 120,
+        "hangover_ms": 600
+      },
+      "speech_gate": {
+        "silence_enter_ms": 900,
+        "rearm_hits": 2,
+        "rearm_window_ms": 500,
+        "force_commit_silence_ms": 2500
       }
     }
   },
@@ -97,14 +111,14 @@
       "device": "cuda",
       "compute_type": "int8",
       "batch_size": 1,
+      "batch_size_default_cap": 4,
       "chunk_size": 20,
-      "chunk_size_live": 10,
-      "live_chunk_backend": "whisperx",
+      "chunk_size_low_latency": 10,
+      "low_latency_backend": "whisperx",
       "beam_size": 5,
       "align_model": "jonatasgrosman/wav2vec2-large-xlsr-53-dutch",
       "diarize_model": "pyannote/speaker-diarization-3.1",
       "venv": "/home/gunnar/whisperx/.venv",
-      "xvad_filter": true,
       "threads": {
         "omp": 8,
         "mkl": 8,
@@ -117,7 +131,6 @@
       "prewarm_timeout_s": 180.0,
       "prewarm_language": null,
       "prewarm_align_enabled": false,
-      "idle_s": 120.0,
       "request_timeout_s": 300.0
     }
   },
