@@ -1,5 +1,5 @@
 [Unit]
-Description=Transcribe demo_jobs janitor (live_chunk only)
+Description=Transcribe live worker queue janitor
 After=network.target
 
 [Service]

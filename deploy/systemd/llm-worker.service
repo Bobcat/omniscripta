@@ -1,0 +1,18 @@
+[Unit]
+Description=LLM Worker
+After=network.target
+
+[Service]
+User=gunnar
+Group=gunnar
+WorkingDirectory=/srv/transcribe/llm-worker
+ExecStartPre=/usr/bin/mkdir -p /srv/transcribe/data/llm_tasks/inbox /srv/transcribe/data/llm_tasks/running /srv/transcribe/data/llm_tasks/done /srv/transcribe/data/llm_tasks/error
+ExecStart=/srv/transcribe/worker/.venv/bin/python /srv/transcribe/llm-worker/llm_worker_daemon.py
+Restart=always
+RestartSec=2
+EnvironmentFile=/etc/transcribe/transcribe.env
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target

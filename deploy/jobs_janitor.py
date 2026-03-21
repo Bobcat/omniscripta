@@ -14,32 +14,11 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from shared.app_config import get_bool, get_int, get_list, get_str
+from shared.app_config import get_bool, get_int, get_str
 
 
 def _repo_root() -> Path:
     return _REPO_ROOT
-
-
-def _safe_read_json(path: Path) -> dict[str, Any]:
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-
-
-def _kind_for_job_dir(job_dir: Path) -> str:
-    job_json = _safe_read_json(job_dir / "job.json")
-    if isinstance(job_json, dict):
-        raw = str(job_json.get("job_kind") or "").strip().lower()
-        if raw:
-            return raw
-    status_json = _safe_read_json(job_dir / "status.json")
-    if isinstance(status_json, dict):
-        raw = str(status_json.get("job_kind") or "").strip().lower()
-        if raw:
-            return raw
-    return ""
 
 
 @dataclass(frozen=True)
@@ -47,7 +26,6 @@ class JobEntry:
     state: str
     path: Path
     mtime: float
-    job_kind: str
 
 
 def _collect_entries(*, state_dir: Path, state: str) -> list[JobEntry]:
@@ -55,23 +33,13 @@ def _collect_entries(*, state_dir: Path, state: str) -> list[JobEntry]:
     if not state_dir.exists() or not state_dir.is_dir():
         return out
     for child in state_dir.iterdir():
-        if not child.is_dir():
-            continue
-        if child.name.startswith("."):
+        if not child.is_dir() or child.name.startswith("."):
             continue
         try:
-            st = child.stat()
-            mtime = float(st.st_mtime)
+            mtime = float(child.stat().st_mtime)
         except Exception:
             mtime = 0.0
-        out.append(
-            JobEntry(
-                state=str(state),
-                path=child,
-                mtime=mtime,
-                job_kind=_kind_for_job_dir(child),
-            )
-        )
+        out.append(JobEntry(state=str(state), path=child, mtime=mtime))
     return out
 
 
@@ -90,7 +58,7 @@ def _log(event: str, **fields: Any) -> None:
 
 
 def main() -> int:
-    cfg_jobs_base = get_str("janitor.jobs_base", "data/demo_jobs").strip()
+    cfg_jobs_base = get_str("jobs.live_worker_base", "data/jobs/live_worker").strip()
     default_jobs_base = (
         Path(cfg_jobs_base) if Path(cfg_jobs_base).is_absolute() else (_repo_root() / cfg_jobs_base)
     ).resolve()
@@ -99,20 +67,16 @@ def main() -> int:
     default_allow_nonstandard_base = bool(get_bool("janitor.allow_nonstandard_base", False))
     default_min_age_s = int(get_int("janitor.min_age_s", 3600, min_value=0))
     default_max_per_state = int(get_int("janitor.max_per_state", 3000, min_value=0))
-    default_live_kinds = ",".join(
-        [str(x).strip() for x in get_list("janitor.live_kinds", ["live_chunk"]) if str(x).strip()]
-    ) or "live_chunk"
     default_verbose_items = bool(get_bool("janitor.verbose_items", False))
     default_verbose_items_max = int(get_int("janitor.verbose_items_max", 20, min_value=0))
 
-    parser = argparse.ArgumentParser(description="Cleanup demo_jobs done/error directories for live chunk jobs only.")
+    parser = argparse.ArgumentParser(description="Cleanup live worker done/error directories.")
     parser.add_argument("--jobs-base", default=str(default_jobs_base))
     parser.add_argument("--enabled", action="store_true", default=bool(default_enabled))
     parser.add_argument("--dry-run", action="store_true", default=bool(default_dry_run))
     parser.add_argument("--allow-nonstandard-base", action="store_true", default=bool(default_allow_nonstandard_base))
     parser.add_argument("--min-age-s", type=int, default=int(default_min_age_s))
     parser.add_argument("--max-per-state", type=int, default=int(default_max_per_state))
-    parser.add_argument("--live-kinds", default=str(default_live_kinds))
     parser.add_argument("--verbose-items", action="store_true", default=bool(default_verbose_items))
     parser.add_argument("--verbose-items-max", type=int, default=int(default_verbose_items_max))
     args = parser.parse_args()
@@ -123,20 +87,14 @@ def main() -> int:
     allow_nonstandard_base = bool(args.allow_nonstandard_base)
     min_age_s = int(max(0, int(args.min_age_s)))
     max_per_state = int(max(0, int(args.max_per_state)))
-    live_kinds = {x.strip().lower() for x in str(args.live_kinds).split(",") if x.strip()}
     verbose_items = bool(args.verbose_items)
     verbose_items_max = int(max(0, int(args.verbose_items_max)))
 
-    if "upload_audio" in live_kinds:
-        _log("fatal_invalid_config", reason="upload_audio_not_allowed_in_live_kinds")
-        return 2
-
-    # Safety guard: by default only allow base path ending with demo_jobs.
-    if (jobs_base.name != "demo_jobs") and (not allow_nonstandard_base):
+    if (jobs_base.name != default_jobs_base.name) and (not allow_nonstandard_base):
         _log(
             "fatal_invalid_base",
             jobs_base=str(jobs_base),
-            reason="basename_not_demo_jobs",
+            reason=f"basename_not_{default_jobs_base.name}",
         )
         return 2
 
@@ -147,34 +105,26 @@ def main() -> int:
     now = time.time()
     total_deleted = 0
     total_candidates = 0
-    states = ("done", "error")
 
-    for state in states:
+    for state in ("done", "error"):
         state_dir = (jobs_base / state).resolve()
         if not _must_be_child_of(jobs_base, state_dir):
             _log("state_dir_guard_failed", state=state, state_dir=str(state_dir))
             return 2
         entries = _collect_entries(state_dir=state_dir, state=state)
 
-        # Cleanup scope is by job_kind only.
-        live_entries = [e for e in entries if e.job_kind in live_kinds]
-        # Phase 1: TTL-based removal candidates.
-        ttl_candidates = [
-            e for e in live_entries if (now - float(e.mtime)) >= float(min_age_s)
-        ]
-
-        # Phase 2: Max-count retention for live entries (keep newest max_per_state).
+        ttl_candidates = [e for e in entries if (now - float(e.mtime)) >= float(min_age_s)]
         overflow_candidates: list[JobEntry] = []
-        if max_per_state > 0 and len(live_entries) > max_per_state:
-            sorted_by_mtime_desc = sorted(live_entries, key=lambda e: float(e.mtime), reverse=True)
+        if max_per_state > 0 and len(entries) > max_per_state:
+            sorted_by_mtime_desc = sorted(entries, key=lambda e: float(e.mtime), reverse=True)
             keep = set(e.path for e in sorted_by_mtime_desc[:max_per_state])
-            overflow_candidates = [e for e in live_entries if e.path not in keep]
+            overflow_candidates = [e for e in entries if e.path not in keep]
 
         candidates_by_path: dict[Path, JobEntry] = {}
-        for e in ttl_candidates:
-            candidates_by_path[e.path] = e
-        for e in overflow_candidates:
-            candidates_by_path[e.path] = e
+        for entry in ttl_candidates:
+            candidates_by_path[entry.path] = entry
+        for entry in overflow_candidates:
+            candidates_by_path[entry.path] = entry
         candidates = list(candidates_by_path.values())
         total_candidates += len(candidates)
 
@@ -183,7 +133,6 @@ def main() -> int:
             state=state,
             state_dir=str(state_dir),
             total_dirs=len(entries),
-            live_dirs=len(live_entries),
             ttl_candidates=len(ttl_candidates),
             overflow_candidates=len(overflow_candidates),
             selected_candidates=len(candidates),
@@ -209,7 +158,6 @@ def main() -> int:
                         "dry_run_delete",
                         state=state,
                         path=str(entry.path),
-                        job_kind=str(entry.job_kind),
                         age_s=int(max(0, now - float(entry.mtime))),
                     )
                     items_logged += 1
@@ -223,7 +171,6 @@ def main() -> int:
                         "deleted",
                         state=state,
                         path=str(entry.path),
-                        job_kind=str(entry.job_kind),
                         age_s=int(max(0, now - float(entry.mtime))),
                     )
                     items_logged += 1
@@ -232,7 +179,6 @@ def main() -> int:
                     "delete_failed",
                     state=state,
                     path=str(entry.path),
-                    job_kind=str(entry.job_kind),
                     error=f"{type(e).__name__}: {e}",
                 )
 
@@ -252,7 +198,6 @@ def main() -> int:
         candidates_total=int(total_candidates),
         deleted_total=int(total_deleted),
         dry_run=bool(dry_run),
-        live_kinds=sorted(live_kinds),
         min_age_s=int(min_age_s),
         max_per_state=int(max_per_state),
     )
