@@ -59,8 +59,8 @@ def _live_commit_rows_debug_metrics(rows: list[dict[str, Any]]) -> dict[str, Any
 
 
 def _repo_root() -> Path:
-    # portal-api/live_sessions.py -> portal-api -> repo root
-    return Path(__file__).resolve().parents[1]
+    # portal-api/live/sessions.py -> live -> portal-api -> repo root
+    return Path(__file__).resolve().parents[2]
 
 
 @dataclass

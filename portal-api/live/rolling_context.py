@@ -10,9 +10,9 @@ from typing import Any, Callable, Mapping
 
 from fastapi import WebSocket, WebSocketDisconnect, status
 
-from live_chunk_transcribe import LiveChunkBatchBridge
-from live_vad_silero import LiveSileroVadGate, LiveSileroVadSettings
-from live_protocol import (
+from live.chunk_transcribe import LiveChunkBatchBridge
+from live.vad_silero import LiveSileroVadGate, LiveSileroVadSettings
+from live.protocol import (
     PROTOCOL_VERSION,
     control_ack_event,
     ended_event,
@@ -23,7 +23,7 @@ from live_protocol import (
     result_event,
     stats_event,
 )
-from live_recordings import LiveWavRecorder
+from live.recordings import LiveWavRecorder
 
 
 def _cfg(config: Mapping[str, Any], key: str) -> Any:
@@ -118,12 +118,11 @@ async def run_live_session_ws_rolling_context(
     LIVE_ROLLING_BUFFER_TRIM_DROP_MS = int(_cfg(config, "LIVE_ROLLING_BUFFER_TRIM_DROP_MS"))
     LIVE_ROLLING_MIN_NEW_AUDIO_MS = int(_cfg(config, "LIVE_ROLLING_MIN_NEW_AUDIO_MS"))
     LIVE_ROLLING_MIN_EMIT_INTERVAL_MS = int(_cfg(config, "LIVE_ROLLING_MIN_EMIT_INTERVAL_MS"))
-    LIVE_ROLLING_PACING_BASE_EMIT_MS_PER_SLOT1 = int(_cfg(config, "LIVE_ROLLING_PACING_BASE_EMIT_MS_PER_SLOT1"))
+    LIVE_ROLLING_PACING_BASE_EMIT_MS = int(_cfg(config, "LIVE_ROLLING_PACING_BASE_EMIT_MS"))
     LIVE_ROLLING_PACING_STARTUP_DURATION_MS = int(_cfg(config, "LIVE_ROLLING_PACING_STARTUP_DURATION_MS"))
     LIVE_ROLLING_PACING_STARTUP_EMIT_MS = int(_cfg(config, "LIVE_ROLLING_PACING_STARTUP_EMIT_MS"))
     LIVE_ROLLING_PACING_STARTUP_MIN_INFER_AUDIO_MS = int(_cfg(config, "LIVE_ROLLING_PACING_STARTUP_MIN_INFER_AUDIO_MS"))
     LIVE_ROLLING_PACING_STARTUP_MIN_NEW_AUDIO_MS = int(_cfg(config, "LIVE_ROLLING_PACING_STARTUP_MIN_NEW_AUDIO_MS"))
-    LIVE_ROLLING_PACING_RUNNER_SLOTS = int(_cfg(config, "LIVE_ROLLING_PACING_RUNNER_SLOTS"))
     LIVE_ROLLING_VAD_ENABLED = bool(_cfg(config, "LIVE_ROLLING_VAD_ENABLED"))
     LIVE_ROLLING_VAD_WHISPERX_VENV = _normalize_optional_text(_cfg(config, "LIVE_ROLLING_VAD_WHISPERX_VENV"))
     LIVE_ROLLING_VAD_THRESHOLD = float(_cfg(config, "LIVE_ROLLING_VAD_THRESHOLD"))
@@ -151,8 +150,7 @@ async def run_live_session_ws_rolling_context(
     )
     buffer_trim_threshold_ms = int(max(max_decode_window_ms, LIVE_ROLLING_BUFFER_TRIM_THRESHOLD_MS))
     buffer_trim_drop_ms = int(max(LIVE_ROLLING_MIN_INFER_AUDIO_MS, LIVE_ROLLING_BUFFER_TRIM_DROP_MS))
-    pacing_runner_slots = int(max(1, LIVE_ROLLING_PACING_RUNNER_SLOTS))
-    pacing_base_emit_ms_per_slot1 = int(max(1, LIVE_ROLLING_PACING_BASE_EMIT_MS_PER_SLOT1))
+    pacing_base_emit_ms = int(max(1, LIVE_ROLLING_PACING_BASE_EMIT_MS))
     startup_duration_ms = int(max(0, LIVE_ROLLING_PACING_STARTUP_DURATION_MS))
     startup_emit_ms = int(max(1, LIVE_ROLLING_PACING_STARTUP_EMIT_MS))
     startup_min_infer_audio_ms = int(max(0, LIVE_ROLLING_PACING_STARTUP_MIN_INFER_AUDIO_MS))
@@ -180,7 +178,7 @@ async def run_live_session_ws_rolling_context(
     pacing_effective_emit_ms = int(
         max(
             LIVE_ROLLING_MIN_EMIT_INTERVAL_MS,
-            int(round(float(pacing_base_emit_ms_per_slot1) / float(pacing_runner_slots))),
+            pacing_base_emit_ms,
         )
     )
     pacing_phase_seed = int.from_bytes(
@@ -554,8 +552,7 @@ async def run_live_session_ws_rolling_context(
             "buffer_audio_ms": int(max(0, int(recording_duration_ms) - int(rolling_pcm_base_ms))),
             "unprocessed_audio_ms": int(max(0, int(recording_duration_ms) - int(rolling_processed_offset_ms))),
             "pacing": {
-                "runner_slots": int(max(1, pacing_runner_slots)),
-                "base_emit_ms_per_slot1": int(max(1, pacing_base_emit_ms_per_slot1)),
+                "base_emit_ms": int(max(1, pacing_base_emit_ms)),
                 "effective_emit_ms": int(max(1, pacing_effective_emit_ms)),
                 "phase_ms": int(max(0, pacing_phase_ms)),
                 "last_slot_index": int(rolling_pacing_last_slot_index),
@@ -608,8 +605,7 @@ async def run_live_session_ws_rolling_context(
                 "buffer_trim_drop_ms": int(buffer_trim_drop_ms),
                 "min_new_audio_ms": int(min_new_audio_ms),
                 "min_emit_interval_ms": int(LIVE_ROLLING_MIN_EMIT_INTERVAL_MS),
-                "pacing_base_emit_ms_per_slot1": int(max(1, pacing_base_emit_ms_per_slot1)),
-                "pacing_runner_slots": int(max(1, pacing_runner_slots)),
+                "pacing_base_emit_ms": int(max(1, pacing_base_emit_ms)),
                 "pacing_effective_emit_ms": int(max(1, pacing_effective_emit_ms)),
                 "pacing_startup_duration_ms": int(max(0, startup_duration_ms)),
                 "pacing_startup_emit_ms": int(max(1, startup_emit_ms)),
@@ -1618,8 +1614,7 @@ async def run_live_session_ws_rolling_context(
                     "buffer_trim_drop_ms": int(buffer_trim_drop_ms),
                     "min_new_audio_ms": int(min_new_audio_ms),
                     "min_emit_interval_ms": int(LIVE_ROLLING_MIN_EMIT_INTERVAL_MS),
-                    "pacing_base_emit_ms_per_slot1": int(max(1, pacing_base_emit_ms_per_slot1)),
-                    "pacing_runner_slots": int(max(1, pacing_runner_slots)),
+                    "pacing_base_emit_ms": int(max(1, pacing_base_emit_ms)),
                     "pacing_effective_emit_ms": int(max(1, pacing_effective_emit_ms)),
                     "pacing_startup_duration_ms": int(max(0, startup_duration_ms)),
                     "pacing_startup_emit_ms": int(max(1, startup_emit_ms)),

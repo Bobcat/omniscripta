@@ -13,8 +13,8 @@ DEFAULT_SAMPLE_WIDTH_BYTES = 2
 
 
 def _repo_root() -> Path:
-    # portal-api/live_recordings.py -> portal-api -> repo root
-    return Path(__file__).resolve().parents[1]
+    # portal-api/live/recordings.py -> live -> portal-api -> repo root
+    return Path(__file__).resolve().parents[2]
 
 
 def _safe_session_id(session_id: str) -> str:
@@ -179,4 +179,3 @@ class LiveWavRecorder:
             started_mono=float(self._started_mono),
             finalized_mono=float(self._finalized_mono),
         )
-

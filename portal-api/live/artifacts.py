@@ -1,0 +1,142 @@
+from __future__ import annotations
+
+import json
+import os
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict
+
+from live.config import LIVE_BENCHMARK_EXPORT_ROOT, LIVE_RECORDINGS_ROOT
+
+
+def _format_srt_timestamp(ms: int) -> str:
+    total_ms = int(max(0, ms))
+    hours = total_ms // 3_600_000
+    rem = total_ms % 3_600_000
+    minutes = rem // 60_000
+    rem = rem % 60_000
+    seconds = rem // 1000
+    millis = rem % 1000
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d},{millis:03d}"
+
+
+def live_result_to_srt_text(result: dict[str, Any]) -> str:
+    segments_any = result.get("final_segments")
+    if not isinstance(segments_any, list):
+        return ""
+    rows: list[str] = []
+    idx = 0
+    for seg in segments_any:
+        if not isinstance(seg, dict):
+            continue
+        text = str(seg.get("text") or "").strip()
+        if not text:
+            continue
+        t0_ms = int(max(0, int(seg.get("t0_ms") or 0)))
+        t1_ms = int(max(t0_ms + 1, int(seg.get("t1_ms") or (t0_ms + 1))))
+        idx += 1
+        rows.append(str(idx))
+        rows.append(f"{_format_srt_timestamp(t0_ms)} --> {_format_srt_timestamp(t1_ms)}")
+        rows.append(text)
+        rows.append("")
+    return "\n".join(rows).strip() + ("\n" if rows else "")
+
+
+def live_result_to_plain_text(result: dict[str, Any]) -> str:
+    segments_any = result.get("final_segments")
+    if not isinstance(segments_any, list):
+        return ""
+    rows: list[str] = []
+    for seg in segments_any:
+        if not isinstance(seg, dict):
+            continue
+        text = str(seg.get("text") or "").strip()
+        if not text:
+            continue
+        rows.append(text)
+    return "\n".join(rows).strip()
+
+
+def live_recording_wav_path_from_result(result: dict[str, Any]) -> Path | None:
+    raw = str((result or {}).get("recording_path") or "").strip()
+    if not raw:
+        return None
+    try:
+        candidate = Path(raw).expanduser().resolve()
+    except Exception:
+        return None
+    try:
+        candidate.relative_to(LIVE_RECORDINGS_ROOT)
+    except Exception:
+        return None
+    if candidate.suffix.lower() != ".wav":
+        return None
+    if not candidate.is_file():
+        return None
+    return candidate
+
+
+def _iso_utc(ts: float) -> str:
+    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def safe_filename(name: str) -> str:
+    return Path(name).name or "upload.bin"
+
+
+def _write_json_atomic(path: Path, obj: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _append_jsonl(path: Path, obj: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(obj, ensure_ascii=False) + "\n"
+    with path.open("a", encoding="utf-8") as f:
+        f.write(line)
+
+
+def _autosave_live_benchmark_snapshot(
+    *,
+    session_id: str,
+    artifact_name: str,
+    envelope: Dict[str, Any],
+    request_meta: Dict[str, Any] | None = None,
+) -> None:
+    safe_session_id = safe_filename(str(session_id or "session"))
+    artifact = safe_filename(str(artifact_name or "benchmark"))
+    now_ts = time.time()
+    now_iso = _iso_utc(now_ts)
+    record: Dict[str, Any] = {
+        "saved_at_utc": now_iso,
+        "saved_at_unix": round(float(now_ts), 6),
+        "session_id": str(session_id or ""),
+        "artifact_name": artifact_name,
+        "request_meta": dict(request_meta or {}),
+        "payload": envelope,
+    }
+    latest_path = (LIVE_BENCHMARK_EXPORT_ROOT / f"{safe_session_id}.{artifact}.latest.json").resolve()
+    history_path = (LIVE_BENCHMARK_EXPORT_ROOT / f"{safe_session_id}.{artifact}.history.jsonl").resolve()
+    _write_json_atomic(latest_path, record)
+    _append_jsonl(history_path, record)
+
+
+def try_autosave_live_benchmark_snapshot(
+    *,
+    session_id: str,
+    artifact_name: str,
+    envelope: Dict[str, Any],
+    request_meta: Dict[str, Any] | None = None,
+) -> None:
+    try:
+        _autosave_live_benchmark_snapshot(
+            session_id=session_id,
+            artifact_name=artifact_name,
+            envelope=envelope,
+            request_meta=request_meta,
+        )
+    except Exception as e:
+        print(f"[live-benchmark-autosave] failed {artifact_name} session={session_id}: {type(e).__name__}: {e}")

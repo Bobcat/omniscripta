@@ -4,10 +4,13 @@ import json
 import re
 import wave
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from queue_fs import BASE as JOBS_BASE, init_job_in_inbox
+from jobs.queue_fs import find_job_dir, init_job_in_inbox
+from queue_roots import LIVE_WORKER_QUEUE
+from shared.app_config import get_setting
 
 
 DEFAULT_SAMPLE_RATE_HZ = 16000
@@ -18,8 +21,8 @@ _SPEAKER_PREFIX_RE = re.compile(
     re.IGNORECASE,
 )
 def _repo_root() -> Path:
-    # portal-api/live_chunk_transcribe.py -> portal-api -> repo root
-    return Path(__file__).resolve().parents[1]
+    # portal-api/live/chunk_transcribe.py -> live -> portal-api -> repo root
+    return Path(__file__).resolve().parents[2]
 
 
 def _safe_session_id(session_id: str) -> str:
@@ -34,14 +37,6 @@ def _normalize_optional_language(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
-
-
-def _find_job_dir(job_id: str, *, jobs_base: Path) -> Path | None:
-    for state in ("inbox", "running", "done", "error"):
-        d = jobs_base / state / str(job_id)
-        if d.exists():
-            return d
-    return None
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -173,7 +168,6 @@ class LiveChunkBatchBridge:
     def __init__(
         self,
         *,
-        jobs_base: Path | None = None,
         chunks_root: Path | None = None,
         sample_rate_hz: int = DEFAULT_SAMPLE_RATE_HZ,
         channels: int = DEFAULT_CHANNELS,
@@ -183,7 +177,6 @@ class LiveChunkBatchBridge:
         diarize_min_speakers: int | None = 1,
         diarize_max_speakers: int | None = 4,
     ) -> None:
-        self.jobs_base = (jobs_base if jobs_base is not None else JOBS_BASE).resolve()
         self.chunks_root = (
             chunks_root if chunks_root is not None else (_repo_root() / "data" / "live_chunk_jobs")
         ).resolve()
@@ -249,36 +242,68 @@ class LiveChunkBatchBridge:
             min_speakers = self.diarize_min_speakers
             max_speakers = self.diarize_max_speakers
         job = init_job_in_inbox(
-            orig_filename=chunk_wav.name,
-            options={
-                "language": resolved_language,
-                "beam_size": (int(max(1, asr_beam_size)) if asr_beam_size is not None else None),
-                "speaker_mode": speaker_mode,
-                "diarize_enabled": bool(self.diarize_enabled),
-                "expected_speakers": None,
-                "min_speakers": min_speakers,
-                "max_speakers": max_speakers,
-                # Keep chunk jobs focused/fast; worker may ignore unknown keys.
-                "live_chunk_mode": True,
-                "live_session_id": str(session_id),
-                "live_chunk_index": int(idx),
-                "live_chunk_t0_ms": int(max(0, t0_ms)),
-                "live_chunk_t1_ms": int(max(max(0, t0_ms), t1_ms)),
-                "initial_prompt": prompt_text if prompt_text else None,
-                # v3 scope: one hardcoded live lane.
-                "live_lane": str(live_lane or "single"),
-                "preview_seq": (
-                    int(max(0, preview_seq)) if preview_seq is not None else None
-                ),
-                "preview_audio_end_ms": (
-                    int(max(0, preview_audio_end_ms)) if preview_audio_end_ms is not None else None
-                ),
+            queue_root=LIVE_WORKER_QUEUE,
+            job_json={
+                "input": {
+                    "audio_relpath": str(Path("upload") / chunk_wav.name),
+                    "duration_ms": int(max(1, max(max(0, t0_ms), t1_ms) - max(0, t0_ms))),
+                    "format": "wav",
+                    "sample_rate_hz": int(self.sample_rate_hz),
+                    "channels": int(self.channels),
+                },
+                "request": {
+                    "language": resolved_language,
+                    "beam_size": (int(max(1, asr_beam_size)) if asr_beam_size is not None else None),
+                    "speaker_mode": speaker_mode,
+                    "diarize_enabled": bool(self.diarize_enabled),
+                    "min_speakers": min_speakers,
+                    "max_speakers": max_speakers,
+                    "initial_prompt": prompt_text if prompt_text else None,
+                    "priority": "interactive",
+                    "latency_mode": "low",
+                    "align_enabled": bool(get_setting("live_chunk.align_enabled", False)),
+                    "routing": {
+                        "fairness_key": (str(session_id) or "live"),
+                    },
+                },
+                "outputs": {
+                    "status_relpath": "status.json",
+                    "srt_relpath": str(Path("whisperx") / f"{chunk_wav.stem}.srt"),
+                },
+                "worker_features": {
+                    "write_status_json": True,
+                    "track_pending_status": False,
+                    "predictive_progress": False,
+                    "write_timings_text": True,
+                    "include_runtime_meta": True,
+                    "download_srt": True,
+                },
+                "client_context": {
+                    "live_session_id": str(session_id),
+                    "live_chunk_index": int(idx),
+                    "live_chunk_t0_ms": int(max(0, t0_ms)),
+                    "live_chunk_t1_ms": int(max(max(0, t0_ms), t1_ms)),
+                    "live_lane": str(live_lane or "single"),
+                    "preview_seq": int(max(0, preview_seq)) if preview_seq is not None else None,
+                    "preview_audio_end_ms": int(max(0, preview_audio_end_ms)) if preview_audio_end_ms is not None else None,
+                },
             },
-            job_kind="live_chunk",
-            upload_src_path=chunk_wav,
+            status_json={
+                "state": "queued",
+                "phase": "queued",
+                "progress": 0.0,
+                "message": "Queued",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "started_at": None,
+                "finished_at": None,
+                "error": None,
+                "srt_filename": None,
+            },
+            input_src_path=chunk_wav,
+            input_dst_relpath=str(Path("upload") / chunk_wav.name),
             move_upload_src=True,
         )
-        chunk_upload_path = (job.upload_dir / chunk_wav.name).resolve()
+        chunk_upload_path = (job.dir / "upload" / chunk_wav.name).resolve()
         return EnqueuedChunkJob(
             session_id=str(session_id),
             chunk_index=idx,
@@ -291,7 +316,7 @@ class LiveChunkBatchBridge:
         )
 
     def poll_job(self, job_id: str, *, t0_offset_ms: int = 0) -> ChunkJobPollResult:
-        job_dir = _find_job_dir(str(job_id), jobs_base=self.jobs_base)
+        job_dir = find_job_dir(str(job_id), queue_roots=(LIVE_WORKER_QUEUE,))
         if job_dir is None:
             raise FileNotFoundError(f"Job not found: {job_id}")
 

@@ -8,8 +8,8 @@ from typing import Any
 
 
 def _repo_root() -> Path:
-    # portal-api/live_quality.py -> portal-api -> repo root
-    return Path(__file__).resolve().parents[1]
+    # portal-api/live/quality.py -> live -> portal-api -> repo root
+    return Path(__file__).resolve().parents[2]
 
 
 FIXTURES_ROOT = (_repo_root() / "data" / "test_fixtures").resolve()
