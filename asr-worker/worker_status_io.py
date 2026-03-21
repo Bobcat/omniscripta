@@ -1,15 +1,9 @@
 from __future__ import annotations
 
 import json
-import time
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
-
-
-# Update status.json at most this often (seconds)
-STATUS_THROTTLE_S = 1.0
+from typing import Any
 
 
 def _utc_iso() -> str:
@@ -128,40 +122,3 @@ def _write_status(status_path: Path, **patch: Any) -> None:
       cur["message"] = f"{msg}{eta_suffix}"
 
   _write_json(status_path, cur)
-
-
-@dataclass
-class _StatusEmitter:
-  status_path: Path
-  last_write: float = 0.0
-  last_progress: float = -1.0
-  last_message: str = ""
-
-  def maybe_emit(
-    self,
-    *,
-    progress: float,
-    message: str,
-    phase: str,
-    extra: Optional[dict[str, Any]] = None
-  ) -> None:
-    now = time.monotonic()
-    progress = float(max(0.0, min(1.0, progress)))
-
-    # Never go backwards within a job (prevents UI “reset”)
-    if self.last_progress >= 0.0:
-      progress = max(progress, self.last_progress)
-
-    msg_changed = (message != self.last_message)
-    prog_changed = (progress - self.last_progress) >= 0.002  # avoid noise
-    if (now - self.last_write) < STATUS_THROTTLE_S and not msg_changed and not prog_changed:
-      return
-
-    patch: dict[str, Any] = {"progress": progress, "message": message, "phase": phase}
-    if extra:
-      patch.update(extra)
-
-    _write_status(self.status_path, **patch)
-    self.last_write = now
-    self.last_progress = progress
-    self.last_message = message

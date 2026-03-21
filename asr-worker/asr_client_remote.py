@@ -18,7 +18,7 @@ if str(_REPO_ROOT) not in sys.path:
   sys.path.insert(0, str(_REPO_ROOT))
 
 from shared.asr.schema import ASR_SCHEMA_VERSION
-from shared.app_config import get_str, get_int, get_float
+from worker_config import get_str, get_int, get_float
 
 
 def _build_error_response(
@@ -84,19 +84,22 @@ def _json_or_empty(raw: bytes) -> dict[str, Any]:
   return dict(parsed) if isinstance(parsed, dict) else {}
 
 
-def _http_json_once(
+def _http_request_once(
   *,
   method: str,
   url: str,
   token: str,
   timeout_s: float,
-  payload: dict[str, Any] | None = None,
+  body_bytes: bytes | None = None,
+  content_type: str | None = None,
 ) -> tuple[int, dict[str, Any]]:
-  data = None
-  if payload is not None:
-    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-  req = urlrequest.Request(url, data=data, method=str(method).upper())
-  req.add_header("Content-Type", "application/json")
+  req = urlrequest.Request(
+    url,
+    data=(bytes(body_bytes) if body_bytes is not None else None),
+    method=str(method).upper(),
+  )
+  if content_type:
+    req.add_header("Content-Type", str(content_type))
   if token:
     req.add_header("X-ASR-Token", token)
   try:
@@ -120,13 +123,14 @@ def _backoff_sleep_s(*, retry_index: int, base_s: float, max_s: float, jitter_s:
   return max(0.0, float(bounded))
 
 
-def _http_json_with_retry(
+def _http_request_with_retry(
   *,
   method: str,
   url: str,
   token: str,
   timeout_s: float,
-  payload: dict[str, Any] | None = None,
+  body_bytes: bytes | None = None,
+  content_type: str | None = None,
   attempts: int,
   backoff_base_s: float,
   backoff_max_s: float,
@@ -136,120 +140,7 @@ def _http_json_with_retry(
   last_exc: Exception | None = None
   for attempt in range(1, max_attempts + 1):
     try:
-      status_code, body = _http_json_once(
-        method=method,
-        url=url,
-        token=token,
-        timeout_s=timeout_s,
-        payload=payload,
-      )
-    except Exception as e:
-      last_exc = e
-      if attempt >= max_attempts:
-        raise
-      sleep_s = _backoff_sleep_s(
-        retry_index=(attempt - 1),
-        base_s=backoff_base_s,
-        max_s=backoff_max_s,
-        jitter_s=jitter_s,
-      )
-      if sleep_s > 0.0:
-        time.sleep(sleep_s)
-      continue
-
-    if _retryable_http_status(status_code) and attempt < max_attempts:
-      sleep_s = _backoff_sleep_s(
-        retry_index=(attempt - 1),
-        base_s=backoff_base_s,
-        max_s=backoff_max_s,
-        jitter_s=jitter_s,
-      )
-      if sleep_s > 0.0:
-        time.sleep(sleep_s)
-      continue
-    return int(status_code), dict(body or {}), int(attempt)
-
-  if last_exc is not None:
-    raise last_exc
-  return 500, {}, int(max_attempts)
-
-
-def _with_consumer_id(request_payload: dict[str, Any], *, consumer_id: str) -> dict[str, Any]:
-  req = dict(request_payload or {})
-  cid = str(consumer_id or "").strip()
-  if cid:
-    req["consumer_id"] = cid
-  return req
-
-
-def _multipart_content_type_for_path(path: Path) -> str:
-  guessed, _enc = mimetypes.guess_type(str(path.name))
-  return str(guessed or "application/octet-stream")
-
-
-def _build_multipart_submit_body(
-  *,
-  request_payload: dict[str, Any],
-  audio_path: Path,
-) -> tuple[bytes, str]:
-  boundary = f"----transcribe-{uuid.uuid4().hex}"
-  request_bytes = json.dumps(request_payload, ensure_ascii=False).encode("utf-8")
-  file_bytes = audio_path.read_bytes()
-  filename = str(audio_path.name or "audio.bin").replace("\"", "_")
-  file_content_type = _multipart_content_type_for_path(audio_path)
-  rows: list[bytes] = []
-  rows.append(f"--{boundary}\r\n".encode("ascii"))
-  rows.append(b"Content-Disposition: form-data; name=\"request_json\"\r\n")
-  rows.append(b"Content-Type: application/json; charset=utf-8\r\n\r\n")
-  rows.append(request_bytes)
-  rows.append(b"\r\n")
-  rows.append(f"--{boundary}\r\n".encode("ascii"))
-  rows.append(f"Content-Disposition: form-data; name=\"audio_file\"; filename=\"{filename}\"\r\n".encode("utf-8"))
-  rows.append(f"Content-Type: {file_content_type}\r\n\r\n".encode("ascii"))
-  rows.append(file_bytes)
-  rows.append(b"\r\n")
-  rows.append(f"--{boundary}--\r\n".encode("ascii"))
-  return b"".join(rows), f"multipart/form-data; boundary={boundary}"
-
-
-def _http_multipart_once(
-  *,
-  method: str,
-  url: str,
-  token: str,
-  timeout_s: float,
-  body_bytes: bytes,
-  content_type: str,
-) -> tuple[int, dict[str, Any]]:
-  req = urlrequest.Request(url, data=bytes(body_bytes), method=str(method).upper())
-  req.add_header("Content-Type", str(content_type))
-  if token:
-    req.add_header("X-ASR-Token", token)
-  try:
-    with urlrequest.urlopen(req, timeout=float(timeout_s)) as resp:
-      return int(getattr(resp, "status", 200) or 200), _json_or_empty(resp.read())
-  except urlerror.HTTPError as e:
-    return int(getattr(e, "code", 500) or 500), _json_or_empty(e.read())
-
-
-def _http_multipart_with_retry(
-  *,
-  method: str,
-  url: str,
-  token: str,
-  timeout_s: float,
-  body_bytes: bytes,
-  content_type: str,
-  attempts: int,
-  backoff_base_s: float,
-  backoff_max_s: float,
-  jitter_s: float,
-) -> tuple[int, dict[str, Any], int]:
-  max_attempts = max(1, int(attempts))
-  last_exc: Exception | None = None
-  for attempt in range(1, max_attempts + 1):
-    try:
-      status_code, body = _http_multipart_once(
+      status_code, body = _http_request_once(
         method=method,
         url=url,
         token=token,
@@ -286,6 +177,57 @@ def _http_multipart_with_retry(
   if last_exc is not None:
     raise last_exc
   return 500, {}, int(max_attempts)
+
+
+def _remote_http_retry_config() -> tuple[str, str, float, int, float, float, float]:
+  retry_base_delay_s = _retry_base_delay_s()
+  return (
+    _pool_base_url(),
+    get_str("asr_pool.token", ""),
+    _http_timeout_s(),
+    _retry_attempts(),
+    retry_base_delay_s,
+    max(retry_base_delay_s, _retry_max_delay_s()),
+    _retry_jitter_s(),
+  )
+
+
+def _with_consumer_id(request_payload: dict[str, Any], *, consumer_id: str) -> dict[str, Any]:
+  req = dict(request_payload or {})
+  cid = str(consumer_id or "").strip()
+  if cid:
+    req["consumer_id"] = cid
+  return req
+
+
+def _multipart_content_type_for_path(path: Path) -> str:
+  guessed, _enc = mimetypes.guess_type(str(path.name))
+  return str(guessed or "application/octet-stream")
+
+
+def _build_multipart_submit_body(
+  *,
+  request_payload: dict[str, Any],
+  audio_path: Path,
+) -> tuple[bytes, str]:
+  boundary = f"----asr-{uuid.uuid4().hex}"
+  request_bytes = json.dumps(request_payload, ensure_ascii=False).encode("utf-8")
+  file_bytes = audio_path.read_bytes()
+  filename = str(audio_path.name or "audio.bin").replace("\"", "_")
+  file_content_type = _multipart_content_type_for_path(audio_path)
+  rows: list[bytes] = []
+  rows.append(f"--{boundary}\r\n".encode("ascii"))
+  rows.append(b"Content-Disposition: form-data; name=\"request_json\"\r\n")
+  rows.append(b"Content-Type: application/json; charset=utf-8\r\n\r\n")
+  rows.append(request_bytes)
+  rows.append(b"\r\n")
+  rows.append(f"--{boundary}\r\n".encode("ascii"))
+  rows.append(f"Content-Disposition: form-data; name=\"audio_file\"; filename=\"{filename}\"\r\n".encode("utf-8"))
+  rows.append(f"Content-Type: {file_content_type}\r\n\r\n".encode("ascii"))
+  rows.append(file_bytes)
+  rows.append(b"\r\n")
+  rows.append(f"--{boundary}--\r\n".encode("ascii"))
+  return b"".join(rows), f"multipart/form-data; boundary={boundary}"
 
 
 def _prepare_submit_payload(
@@ -337,30 +279,9 @@ def submit_remote_pool_request(
       "http_status": 0,
     }
 
-  pool_base_url = _pool_base_url()
-  token = get_str("asr_pool.token", "")
-  http_timeout_s = _http_timeout_s()
-  retry_attempts = _retry_attempts()
-  retry_base_delay_s = _retry_base_delay_s()
-  retry_max_delay_s = max(retry_base_delay_s, _retry_max_delay_s())
-  retry_jitter_s = _retry_jitter_s()
+  pool_base_url, token, http_timeout_s, retry_attempts, retry_base_delay_s, retry_max_delay_s, retry_jitter_s = _remote_http_retry_config()
   request_id = str(req.get("request_id") or "").strip()
   submit_url = urlparse.urljoin(pool_base_url + "/", "asr/v1/requests")
-  if audio_path is None:
-    return {
-      "ok": False,
-      "request_id": str(request_id),
-      "prepared_request": req,
-      "error_response": _build_error_response(
-        request=req,
-        code="ASR_REMOTE_INPUT_PATH_REQUIRED",
-        message="audio.local_path is required for multipart ASR submit",
-        retryable=False,
-        details={},
-      ),
-      "submit_lifecycle": {},
-      "http_status": 0,
-    }
   try:
     body_bytes, content_type = _build_multipart_submit_body(
       request_payload=req,
@@ -382,7 +303,7 @@ def submit_remote_pool_request(
       "http_status": 0,
     }
   try:
-    status_code, submit_body, attempts_used = _http_multipart_with_retry(
+    status_code, submit_body, attempts_used = _http_request_with_retry(
       method="POST",
       url=submit_url,
       token=token,
@@ -452,14 +373,8 @@ def fetch_remote_pending_status(
   consumer_id: str,
   request_ids: list[str],
   limit: int = 200,
-) -> dict[str, Any]:
-  pool_base_url = _pool_base_url()
-  token = get_str("asr_pool.token", "")
-  http_timeout_s = _http_timeout_s()
-  retry_attempts = _retry_attempts()
-  retry_base_delay_s = _retry_base_delay_s()
-  retry_max_delay_s = max(retry_base_delay_s, _retry_max_delay_s())
-  retry_jitter_s = _retry_jitter_s()
+) -> list[dict[str, Any]]:
+  pool_base_url, token, http_timeout_s, retry_attempts, retry_base_delay_s, retry_max_delay_s, retry_jitter_s = _remote_http_retry_config()
   clean_ids: list[str] = []
   seen: set[str] = set()
   for raw in list(request_ids or []):
@@ -480,106 +395,36 @@ def fetch_remote_pending_status(
   )
   url = urlparse.urljoin(pool_base_url + "/", f"asr/v1/pending-status?{query}")
   try:
-    status_code, body, _attempts_used = _http_json_with_retry(
+    status_code, body, _attempts_used = _http_request_with_retry(
       method="GET",
       url=url,
       token=token,
       timeout_s=http_timeout_s,
-      payload=None,
+      content_type="application/json",
       attempts=retry_attempts,
       backoff_base_s=retry_base_delay_s,
       backoff_max_s=retry_max_delay_s,
       jitter_s=retry_jitter_s,
     )
-  except Exception as e:
-    return {
-      "ok": False,
-      "status_code": 0,
-      "body": {
-        "code": "ASR_REMOTE_PENDING_STATUS_IO_FAILURE",
-        "message": f"ASR pool pending status I/O failed: {type(e).__name__}: {e}",
-        "retryable": True,
-      },
-    }
-  return {
-    "ok": bool(int(status_code) == 200),
-    "status_code": int(status_code),
-    "body": dict(body or {}),
-  }
+  except Exception:
+    return []
+  if int(status_code) != 200:
+    return []
+  rows = dict(body or {}).get("rows")
+  if not isinstance(rows, list):
+    return []
+  return [row for row in rows if isinstance(row, dict)]
 
 
-def fetch_remote_request_status(
+def download_remote_request_srt_to_path(
   *,
   request_id: str,
-) -> dict[str, Any]:
+  dst_path: Path,
+  allow_empty: bool = False,
+) -> Path:
   rid = str(request_id or "").strip()
   if not rid:
-    return {
-      "ok": False,
-      "status_code": 400,
-      "body": {
-        "code": "ASR_REQUEST_ID_REQUIRED",
-        "message": "request_id is required",
-        "retryable": False,
-      },
-    }
-
-  pool_base_url = _pool_base_url()
-  token = get_str("asr_pool.token", "")
-  http_timeout_s = _http_timeout_s()
-  retry_attempts = _retry_attempts()
-  retry_base_delay_s = _retry_base_delay_s()
-  retry_max_delay_s = max(retry_base_delay_s, _retry_max_delay_s())
-  retry_jitter_s = _retry_jitter_s()
-  safe_rid = urlparse.quote(rid, safe="")
-  url = urlparse.urljoin(pool_base_url + "/", f"asr/v1/requests/{safe_rid}")
-  try:
-    status_code, body, _attempts_used = _http_json_with_retry(
-      method="GET",
-      url=url,
-      token=token,
-      timeout_s=http_timeout_s,
-      payload=None,
-      attempts=retry_attempts,
-      backoff_base_s=retry_base_delay_s,
-      backoff_max_s=retry_max_delay_s,
-      jitter_s=retry_jitter_s,
-    )
-  except Exception as e:
-    return {
-      "ok": False,
-      "status_code": 0,
-      "body": {
-        "code": "ASR_REMOTE_REQUEST_STATUS_IO_FAILURE",
-        "message": f"ASR pool request status I/O failed: {type(e).__name__}: {e}",
-        "retryable": True,
-      },
-    }
-  return {
-    "ok": bool(int(status_code) == 200),
-    "status_code": int(status_code),
-    "body": dict(body or {}),
-  }
-
-
-def fetch_remote_request_srt(
-  *,
-  request_id: str,
-) -> dict[str, Any]:
-  rid = str(request_id or "").strip()
-  if not rid:
-    return {
-      "ok": False,
-      "status_code": 400,
-      "body": {
-        "code": "ASR_REQUEST_ID_REQUIRED",
-        "message": "request_id is required",
-        "retryable": False,
-      },
-      "data": b"",
-      "content_type": "",
-    }
-
+    raise RuntimeError("Missing request_id for remote SRT fetch")
   pool_base_url = _pool_base_url()
   token = get_str("asr_pool.token", "")
   timeout_s = max(5.0, _http_timeout_s())
@@ -591,35 +436,26 @@ def fetch_remote_request_srt(
   try:
     with urlrequest.urlopen(req, timeout=float(timeout_s)) as resp:
       status_code = int(getattr(resp, "status", 200) or 200)
-      data = resp.read()
-      content_type = str(resp.headers.get("Content-Type") or "").strip()
-      return {
-        "ok": bool(status_code == 200),
-        "status_code": int(status_code),
-        "body": {},
-        "data": bytes(data),
-        "content_type": content_type,
-      }
+      data = bytes(resp.read() or b"")
+      if status_code != 200:
+        raise RuntimeError(f"ASR_REMOTE_SRT_FETCH_FAILED: Failed to fetch remote SRT (http={status_code})")
   except urlerror.HTTPError as e:
-    return {
-      "ok": False,
-      "status_code": int(getattr(e, "code", 500) or 500),
-      "body": _json_or_empty(e.read()),
-      "data": b"",
-      "content_type": "",
-    }
+    status_code = int(getattr(e, "code", 500) or 500)
+    body = _json_or_empty(e.read())
+    code = str(body.get("code") or "ASR_REMOTE_SRT_FETCH_FAILED")
+    msg = str(body.get("message") or f"Failed to fetch remote SRT (http={status_code})")
+    raise RuntimeError(f"{code}: {msg}") from e
+  except RuntimeError:
+    raise
   except Exception as e:
-    return {
-      "ok": False,
-      "status_code": 0,
-      "body": {
-        "code": "ASR_REMOTE_ARTIFACT_FETCH_IO_FAILURE",
-        "message": f"{type(e).__name__}: {e}",
-        "retryable": True,
-      },
-      "data": b"",
-      "content_type": "",
-    }
+    raise RuntimeError(f"ASR_REMOTE_ARTIFACT_FETCH_IO_FAILURE: {type(e).__name__}: {e}") from e
+  if not data and not bool(allow_empty):
+    raise RuntimeError("Remote SRT fetch returned empty payload")
+  dst_path.parent.mkdir(parents=True, exist_ok=True)
+  tmp = dst_path.with_suffix(dst_path.suffix + ".tmp")
+  tmp.write_bytes(data)
+  tmp.replace(dst_path)
+  return dst_path.resolve()
 
 
 def _parse_sse_event(*, event_name: str, data_lines: list[str]) -> tuple[str, dict[str, Any]]:
@@ -665,7 +501,7 @@ def stream_remote_completions_forever(
   reconnect_max_s = max(reconnect_base_s, _retry_max_delay_s())
   reconnect_jitter_s = _retry_jitter_s()
   timeout_s = max(30.0, (float(heartbeat_s) * 3.0))
-  since_seq = int(max(0, int(start_since_seq)))
+  since_seq = max(0, int(start_since_seq))
   last_feed_id = ""
   retry_index = 0
 
@@ -673,7 +509,7 @@ def stream_remote_completions_forever(
     query = urlparse.urlencode(
       {
         "consumer_id": cid,
-        "since_seq": int(max(0, int(since_seq))),
+        "since_seq": max(0, int(since_seq)),
         "limit": 200,
         "heartbeat_s": float(heartbeat_s),
       }
@@ -714,7 +550,7 @@ def stream_remote_completions_forever(
             if kind == "meta":
               feed_id = str(payload.get("feed_id") or "").strip()
               next_seq_raw = payload.get("next_seq")
-              next_seq = int(max(0, int(next_seq_raw or 0)))
+              next_seq = max(0, int(next_seq_raw or 0))
               feed_changed = bool(last_feed_id and feed_id and feed_id != last_feed_id)
               if feed_changed:
                 on_event(
@@ -735,16 +571,16 @@ def stream_remote_completions_forever(
                 # Reconnect immediately so the server-side stream cursor also resets.
                 break
               elif next_seq_raw is not None:
-                since_seq = int(max(since_seq, next_seq))
+                since_seq = max(since_seq, next_seq)
             elif kind == "completion":
-              seq = int(max(0, int(payload.get("seq") or 0)))
+              seq = max(0, int(payload.get("seq") or 0))
               if seq > 0:
-                since_seq = int(max(since_seq, seq + 1))
+                since_seq = max(since_seq, seq + 1)
               on_event("completion", dict(payload))
             elif kind == "heartbeat":
-              next_seq = int(max(0, int(payload.get("next_seq") or since_seq)))
+              next_seq = max(0, int(payload.get("next_seq") or since_seq))
               feed_id = str(payload.get("feed_id") or "").strip()
-              since_seq = int(max(since_seq, next_seq))
+              since_seq = max(since_seq, next_seq)
               if feed_id:
                 last_feed_id = feed_id
             elif kind == "error":

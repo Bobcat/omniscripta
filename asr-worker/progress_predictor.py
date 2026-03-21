@@ -6,26 +6,16 @@ from pathlib import Path
 from statistics import median
 from typing import Any
 
+from runtime_common import normalize_speaker_mode
 
-PHASE_ORDER_BASE = [
-  "snipping",
-  "whisperx_prepare",
-  "whisperx_transcribe",
-  "whisperx_align",
-  "postprocess",
-]
 
 AUDIO_PHASES = {"whisperx_transcribe", "whisperx_align", "whisperx_diarize"}
 
 DEFAULTS_SECONDS = {
-  "snipping": 5.0,
   "whisperx_prepare": 2.0,
   "whisperx_transcribe": 12.0,
   "whisperx_align": 8.0,
   "whisperx_diarize": 12.0,
-  "postprocess": 0.5,
-  "llm_topics": 8.0,
-  "llm_topics_skipped": 0.0,
 }
 
 
@@ -45,28 +35,18 @@ def _safe_float(v: Any) -> float | None:
     return None
 
 
-def _phase_name_for_topics(topics_enabled: bool) -> str:
-  return "llm_topics" if topics_enabled else "llm_topics_skipped"
-
-
-def _normalize_speaker_mode(mode: Any) -> str:
-  raw = str(mode or "auto").strip().lower()
-  if raw in {"none", "off", "disabled", "no_speaker", "nospeaker", "no-speaker"}:
-    return "none"
-  if raw == "fixed":
-    return "fixed"
-  return "auto"
-
-
 def _diarization_enabled(*, speaker_mode: Any) -> bool:
-  return _normalize_speaker_mode(speaker_mode) != "none"
+  return normalize_speaker_mode(speaker_mode) != "none"
 
 
-def phase_order_for_job(*, topics_enabled: bool, speaker_mode: str) -> list[str]:
-  order = [*PHASE_ORDER_BASE]
+def phase_order_for_job(*, speaker_mode: str) -> list[str]:
+  order = [
+    "whisperx_prepare",
+    "whisperx_transcribe",
+    "whisperx_align",
+  ]
   if _diarization_enabled(speaker_mode=speaker_mode):
-    order.insert(4, "whisperx_diarize")
-  order.append(_phase_name_for_topics(topics_enabled))
+    order.append("whisperx_diarize")
   return order
 
 
@@ -95,20 +75,19 @@ def build_prediction(
   *,
   runs_path: Path,
   hardware_key: str,
-  topics_enabled: bool,
   speaker_mode: str,
-  snippet_seconds: int,
+  audio_duration_s: int,
 ) -> ProgressPrediction:
-  phase_order = phase_order_for_job(topics_enabled=topics_enabled, speaker_mode=speaker_mode)
-  snippet_seconds = max(1, int(snippet_seconds))
-  norm_mode = _normalize_speaker_mode(speaker_mode)
+  phase_order = phase_order_for_job(speaker_mode=speaker_mode)
+  audio_duration_s = max(1, int(audio_duration_s))
+  norm_mode = normalize_speaker_mode(speaker_mode)
 
   all_done = _iter_done_records(runs_path)
   candidates = []
   for r in all_done:
     if str(r.get("hardware_key", "")) != str(hardware_key):
       continue
-    if _normalize_speaker_mode(r.get("speaker_mode", "auto")) != norm_mode:
+    if normalize_speaker_mode(r.get("speaker_mode", "auto")) != norm_mode:
       continue
     candidates.append(r)
 
@@ -119,31 +98,29 @@ def build_prediction(
   if n < 5:
     hints.append("low_sample_n")
 
-  # For audio-dependent phases, model by seconds-per-audio-second.
   expected: dict[str, float] = {}
   used_defaults = False
 
-  # Snippet-range extrapolation hint (based on matching hardware only).
   if n > 0:
-    snips = [int(r.get("snippet_seconds", 0)) for r in candidates if int(r.get("snippet_seconds", 0)) > 0]
-    if snips and (snippet_seconds < min(snips) or snippet_seconds > max(snips)):
-      hints.append("extrapolated_snippet_length")
+    durs = [int(r.get("audio_duration_s", 0)) for r in candidates if int(r.get("audio_duration_s", 0)) > 0]
+    if durs and (audio_duration_s < min(durs) or audio_duration_s > max(durs)):
+      hints.append("extrapolated_audio_duration")
 
   for phase in phase_order:
     if phase in AUDIO_PHASES:
       rates: list[float] = []
       for r in candidates:
         sec = _safe_float((r.get("phase_seconds") or {}).get(phase))
-        snip = _safe_float(r.get("snippet_seconds"))
-        if sec is None or snip is None or snip <= 0:
+        dur = _safe_float(r.get("audio_duration_s"))
+        if sec is None or dur is None or dur <= 0:
           continue
         if sec < 0:
           continue
-        rates.append(sec / snip)
+        rates.append(sec / dur)
       if rates:
-        exp = median(rates) * snippet_seconds
+        exp = median(rates) * audio_duration_s
       else:
-        exp = DEFAULTS_SECONDS.get(phase, 1.0) * (snippet_seconds / 900.0)
+        exp = DEFAULTS_SECONDS.get(phase, 1.0) * (audio_duration_s / 900.0)
         used_defaults = True
       expected[phase] = max(0.0, float(exp))
       continue
@@ -165,12 +142,10 @@ def build_prediction(
     hints.append("phase_defaults")
 
   total = sum(expected.get(p, 0.0) for p in phase_order)
-  # Confidence is sample-count based for now; capped so UI can still show uncertainty.
   confidence = min(0.95, max(0.05, n / 20.0))
 
-  # keep stable order, no duplicates
   ordered_hints: list[str] = []
-  for h in ("cold_start", "low_sample_n", "extrapolated_snippet_length", "phase_defaults"):
+  for h in ("cold_start", "low_sample_n", "extrapolated_audio_duration", "phase_defaults"):
     if h in hints and h not in ordered_hints:
       ordered_hints.append(h)
 
