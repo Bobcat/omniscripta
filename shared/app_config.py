@@ -124,7 +124,7 @@ def get_config() -> dict[str, Any]:
 
 
 def get_setting(path: str, default: T | None = None) -> T | Any:
-    """Get a setting by dot-notation path (e.g. 'asr_pool.runner_slots').
+    """Get a setting by dot-notation path (e.g. 'service.port').
 
     Environment overrides are only applied for secret-like keys.
     """

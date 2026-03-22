@@ -6,8 +6,9 @@ set -euo pipefail
 
 API_UNIT="transcribe-api.service"
 ASR_UNIT="transcribe-asr-pool.service"
-UPLOAD_WORKER_UNIT="transcribe-worker-upload.service"
-LIVE_WORKER_UNIT="transcribe-worker-live.service"
+BATCH_WORKER_UNIT="asr-worker-batch.service"
+LIVE_WORKER_UNIT="asr-worker-live.service"
+LLM_WORKER_UNIT="llm-worker.service"
 TABBY_TUNNEL_UNIT="transcribe-tabby-tunnel.service"
 JANITOR_TIMER_UNIT="transcribe-demo-jobs-janitor.timer"
 
@@ -89,15 +90,16 @@ log "Waiting for ASR pool readiness (warm startup may take time)..."
 wait_for_http "$ASR_POOL_URL" "$ASR_POOL_READY_TIMEOUT_S" "ASR pool readiness" "200,401"
 
 log "Restarting workers + tabby tunnel + janitor timer..."
-systemctl_live restart "$UPLOAD_WORKER_UNIT" "$LIVE_WORKER_UNIT" "$TABBY_TUNNEL_UNIT" "$JANITOR_TIMER_UNIT"
+systemctl_live restart "$BATCH_WORKER_UNIT" "$LIVE_WORKER_UNIT" "$LLM_WORKER_UNIT" "$TABBY_TUNNEL_UNIT" "$JANITOR_TIMER_UNIT"
 
 echo
 echo "[live-restart] Service status:"
 print_status \
   "$API_UNIT" \
   "$ASR_UNIT" \
-  "$UPLOAD_WORKER_UNIT" \
+  "$BATCH_WORKER_UNIT" \
   "$LIVE_WORKER_UNIT" \
+  "$LLM_WORKER_UNIT" \
   "$TABBY_TUNNEL_UNIT" \
   "$JANITOR_TIMER_UNIT"
 

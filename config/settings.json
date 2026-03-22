@@ -22,7 +22,6 @@
     "diarize_speaker_mode": "fixed",
     "diarize_min_speakers": 1,
     "diarize_max_speakers": 4,
-    "calibration_seconds": [60, 180, 300, 480, 600, 1200, 1800, 2700, 3600],
     
     "rolling": {
       "min_infer_audio_ms": 500,
@@ -35,7 +34,7 @@
       "buffer_trim_drop_ms": 20000,
       "min_new_audio_ms": 500,
       "pacing": {
-        "base_emit_ms_per_slot1": 250,
+        "base_emit_ms": 250,
         "startup": {
           "duration_ms": 1200,
           "emit_ms": 100,
@@ -77,7 +76,6 @@
     "token": "",
     "root_path": "",
     "work_root": "data/asr_pool",
-    "runner_slots": 2,
     "warm_start_enabled": true,
     "warm_start_timeout_s": 180,
     "warm_prewarm_timeout_s": 180,
@@ -135,10 +133,14 @@
     }
   },
   
+  "jobs": {
+    "upload_prep_base": "data/jobs/upload_prep",
+    "upload_worker_base": "data/jobs/upload_worker",
+    "live_worker_base": "data/jobs/live_worker"
+  },
+
   "janitor": {
     "enabled": true,
-    "jobs_base": "data/demo_jobs",
-    "live_kinds": ["live_chunk"],
     "min_age_s": 3600,
     "max_per_state": 3000,
     "dry_run": false,
@@ -148,17 +150,23 @@
   },
   
   "worker": {
+    "queue_base": "data/jobs/upload_worker",
+    "queue_name": "",
+    "consumer_id": "",
+    "max_outstanding_requests": 1,
     "progress_db_dir": "data/progress_db",
     "progress_runs_path": "data/progress_db/runs_v1.jsonl",
     "host_id": "",
     "instance": "1",
-    "hardware_key": "",
-    "live": {
-      "max_outstanding_requests": 4
-    },
-    "upload": {
-      "max_outstanding_requests": 1
-    }
+    "hardware_key": ""
+  },
+
+  "upload_coordinator": {
+    "enabled": true,
+    "poll_interval_s": 0.5,
+    "idle_log_interval_s": 30.0,
+    "llm_wait_poll_s": 0.5,
+    "llm_wait_timeout_s": 1800.0
   },
 
   "worker_events": {
@@ -188,7 +196,7 @@
     "token_estimator": "chars_div4",
     "enabled": true,
     "prompt_id": "topics_v1",
-    "prompt_path": "prompts/simple_prompt5.txt",
+    "prompt_path": "portal-api/upload/prompts/simple_prompt5.txt",
     "model": "matatonic_Mistral-Small-24B-Instruct-2501-4.0bpw-exl2",
     "generation": {
       "max_tokens": 2048,
@@ -225,8 +233,7 @@
     "retry_attempts": 3,
     "retry_base_delay_s": 0.2,
     "retry_max_delay_s": 2.0,
-    "retry_jitter_s": 0.1,
-    "blob_enabled": true
+    "retry_jitter_s": 0.1
   },
   
   "asr_blob": {

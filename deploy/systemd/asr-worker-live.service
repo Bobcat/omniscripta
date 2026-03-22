@@ -1,0 +1,22 @@
+[Unit]
+Description=ASR Worker Live
+After=network.target
+
+[Service]
+User=gunnar
+Group=gunnar
+WorkingDirectory=/srv/transcribe/asr-worker
+ExecStartPre=/usr/bin/mkdir -p /srv/transcribe/data/demo_jobs/inbox /srv/transcribe/data/demo_jobs/running /srv/transcribe/data/demo_jobs/done /srv/transcribe/data/demo_jobs/error
+Environment=ASR_WORKER_QUEUE_BASE=/srv/transcribe/data/jobs/live_worker
+Environment=ASR_WORKER_MAX_OUTSTANDING=4
+Environment=ASR_WORKER_CONSUMER_ID=worker-live@1
+ExecStart=/srv/transcribe/worker/.venv/bin/python /srv/transcribe/asr-worker/worker_daemon.py
+Restart=always
+RestartSec=2
+Environment="WHISPERX_BIN=/home/gunnar/whisperx/.venv/bin/whisperx"
+EnvironmentFile=/etc/transcribe/transcribe.env
+Nice=5
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target

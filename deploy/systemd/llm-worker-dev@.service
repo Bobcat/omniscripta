@@ -1,0 +1,17 @@
+# User unit (systemctl --user). Generic LLM worker template.
+[Unit]
+Description=LLM Worker Dev (%i)
+
+[Service]
+Type=simple
+WorkingDirectory=/home/gunnar/projects/transcribe-dev/llm-worker
+ExecStartPre=/usr/bin/mkdir -p /home/gunnar/projects/transcribe-dev/data/llm_tasks/inbox /home/gunnar/projects/transcribe-dev/data/llm_tasks/running /home/gunnar/projects/transcribe-dev/data/llm_tasks/done /home/gunnar/projects/transcribe-dev/data/llm_tasks/error
+ExecStart=/srv/transcribe/worker/.venv/bin/python /home/gunnar/projects/transcribe-dev/llm-worker/llm_worker_daemon.py
+Restart=always
+RestartSec=2
+EnvironmentFile=-%h/.config/transcribe/dev.env
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=default.target

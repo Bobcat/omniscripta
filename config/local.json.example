@@ -8,7 +8,6 @@
   "asr_pool": {
     "base_url": "http://127.0.0.1:18090",
     "status_url": "http://127.0.0.1:18090/asr/v1/pool",
-    "runner_slots": 1,
     "work_root": "/home/gunnar/projects/transcribe-dev/data/asr_pool",
     
     "timeouts": {
@@ -27,8 +26,15 @@
     "live_rolling_poll_ms": 250
   },
   
-  "janitor": {
-    "jobs_base": "data/demo_jobs"
+  "jobs": {
+    "upload_prep_base": "data/jobs/upload_prep",
+    "upload_worker_base": "data/jobs/upload_worker",
+    "live_worker_base": "data/jobs/live_worker"
+  },
+
+  "worker": {
+    "queue_base": "data/jobs/upload_worker",
+    "max_outstanding_requests": 1
   },
   
   "frontend_dev": {

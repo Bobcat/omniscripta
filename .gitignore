@@ -2,7 +2,6 @@
 __pycache__/
 *.pyc
 .venv/
-.venvs/
 
 # Runtime config
 config/local.json
@@ -27,7 +26,6 @@ data/
 *.code-workspace
 
 # Local agent/worktree artifacts
-.snapshots/
 AGENTS.md
-docs/opus_4_6_reviews/
 docs/
+tests/
