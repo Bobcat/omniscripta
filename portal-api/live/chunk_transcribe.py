@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from live._util import _normalize_optional_language
 from jobs.queue_fs import find_job_dir, init_job_in_inbox
 from queue_roots import LIVE_WORKER_QUEUE
 from shared.app_config import get_setting
@@ -30,13 +31,6 @@ def _safe_session_id(session_id: str) -> str:
     if not text:
         return "unknown"
     return "".join(ch if (ch.isalnum() or ch in {"-", "_", "."}) else "_" for ch in text)
-
-
-def _normalize_optional_language(value: Any) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None
 
 
 def _read_json(path: Path) -> dict[str, Any]:

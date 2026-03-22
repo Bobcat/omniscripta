@@ -6,7 +6,7 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import Any, Dict
+from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
@@ -30,7 +30,7 @@ def _job_dir(job_id: str) -> Path:
     raise HTTPException(status_code=404, detail="Job not found")
 
 
-def _read_job_status(job_dir: Path) -> Dict[str, Any]:
+def _read_job_status(job_dir: Path) -> dict[str, Any]:
     status_path = job_dir / "status.json"
     if not status_path.exists():
         raise HTTPException(status_code=404, detail="Job status not found")
@@ -40,7 +40,7 @@ def _read_job_status(job_dir: Path) -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=f"Failed to read status.json: {e!r}")
 
 
-def _project_upload_ui_status(status: Dict[str, Any]) -> Dict[str, Any]:
+def _project_upload_ui_status(status: dict[str, Any]) -> dict[str, Any]:
     """
     Worker now writes done as soon as ASR is done.
     For upload UI, keep showing an in-progress topics phase until topics_status is present.
@@ -96,7 +96,7 @@ def _request_param(request: Request, key: str) -> str:
     return ""
 
 
-def _parse_speaker_options(speakers: str) -> Dict[str, Any]:
+def _parse_speaker_options(speakers: str) -> dict[str, Any]:
     speaker_value = (speakers or "none").strip().lower()
     if speaker_value in NO_SPEAKER_VALUES:
         return {
@@ -147,10 +147,10 @@ def create_demo_job(
     file: UploadFile = File(...),
     language: str = Form("nl"),
     speakers: str = Form("none"),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     orig_name = Path(file.filename or "").name or "upload.bin"
 
-    base_options: Dict[str, Any] = {
+    base_options: dict[str, Any] = {
         "language": language,
         **_parse_speaker_options(speakers),
     }
@@ -215,7 +215,7 @@ def create_demo_job(
 
 
 @router.get("/demo/jobs/{job_id}")
-def get_demo_job(job_id: str) -> Dict[str, Any]:
+def get_demo_job(job_id: str) -> dict[str, Any]:
     return _project_upload_ui_status(_read_job_status(_job_dir(job_id)))
 
 

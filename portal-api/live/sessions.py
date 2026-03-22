@@ -156,6 +156,252 @@ class LiveSessionManager:
         self._lock = threading.Lock()
         self._stats_log_dir = (_repo_root() / "data" / "live_stats").resolve()
 
+    @staticmethod
+    def _copy_commit_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [dict(row) for row in rows]
+
+    @staticmethod
+    def _count_commit_results(rows: list[dict[str, Any]], *, state: str) -> int:
+        return max(0, sum(1 for row in rows if str(row.get("state") or "") == state))
+
+    @staticmethod
+    def _final_covered_ms(
+        final_segments: list[dict[str, Any]],
+        chunk_rows: list[dict[str, Any]],
+    ) -> int:
+        final_covered_ms = 0
+        for seg in final_segments:
+            if not isinstance(seg, dict):
+                continue
+            try:
+                t1 = int(seg.get("t1_ms") or 0)
+            except Exception:
+                t1 = 0
+            if t1 > final_covered_ms:
+                final_covered_ms = t1
+        if final_covered_ms > 0:
+            return int(final_covered_ms)
+        for row in chunk_rows:
+            if str(row.get("state") or "") != "ready":
+                continue
+            try:
+                t1 = int(row.get("t1_ms") or 0)
+            except Exception:
+                t1 = 0
+            if t1 > final_covered_ms:
+                final_covered_ms = t1
+        return int(max(0, final_covered_ms))
+
+    @staticmethod
+    def _build_engine_runtime(
+        *,
+        preview_source: str,
+        recording_duration_ms: int,
+        final_covered_ms: int,
+        live_engine_runtime: dict[str, Any],
+    ) -> dict[str, Any]:
+        engine_runtime = {
+            "mode": "single_lane",
+            "preview_source": str(preview_source),
+            "uncommitted_audio_ms": int(max(0, int(recording_duration_ms) - int(final_covered_ms))),
+        }
+        extra_engine_runtime = dict(live_engine_runtime or {})
+        if extra_engine_runtime:
+            engine_runtime["engine_state"] = extra_engine_runtime
+        return engine_runtime
+
+    @staticmethod
+    def _merge_live_commit_row(existing: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
+        merged = dict(row)
+        if not merged["reason"]:
+            merged["reason"] = str(existing.get("reason") or "")
+        if merged["speech_frames"] is None and existing.get("speech_frames") is not None:
+            merged["speech_frames"] = int(max(0, int(existing.get("speech_frames") or 0)))
+        if merged["silence_frames_tail"] is None and existing.get("silence_frames_tail") is not None:
+            merged["silence_frames_tail"] = int(max(0, int(existing.get("silence_frames_tail") or 0)))
+        if merged["chunk_duration_ms"] is None and existing.get("chunk_duration_ms") is not None:
+            merged["chunk_duration_ms"] = int(max(0, int(existing.get("chunk_duration_ms") or 0)))
+        return merged
+
+    def _upsert_live_commit_row(self, sess: LiveSession, *, idx: int, row: dict[str, Any]) -> None:
+        for i, existing in enumerate(sess.live_commit_results):
+            try:
+                existing_idx = int(existing.get("chunk_index"))
+            except Exception:
+                existing_idx = -1
+            if existing_idx == idx:
+                sess.live_commit_results[i] = self._merge_live_commit_row(existing, row)
+                return
+        sess.live_commit_results.append(dict(row))
+        sess.live_commit_results.sort(key=lambda r: int(r.get("chunk_index") or 0))
+
+    def _sync_live_commit_counts(self, sess: LiveSession) -> None:
+        sess.chunks_done = self._count_commit_results(sess.live_commit_results, state="ready")
+        sess.chunks_failed = self._count_commit_results(sess.live_commit_results, state="error")
+
+    def _materialize_live_final_segments(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        fallback_chunk_index: int,
+    ) -> list[dict[str, Any]]:
+        appended_segments: list[dict[str, Any]] = []
+        if any(row.get("segments") for row in rows):
+            seg_counter = 0
+            for row in rows:
+                if str(row.get("state") or "") != "ready":
+                    continue
+                row_t0 = int(max(0, int(row.get("t0_ms") or 0)))
+                row_t1 = int(max(row_t0, int(row.get("t1_ms") or row_t0)))
+                row_segments = row.get("segments")
+                if isinstance(row_segments, list) and row_segments:
+                    for seg in row_segments:
+                        if not isinstance(seg, dict):
+                            continue
+                        seg_text = str(seg.get("text") or "").strip()
+                        if not seg_text:
+                            continue
+                        seg_t0 = int(max(0, int(seg.get("t0_ms") or row_t0)))
+                        seg_t1 = int(max(seg_t0, int(seg.get("t1_ms") or row_t1)))
+                        seg_counter += 1
+                        appended_segments.append(
+                            {
+                                "segment_id": str(seg.get("segment_id") or f"c{fallback_chunk_index:04d}s{seg_counter:04d}"),
+                                "text": seg_text,
+                                "t0_ms": seg_t0,
+                                "t1_ms": seg_t1,
+                                "speaker": str(seg.get("speaker") or "").strip(),
+                            }
+                        )
+                else:
+                    row_text = str(row.get("text") or "").strip()
+                    if row_text:
+                        seg_counter += 1
+                        appended_segments.append(
+                            {
+                                "segment_id": f"c{fallback_chunk_index:04d}",
+                                "text": row_text,
+                                "t0_ms": row_t0,
+                                "t1_ms": row_t1,
+                                "speaker": "",
+                            }
+                        )
+            return appended_segments
+
+        for row in rows:
+            if str(row.get("state") or "") != "ready":
+                continue
+            row_text = str(row.get("text") or "").strip()
+            if not row_text:
+                continue
+            idx2 = int(max(0, int(row.get("chunk_index") or 0)))
+            row_t0 = int(max(0, int(row.get("t0_ms") or 0)))
+            row_t1 = int(max(row_t0, int(row.get("t1_ms") or row_t0)))
+            appended_segments.append(
+                {
+                    "segment_id": f"c{idx2:04d}",
+                    "text": row_text,
+                    "t0_ms": row_t0,
+                    "t1_ms": row_t1,
+                    "speaker": "",
+                }
+            )
+        return appended_segments
+
+    def _build_live_result_snapshot(
+        self,
+        *,
+        session_id: str,
+        source: str,
+        live_engine: str,
+        recording_state: str = "",
+        close_reason: str = "",
+        state: str = "",
+        finalization_state: str,
+        batch_job_id: str,
+        recording_path: str,
+        recording_bytes: int,
+        recording_duration_ms: int,
+        chunks_total: int,
+        chunks_done: int,
+        chunks_failed: int,
+        transcript_revision: int,
+        final_segments: list[dict[str, Any]],
+        commit_results: list[dict[str, Any]],
+        preview_text: str,
+        preview_seq: int,
+        preview_audio_end_ms: int,
+        preview_updated_unix: float,
+        live_engine_runtime: dict[str, Any],
+        fixture_id: str,
+        fixture_version: str,
+        fixture_test_mode: str,
+        asr_language: str,
+        gpu_proxy_transcribe_s: float,
+        gpu_proxy_pipeline_s: float,
+    ) -> dict[str, Any]:
+        chunks = self._copy_commit_rows(commit_results)
+        chunk_debug = _live_commit_rows_debug_metrics(chunks)
+        preview_source = self._preview_source_for_engine(live_engine)
+        final_covered_ms = self._final_covered_ms(final_segments, chunks)
+        engine_runtime = self._build_engine_runtime(
+            preview_source=preview_source,
+            recording_duration_ms=recording_duration_ms,
+            final_covered_ms=final_covered_ms,
+            live_engine_runtime=live_engine_runtime,
+        )
+        payload = {
+            "session_id": str(session_id),
+            "source": str(source),
+            "live_engine": str(live_engine),
+            "finalization_state": str(finalization_state or ""),
+            "batch_job_id": str(batch_job_id or ""),
+            "recording_path": str(recording_path or ""),
+            "recording_bytes": int(max(0, recording_bytes)),
+            "recording_duration_ms": int(max(0, recording_duration_ms)),
+            "chunks_total": int(max(0, chunks_total)),
+            "chunks_done": int(max(0, chunks_done)),
+            "chunks_failed": int(max(0, chunks_failed)),
+            "chunks_pending": int(max(0, chunks_total - chunks_done - chunks_failed)),
+            "transcript_revision": int(max(0, transcript_revision)),
+            "final_segments": self._copy_commit_rows(final_segments),
+            "final_segments_count": len(final_segments),
+            "final_covered_ms": int(max(0, final_covered_ms)),
+            "chunk_results": chunks,
+            "chunk_results_count": len(chunks),
+            "chunk_reason_counts": dict(chunk_debug.get("chunk_reason_counts") or {}),
+            "chunk_results_rows_count": int(max(0, int(chunk_debug.get("chunk_results_rows_count") or 0))),
+            "chunk_results_unique_count": int(max(0, int(chunk_debug.get("chunk_results_unique_count") or 0))),
+            "chunk_results_duplicate_index_rows": int(
+                max(0, int(chunk_debug.get("chunk_results_duplicate_index_rows") or 0))
+            ),
+            "chunk_results_invalid_index_rows": int(max(0, int(chunk_debug.get("chunk_results_invalid_index_rows") or 0))),
+            "preview": {
+                "text": str(preview_text or ""),
+                "source": str(preview_source),
+                "preview_seq": int(preview_seq),
+                "audio_end_ms": int(max(0, int(preview_audio_end_ms or 0))),
+                "updated_at_utc": (
+                    _utc_iso(preview_updated_unix)
+                    if float(preview_updated_unix or 0.0) > 0
+                    else ""
+                ),
+            },
+            "engine_runtime": engine_runtime,
+            "fixture_id": str(fixture_id or ""),
+            "fixture_version": str(fixture_version or ""),
+            "fixture_test_mode": str(fixture_test_mode or ""),
+            "asr_language": str(asr_language or ""),
+            "gpu_proxy_transcribe_s": round(float(max(0.0, gpu_proxy_transcribe_s)), 3),
+            "gpu_proxy_pipeline_s": round(float(max(0.0, gpu_proxy_pipeline_s)), 3),
+        }
+        if source == "active":
+            payload["state"] = str(state or "")
+            payload["recording_state"] = str(recording_state or "")
+        else:
+            payload["close_reason"] = str(close_reason or "")
+        return payload
+
     def _new_session_id(self) -> str:
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         return f"live_{ts}_{secrets.token_hex(4)}"
@@ -489,39 +735,12 @@ class LiveSessionManager:
                 "silence_frames_tail": safe_silence_frames_tail,
                 "chunk_duration_ms": safe_chunk_duration_ms,
             }
-            replaced = False
-            for i, existing in enumerate(sess.live_commit_results):
-                try:
-                    existing_idx = int(existing.get("chunk_index"))
-                except Exception:
-                    existing_idx = -1
-                if existing_idx == idx:
-                    if not row["reason"]:
-                        row["reason"] = str(existing.get("reason") or "")
-                    if row["speech_frames"] is None and existing.get("speech_frames") is not None:
-                        row["speech_frames"] = int(max(0, int(existing.get("speech_frames") or 0)))
-                    if row["silence_frames_tail"] is None and existing.get("silence_frames_tail") is not None:
-                        row["silence_frames_tail"] = int(max(0, int(existing.get("silence_frames_tail") or 0)))
-                    if row["chunk_duration_ms"] is None and existing.get("chunk_duration_ms") is not None:
-                        row["chunk_duration_ms"] = int(max(0, int(existing.get("chunk_duration_ms") or 0)))
-                    sess.live_commit_results[i] = row
-                    replaced = True
-                    break
-            if not replaced:
-                sess.live_commit_results.append(row)
-                sess.live_commit_results.sort(key=lambda r: int(r.get("chunk_index") or 0))
+            self._upsert_live_commit_row(sess, idx=idx, row=row)
 
             sess.chunks_total = max(int(sess.chunks_total), idx + 1)
             sess.chunk_index_next = max(int(sess.chunk_index_next), idx + 1)
             if safe_state == "ready":
-                sess.chunks_done = max(
-                    0,
-                    sum(1 for r in sess.live_commit_results if str(r.get("state") or "") == "ready"),
-                )
-                sess.chunks_failed = max(
-                    0,
-                    sum(1 for r in sess.live_commit_results if str(r.get("state") or "") == "error"),
-                )
+                self._sync_live_commit_counts(sess)
                 # Keep preview-clear coupled to the ready-commit mutation.
                 # This makes commit + preview-clear an atomic snapshot update.
                 sess.live_preview_text = ""
@@ -529,77 +748,12 @@ class LiveSessionManager:
                 sess.live_preview_audio_end_ms = 0
                 sess.live_preview_updated_unix = 0.0
             elif safe_state == "error":
-                sess.chunks_failed = max(
-                    0,
-                    sum(1 for r in sess.live_commit_results if str(r.get("state") or "") == "error"),
-                )
-                sess.chunks_done = max(
-                    0,
-                    sum(1 for r in sess.live_commit_results if str(r.get("state") or "") == "ready"),
-                )
+                self._sync_live_commit_counts(sess)
 
-            appended_segments: list[dict[str, Any]] = []
-            if any(r.get("segments") for r in sess.live_commit_results):
-                seg_counter = 0
-                for r in sess.live_commit_results:
-                    if str(r.get("state") or "") != "ready":
-                        continue
-                    row_t0 = int(max(0, int(r.get("t0_ms") or 0)))
-                    row_t1 = int(max(row_t0, int(r.get("t1_ms") or row_t0)))
-                    row_segments = r.get("segments")
-                    if isinstance(row_segments, list) and row_segments:
-                        for seg in row_segments:
-                            if not isinstance(seg, dict):
-                                continue
-                            seg_text = str(seg.get("text") or "").strip()
-                            if not seg_text:
-                                continue
-                            seg_t0 = int(max(0, int(seg.get("t0_ms") or row_t0)))
-                            seg_t1 = int(max(seg_t0, int(seg.get("t1_ms") or row_t1)))
-                            seg_counter += 1
-                            appended_segments.append(
-                                {
-                                    "segment_id": str(seg.get("segment_id") or f"c{idx:04d}s{seg_counter:04d}"),
-                                    "text": seg_text,
-                                    "t0_ms": seg_t0,
-                                    "t1_ms": seg_t1,
-                                    "speaker": str(seg.get("speaker") or "").strip(),
-                                }
-                            )
-                    else:
-                        row_text = str(r.get("text") or "").strip()
-                        if row_text:
-                            seg_counter += 1
-                            appended_segments.append(
-                                {
-                                    "segment_id": f"c{idx:04d}",
-                                    "text": row_text,
-                                    "t0_ms": row_t0,
-                                    "t1_ms": row_t1,
-                                    "speaker": "",
-                                }
-                            )
-            else:
-                for r in sess.live_commit_results:
-                    if str(r.get("state") or "") != "ready":
-                        continue
-                    row_text = str(r.get("text") or "").strip()
-                    if not row_text:
-                        continue
-                    idx2 = int(max(0, int(r.get("chunk_index") or 0)))
-                    row_t0 = int(max(0, int(r.get("t0_ms") or 0)))
-                    row_t1 = int(max(row_t0, int(r.get("t1_ms") or row_t0)))
-                    appended_segments.append(
-                        {
-                            "segment_id": f"c{idx2:04d}",
-                            "text": row_text,
-                            "t0_ms": row_t0,
-                            "t1_ms": row_t1,
-                            "speaker": "",
-                        }
-                    )
-
-            sess.live_final_segments = appended_segments
+            sess.live_final_segments = self._materialize_live_final_segments(
+                sess.live_commit_results,
+                fallback_chunk_index=idx,
+            )
             sess.live_transcript_revision += 1
             return self._live_result_snapshot_locked(sess)
 
@@ -799,163 +953,66 @@ class LiveSessionManager:
         }
 
     def _live_result_snapshot_locked(self, sess: LiveSession) -> dict[str, Any]:
-        chunks = [dict(r) for r in sess.live_commit_results]
-        chunk_debug = _live_commit_rows_debug_metrics(chunks)
-        live_engine = str(sess.live_engine or "rolling_context")
-        preview_source = self._preview_source_for_engine(live_engine)
-        preview_text = str(sess.live_preview_text or "").strip()
-        final_covered_ms = 0
-        for seg in sess.live_final_segments:
-            if not isinstance(seg, dict):
-                continue
-            try:
-                t1 = int(seg.get("t1_ms") or 0)
-            except Exception:
-                t1 = 0
-            if t1 > final_covered_ms:
-                final_covered_ms = t1
-        if final_covered_ms <= 0:
-            for r in chunks:
-                if str(r.get("state") or "") != "ready":
-                    continue
-                try:
-                    t1 = int(r.get("t1_ms") or 0)
-                except Exception:
-                    t1 = 0
-                if t1 > final_covered_ms:
-                    final_covered_ms = t1
-        engine_runtime = {
-            "mode": "single_lane",
-            "preview_source": str(preview_source),
-            "uncommitted_audio_ms": int(max(0, int(sess.recording_duration_ms) - int(final_covered_ms))),
-        }
-        extra_engine_runtime = dict(sess.live_engine_runtime or {})
-        if extra_engine_runtime:
-            engine_runtime["engine_state"] = extra_engine_runtime
-        return {
-            "session_id": str(sess.session_id),
-            "source": "active",
-            "live_engine": live_engine,
-            "state": str(sess.state or ""),
-            "recording_state": str(sess.recording_state or ""),
-            "finalization_state": str(sess.finalization_state or ""),
-            "batch_job_id": str(sess.batch_job_id or ""),
-            "recording_path": str(sess.recording_path or ""),
-            "recording_bytes": int(max(0, sess.recording_bytes)),
-            "recording_duration_ms": int(max(0, sess.recording_duration_ms)),
-            "chunks_total": int(max(0, sess.chunks_total)),
-            "chunks_done": int(max(0, sess.chunks_done)),
-            "chunks_failed": int(max(0, sess.chunks_failed)),
-            "chunks_pending": int(max(0, sess.chunks_total - sess.chunks_done - sess.chunks_failed)),
-            "transcript_revision": int(max(0, sess.live_transcript_revision)),
-            "final_segments": [dict(seg) for seg in sess.live_final_segments],
-            "final_segments_count": len(sess.live_final_segments),
-            "final_covered_ms": int(max(0, final_covered_ms)),
-            "chunk_results": chunks,
-            "chunk_results_count": len(chunks),
-            "chunk_reason_counts": dict(chunk_debug.get("chunk_reason_counts") or {}),
-            "chunk_results_rows_count": int(max(0, int(chunk_debug.get("chunk_results_rows_count") or 0))),
-            "chunk_results_unique_count": int(max(0, int(chunk_debug.get("chunk_results_unique_count") or 0))),
-            "chunk_results_duplicate_index_rows": int(
-                max(0, int(chunk_debug.get("chunk_results_duplicate_index_rows") or 0))
-            ),
-            "chunk_results_invalid_index_rows": int(max(0, int(chunk_debug.get("chunk_results_invalid_index_rows") or 0))),
-            "preview": {
-                "text": str(preview_text or ""),
-                "source": str(preview_source),
-                "preview_seq": int(max(-1, int(sess.live_preview_seq))),
-                "audio_end_ms": int(max(0, int(sess.live_preview_audio_end_ms or 0))),
-                "updated_at_utc": (
-                    _utc_iso(sess.live_preview_updated_unix)
-                    if float(sess.live_preview_updated_unix or 0.0) > 0
-                    else ""
-                ),
-            },
-            "engine_runtime": engine_runtime,
-            "fixture_id": str(sess.fixture_id or ""),
-            "fixture_version": str(sess.fixture_version or ""),
-            "fixture_test_mode": str(sess.fixture_test_mode or ""),
-            "asr_language": str(sess.asr_language or ""),
-            "gpu_proxy_transcribe_s": round(float(max(0.0, sess.gpu_proxy_transcribe_s)), 3),
-            "gpu_proxy_pipeline_s": round(float(max(0.0, sess.gpu_proxy_pipeline_s)), 3),
-        }
+        return self._build_live_result_snapshot(
+            session_id=str(sess.session_id),
+            source="active",
+            live_engine=str(sess.live_engine or "rolling_context"),
+            state=str(sess.state or ""),
+            recording_state=str(sess.recording_state or ""),
+            finalization_state=str(sess.finalization_state or ""),
+            batch_job_id=str(sess.batch_job_id or ""),
+            recording_path=str(sess.recording_path or ""),
+            recording_bytes=int(max(0, sess.recording_bytes)),
+            recording_duration_ms=int(max(0, sess.recording_duration_ms)),
+            chunks_total=int(max(0, sess.chunks_total)),
+            chunks_done=int(max(0, sess.chunks_done)),
+            chunks_failed=int(max(0, sess.chunks_failed)),
+            transcript_revision=int(max(0, sess.live_transcript_revision)),
+            final_segments=sess.live_final_segments,
+            commit_results=sess.live_commit_results,
+            preview_text=str(sess.live_preview_text or "").strip(),
+            preview_seq=int(max(-1, int(sess.live_preview_seq))),
+            preview_audio_end_ms=int(max(0, int(sess.live_preview_audio_end_ms or 0))),
+            preview_updated_unix=float(sess.live_preview_updated_unix or 0.0),
+            live_engine_runtime=dict(sess.live_engine_runtime or {}),
+            fixture_id=str(sess.fixture_id or ""),
+            fixture_version=str(sess.fixture_version or ""),
+            fixture_test_mode=str(sess.fixture_test_mode or ""),
+            asr_language=str(sess.asr_language or ""),
+            gpu_proxy_transcribe_s=float(max(0.0, sess.gpu_proxy_transcribe_s)),
+            gpu_proxy_pipeline_s=float(max(0.0, sess.gpu_proxy_pipeline_s)),
+        )
 
     def _live_archive_result_snapshot_locked(self, arc: ClosedSessionArchive) -> dict[str, Any]:
-        chunks = [dict(r) for r in arc.live_commit_results]
-        chunk_debug = _live_commit_rows_debug_metrics(chunks)
-        live_engine = str(arc.live_engine or "rolling_context")
-        preview_source = self._preview_source_for_engine(live_engine)
         final_segments_src = arc.live_final_segments or arc.final_segments
-        final_covered_ms = 0
-        for seg in final_segments_src:
-            if not isinstance(seg, dict):
-                continue
-            try:
-                t1 = int(seg.get("t1_ms") or 0)
-            except Exception:
-                t1 = 0
-            if t1 > final_covered_ms:
-                final_covered_ms = t1
-        if final_covered_ms <= 0:
-            for r in chunks:
-                if str(r.get("state") or "") != "ready":
-                    continue
-                try:
-                    t1 = int(r.get("t1_ms") or 0)
-                except Exception:
-                    t1 = 0
-                if t1 > final_covered_ms:
-                    final_covered_ms = t1
-        engine_runtime = {
-            "mode": "single_lane",
-            "preview_source": str(preview_source),
-            "uncommitted_audio_ms": int(max(0, int(arc.recording_duration_ms) - int(final_covered_ms))),
-        }
-        extra_engine_runtime = dict(arc.live_engine_runtime or {})
-        if extra_engine_runtime:
-            engine_runtime["engine_state"] = extra_engine_runtime
-        return {
-            "session_id": str(arc.session_id),
-            "source": "archive",
-            "live_engine": live_engine,
-            "close_reason": str(arc.close_reason or ""),
-            "finalization_state": str(arc.finalization_state or ""),
-            "batch_job_id": str(arc.batch_job_id or ""),
-            "recording_path": str(arc.recording_path or ""),
-            "recording_bytes": int(max(0, arc.recording_bytes)),
-            "recording_duration_ms": int(max(0, arc.recording_duration_ms)),
-            "chunks_total": int(max(0, arc.chunks_total)),
-            "chunks_done": int(max(0, arc.chunks_done)),
-            "chunks_failed": int(max(0, arc.chunks_failed)),
-            "chunks_pending": int(max(0, arc.chunks_total - arc.chunks_done - arc.chunks_failed)),
-            "transcript_revision": int(max(0, arc.live_transcript_revision or arc.transcript_revision)),
-            "final_segments": [dict(seg) for seg in final_segments_src],
-            "final_segments_count": len(final_segments_src),
-            "final_covered_ms": int(max(0, final_covered_ms)),
-            "chunk_results": chunks,
-            "chunk_results_count": len(chunks),
-            "chunk_reason_counts": dict(chunk_debug.get("chunk_reason_counts") or {}),
-            "chunk_results_rows_count": int(max(0, int(chunk_debug.get("chunk_results_rows_count") or 0))),
-            "chunk_results_unique_count": int(max(0, int(chunk_debug.get("chunk_results_unique_count") or 0))),
-            "chunk_results_duplicate_index_rows": int(
-                max(0, int(chunk_debug.get("chunk_results_duplicate_index_rows") or 0))
-            ),
-            "chunk_results_invalid_index_rows": int(max(0, int(chunk_debug.get("chunk_results_invalid_index_rows") or 0))),
-            "preview": {
-                "text": "",
-                "source": str(preview_source),
-                "preview_seq": -1,
-                "audio_end_ms": 0,
-                "updated_at_utc": "",
-            },
-            "engine_runtime": engine_runtime,
-            "fixture_id": str(arc.fixture_id or ""),
-            "fixture_version": str(arc.fixture_version or ""),
-            "fixture_test_mode": str(arc.fixture_test_mode or ""),
-            "asr_language": str(arc.asr_language or ""),
-            "gpu_proxy_transcribe_s": round(float(max(0.0, arc.gpu_proxy_transcribe_s)), 3),
-            "gpu_proxy_pipeline_s": round(float(max(0.0, arc.gpu_proxy_pipeline_s)), 3),
-        }
+        return self._build_live_result_snapshot(
+            session_id=str(arc.session_id),
+            source="archive",
+            close_reason=str(arc.close_reason or ""),
+            live_engine=str(arc.live_engine or "rolling_context"),
+            finalization_state=str(arc.finalization_state or ""),
+            batch_job_id=str(arc.batch_job_id or ""),
+            recording_path=str(arc.recording_path or ""),
+            recording_bytes=int(max(0, arc.recording_bytes)),
+            recording_duration_ms=int(max(0, arc.recording_duration_ms)),
+            chunks_total=int(max(0, arc.chunks_total)),
+            chunks_done=int(max(0, arc.chunks_done)),
+            chunks_failed=int(max(0, arc.chunks_failed)),
+            transcript_revision=int(max(0, arc.live_transcript_revision or arc.transcript_revision)),
+            final_segments=final_segments_src,
+            commit_results=arc.live_commit_results,
+            preview_text="",
+            preview_seq=-1,
+            preview_audio_end_ms=0,
+            preview_updated_unix=0.0,
+            live_engine_runtime=dict(arc.live_engine_runtime or {}),
+            fixture_id=str(arc.fixture_id or ""),
+            fixture_version=str(arc.fixture_version or ""),
+            fixture_test_mode=str(arc.fixture_test_mode or ""),
+            asr_language=str(arc.asr_language or ""),
+            gpu_proxy_transcribe_s=float(max(0.0, arc.gpu_proxy_transcribe_s)),
+            gpu_proxy_pipeline_s=float(max(0.0, arc.gpu_proxy_pipeline_s)),
+        )
 
     def metrics_snapshot(self) -> dict[str, Any]:
         now_unix = time.time()

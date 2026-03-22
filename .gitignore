@@ -28,3 +28,4 @@ data/
 # Local agent/worktree artifacts
 AGENTS.md
 docs/
+tests/

@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from upload._util import _read_json
+
 
 def _fmt_eta(seconds: float) -> str:
   s = max(0, int(round(float(seconds))))
@@ -40,12 +42,6 @@ def _timings_with_running_total(timings_text: str, running_total_s: float | None
   if not replaced:
     out.append(f"total={total:.2f}s")
   return " | ".join(out)
-
-
-def _read_json(p: Path) -> dict[str, Any]:
-  return json.loads(p.read_text(encoding="utf-8"))
-
-
 def _write_json(p: Path, obj: dict[str, Any]) -> None:
   p.parent.mkdir(parents=True, exist_ok=True)
   p.write_text(json.dumps(obj, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

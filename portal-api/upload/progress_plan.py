@@ -6,6 +6,8 @@ from pathlib import Path
 from statistics import median
 from typing import Any
 
+from upload._util import _normalize_speaker_mode, _safe_float
+
 
 # Upload-global prediction belongs to the upload use case.
 PHASE_ORDER_BASE = [
@@ -38,24 +40,8 @@ class ProgressPrediction:
   sample_count: int
 
 
-def _safe_float(v: Any) -> float | None:
-  try:
-    return float(v)
-  except Exception:
-    return None
-
-
 def _phase_name_for_topics(topics_enabled: bool) -> str:
   return "llm_topics" if topics_enabled else "llm_topics_skipped"
-
-
-def _normalize_speaker_mode(mode: Any) -> str:
-  raw = str(mode or "auto").strip().lower()
-  if raw in {"none", "off", "disabled", "no_speaker", "nospeaker", "no-speaker"}:
-    return "none"
-  if raw == "fixed":
-    return "fixed"
-  return "auto"
 
 
 def _diarization_enabled(*, speaker_mode: Any) -> bool:

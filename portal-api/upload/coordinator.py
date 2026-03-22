@@ -31,6 +31,7 @@ from shared.app_config import get_bool, get_float, get_setting, get_str
 from llm_queue_fs import init_task_in_inbox, DONE as LLM_DONE, ERROR as LLM_ERROR
 from upload.progress_plan import DEFAULTS_SECONDS, build_prediction
 from upload.snipping import make_snippet
+from upload._util import _normalize_speaker_mode, _read_json, _safe_float, _write_json_atomic
 from upload.status_io import _write_status
 from upload.speaker_lines import make_speaker_lines_from_srt
 from upload.chunk_speaker_lines import chunk_speaker_lines
@@ -39,28 +40,10 @@ from upload.topics_validate import validate_all_chunks
 from upload.topics_merge import merge_topics
 
 
-def _read_json(path: Path) -> dict[str, Any]:
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    return dict(raw) if isinstance(raw, dict) else {}
-
-
-def _safe_float(value: Any) -> float | None:
-    try:
-        return float(value)
-    except Exception:
-        return None
-
-
 def _append_log(path: Path, message: str) -> None:
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     with path.open("a", encoding="utf-8") as f:
         f.write(f"[{ts}] COORD {message}\n")
-
-
-def _write_json_atomic(path: Path, obj: dict[str, Any]) -> None:
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(obj, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
 
 
 def _pick_srt_path(*, job: JobPaths, status: dict[str, Any]) -> Path | None:
@@ -167,15 +150,6 @@ def _hardware_key(host_id: str) -> str:
     if host_id == "dc2":
         return "dc2-rtx5090-cuda"
     return f"{host_id}-unknown"
-
-
-def _normalize_speaker_mode(mode: Any) -> str:
-    raw = str(mode or "auto").strip().lower()
-    if raw in {"none", "off", "disabled", "no_speaker", "nospeaker", "no-speaker"}:
-        return "none"
-    if raw == "fixed":
-        return "fixed"
-    return "auto"
 
 
 class _SnippingProgressTracker:
