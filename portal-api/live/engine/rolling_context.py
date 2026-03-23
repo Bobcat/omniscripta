@@ -1650,7 +1650,12 @@ class RollingContextSession:
                 self._append_log("rolling_context_init_error", error=f"{type(e).__name__}: {e}")
 
             while True:
-                incoming = await websocket.receive()
+                try:
+                    incoming = await asyncio.wait_for(websocket.receive(), timeout=ctx["poll_interval_s"])
+                except asyncio.TimeoutError:
+                    # Keep draining/polling inference even when no websocket frames arrive.
+                    await self._process_rolling(force_poll=False, force_emit=False)
+                    continue
 
                 if incoming.get("type") == "websocket.disconnect":
                     rt.stop_reason = "client_disconnected"
