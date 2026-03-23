@@ -29,7 +29,7 @@ if str(_LLM_DIR) not in sys.path:
 
 from shared.app_config import get_bool, get_float, get_setting, get_str
 from upload._util import _normalize_speaker_mode, _read_json, _write_json_atomic
-from upload.pipeline.progress_plan import build_prediction
+from upload.pipeline.progress_plan import DEFAULTS_SECONDS, build_prediction
 from upload.pipeline.snipping import make_snippet
 from upload.status_io import _write_status
 from upload.topics.flow import TopicsFlow

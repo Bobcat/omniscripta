@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import json
+import os
+from urllib.error import URLError
+from urllib.request import urlopen
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
 
 from fastapi import APIRouter
+from fastapi.responses import HTMLResponse
 
 router = APIRouter()
 
@@ -163,9 +167,225 @@ def _load_ui_settings() -> Dict[str, Any]:
     }
 
 
+def _ops_launcher_html(*, pool_ops_url: str, worker_live_ops_url: str, worker_batch_ops_url: str) -> str:
+    safe_pool = str(pool_ops_url or "").strip()
+    safe_worker_live = str(worker_live_ops_url or "").strip()
+    safe_worker_batch = str(worker_batch_ops_url or "").strip()
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Service Operations</title>
+  <style>
+    :root {{
+      color-scheme: light;
+      --bg: #f6f7f9;
+      --card: #ffffff;
+      --text: #171717;
+      --muted: #5f6470;
+      --line: #d9dde5;
+      --accent: #0a66c2;
+    }}
+    body {{
+      margin: 0;
+      font-family: ui-sans-serif, -apple-system, Segoe UI, Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }}
+    main {{
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 18px;
+    }}
+    h1 {{ margin: 0 0 8px 0; font-size: 22px; }}
+    p {{ margin: 0 0 14px 0; color: var(--muted); }}
+    .meta {{
+      margin: 0 0 14px 0;
+      font-size: 13px;
+      color: var(--muted);
+    }}
+    .links {{
+      display: flex;
+      gap: 10px;
+      margin-bottom: 14px;
+      flex-wrap: wrap;
+    }}
+    a.button {{
+      display: inline-block;
+      text-decoration: none;
+      border: 1px solid #e2e6ed;
+      border-radius: 999px;
+      padding: 4px 9px;
+      background: #f3f5f9;
+      color: #5d6470;
+      font-size: 12px;
+      line-height: 1.2;
+    }}
+    a.button.primary {{
+      border-color: #e2e6ed;
+      color: #5d6470;
+    }}
+    .grid {{
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }}
+    .panel {{
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: var(--card);
+      overflow: hidden;
+      min-height: 0;
+    }}
+    .panel header {{
+      border-bottom: 1px solid var(--line);
+      padding: 10px 12px;
+      font-weight: 600;
+      font-size: 14px;
+    }}
+    iframe {{
+      width: 100%;
+      height: 760px;
+      border: 0;
+      background: #f6f7f9;
+      display: block;
+    }}
+    @media (max-width: 960px) {{
+      .grid {{ grid-template-columns: 1fr; }}
+    }}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Service Operations</h1>
+    <div id="meta" class="meta">Loading launcher metrics...</div>
+    <div class="links">
+      <a class="button primary" href="{safe_pool}" target="_blank" rel="noopener">Open ASR Pool /ops</a>
+      <a class="button primary" href="{safe_worker_live}" target="_blank" rel="noopener">Open ASR Worker Live /ops</a>
+      <a class="button primary" href="{safe_worker_batch}" target="_blank" rel="noopener">Open ASR Worker Batch /ops</a>
+    </div>
+    <div class="grid">
+      <section class="panel">
+        <header>ASR Pool</header>
+        <iframe src="{safe_pool}" title="ASR Pool ops"></iframe>
+      </section>
+      <section class="panel">
+        <header>ASR Worker Live</header>
+        <iframe src="{safe_worker_live}" title="ASR Worker live ops"></iframe>
+      </section>
+      <section class="panel">
+        <header>ASR Worker Batch</header>
+        <iframe src="{safe_worker_batch}" title="ASR Worker batch ops"></iframe>
+      </section>
+    </div>
+  </main>
+  <script>
+    async function refreshLauncherMeta() {{
+      const el = document.getElementById("meta");
+      try {{
+        const res = await fetch("./ops/metrics", {{ cache: "no-store" }});
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        const data = await res.json();
+        const s = data.summary || {{}};
+        const up = Number(s.services_up || 0);
+        const total = Number(s.services_total || 0);
+        const health = String(data.health || "unknown");
+        el.textContent = "Launcher health: " + health + " | services up: " + up + "/" + total + " | refreshed: " + new Date().toLocaleTimeString();
+      }} catch (err) {{
+        el.textContent = "Launcher metrics unavailable: " + err;
+      }}
+    }}
+    refreshLauncherMeta();
+    setInterval(refreshLauncherMeta, 5000);
+  </script>
+</body>
+</html>"""
+
+
+def _ops_service_probe(*, url: str, timeout_s: float = 1.5) -> Dict[str, Any]:
+    u = str(url or "").strip()
+    if not u:
+        return {"url": "", "ok": False, "status_code": None, "error": "missing_url", "elapsed_ms": None}
+    started = datetime.now(timezone.utc).timestamp()
+    try:
+        with urlopen(u, timeout=max(0.2, float(timeout_s))) as resp:
+            elapsed_ms = int((datetime.now(timezone.utc).timestamp() - started) * 1000.0)
+            return {
+                "url": u,
+                "ok": int(getattr(resp, "status", 0) or 0) == 200,
+                "status_code": int(getattr(resp, "status", 0) or 0),
+                "error": None,
+                "elapsed_ms": elapsed_ms,
+            }
+    except URLError as exc:
+        elapsed_ms = int((datetime.now(timezone.utc).timestamp() - started) * 1000.0)
+        return {
+            "url": u,
+            "ok": False,
+            "status_code": None,
+            "error": f"URLError: {exc.reason}",
+            "elapsed_ms": elapsed_ms,
+        }
+    except Exception as exc:
+        elapsed_ms = int((datetime.now(timezone.utc).timestamp() - started) * 1000.0)
+        return {
+            "url": u,
+            "ok": False,
+            "status_code": None,
+            "error": f"{type(exc).__name__}: {exc}",
+            "elapsed_ms": elapsed_ms,
+        }
+
+
 @router.get("/health")
 def health() -> Dict[str, bool]:
     return {"ok": True}
+
+
+@router.get("/ops", response_class=HTMLResponse)
+def ops_launcher() -> HTMLResponse:
+    pool_ops_url = os.getenv("ASR_POOL_OPS_URL", "http://127.0.0.1:18090/ops")
+    worker_live_ops_url = os.getenv("ASR_WORKER_LIVE_OPS_URL", "http://127.0.0.1:18110/ops")
+    worker_batch_ops_url = os.getenv("ASR_WORKER_BATCH_OPS_URL", "http://127.0.0.1:18111/ops")
+    return HTMLResponse(
+        _ops_launcher_html(
+            pool_ops_url=pool_ops_url,
+            worker_live_ops_url=worker_live_ops_url,
+            worker_batch_ops_url=worker_batch_ops_url,
+        )
+    )
+
+
+@router.get("/ops/metrics")
+def ops_launcher_metrics() -> Dict[str, Any]:
+    now_utc = _iso_utc(datetime.now(timezone.utc).timestamp())
+    pool_metrics_url = os.getenv("ASR_POOL_OPS_METRICS_URL", "http://127.0.0.1:18090/ops/metrics")
+    worker_live_metrics_url = os.getenv("ASR_WORKER_LIVE_OPS_METRICS_URL", "http://127.0.0.1:18110/ops/metrics")
+    worker_batch_metrics_url = os.getenv("ASR_WORKER_BATCH_OPS_METRICS_URL", "http://127.0.0.1:18111/ops/metrics")
+    pool = _ops_service_probe(url=pool_metrics_url)
+    worker_live = _ops_service_probe(url=worker_live_metrics_url)
+    worker_batch = _ops_service_probe(url=worker_batch_metrics_url)
+    services = {
+        "asr_pool": pool,
+        "asr_worker_live": worker_live,
+        "asr_worker_batch": worker_batch,
+    }
+    services_total = len(services)
+    services_up = sum(1 for v in services.values() if bool(v.get("ok")))
+    health = "ok" if services_up == services_total else ("warn" if services_up > 0 else "error")
+    return {
+        "service": "portal-api-ops-launcher",
+        "version": "ops_v1",
+        "now_utc": now_utc,
+        "window_s": 0,
+        "health": health,
+        "summary": {
+            "services_total": services_total,
+            "services_up": services_up,
+        },
+        "details": services,
+    }
 
 
 @router.get("/demo/settings")
