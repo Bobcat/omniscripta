@@ -9,6 +9,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from live.session.metrics import (
+    build_live_session_manager_metrics_snapshot,
+    live_commit_rows_debug_metrics,
+)
+
 
 def _append_preview_text(existing_text: str, incoming_text: str) -> str:
     existing = str(existing_text or "").strip()
@@ -26,40 +31,8 @@ def _utc_iso(ts: float) -> str:
     return datetime.fromtimestamp(float(ts), tz=timezone.utc).isoformat()
 
 
-def _live_commit_rows_debug_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    total_rows = 0
-    invalid_index_rows = 0
-    by_index: dict[int, dict[str, Any]] = {}
-    reason_counts: dict[str, int] = {}
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        total_rows += 1
-        try:
-            idx = int(row.get("chunk_index"))
-        except Exception:
-            invalid_index_rows += 1
-            continue
-        # Snapshot contract is one row per chunk_index. If duplicates exist, keep the last one.
-        by_index[idx] = row
-    for row in by_index.values():
-        reason = str(row.get("reason") or "").strip()
-        if not reason:
-            continue
-        reason_counts[reason] = int(reason_counts.get(reason, 0) + 1)
-    unique_rows = len(by_index)
-    duplicate_rows = max(0, total_rows - invalid_index_rows - unique_rows)
-    return {
-        "chunk_reason_counts": dict(sorted(reason_counts.items(), key=lambda kv: kv[0])),
-        "chunk_results_rows_count": int(max(0, total_rows)),
-        "chunk_results_unique_count": int(max(0, unique_rows)),
-        "chunk_results_duplicate_index_rows": int(max(0, duplicate_rows)),
-        "chunk_results_invalid_index_rows": int(max(0, invalid_index_rows)),
-    }
-
-
 def _repo_root() -> Path:
-    # portal-api/live/sessions.py -> live -> portal-api -> repo root
+    # portal-api/live/session/sessions.py -> session -> live -> portal-api -> repo root
     return Path(__file__).resolve().parents[2]
 
 
@@ -341,7 +314,7 @@ class LiveSessionManager:
         gpu_proxy_pipeline_s: float,
     ) -> dict[str, Any]:
         chunks = self._copy_commit_rows(commit_results)
-        chunk_debug = _live_commit_rows_debug_metrics(chunks)
+        chunk_debug = live_commit_rows_debug_metrics(chunks)
         preview_source = self._preview_source_for_engine(live_engine)
         final_covered_ms = self._final_covered_ms(final_segments, chunks)
         engine_runtime = self._build_engine_runtime(
@@ -1020,43 +993,18 @@ class LiveSessionManager:
         with self._lock:
             self._cleanup_expired_locked(now_unix)
             active = list(self._sessions.values())
-            archives = list(self._archives.values())
-
-            states: dict[str, int] = {}
-            connected = 0
-            bytes_received = 0
-            frames_received = 0
-            controls_received = 0
-            max_age_s = 0.0
-            for sess in active:
-                state = str(sess.state or "unknown")
-                states[state] = int(states.get(state, 0) + 1)
-                if sess.ws_connected:
-                    connected += 1
-                bytes_received += int(max(0, sess.bytes_received))
-                frames_received += int(max(0, sess.frames_received))
-                controls_received += int(max(0, sess.controls_received))
-                age_s = max(0.0, float(now_mono - sess.created_monotonic))
-                if age_s > max_age_s:
-                    max_age_s = age_s
-
-            return {
-                "active_sessions": len(active),
-                "active_ws_connected": int(connected),
-                "active_states": states,
-                "active_max_age_s": round(max_age_s, 3),
-                "active_bytes_received": int(bytes_received),
-                "active_frames_received": int(frames_received),
-                "active_controls_received": int(controls_received),
-                "archived_sessions": len(archives),
-                "limits": {
+            return build_live_session_manager_metrics_snapshot(
+                active_sessions=active,
+                archived_sessions_count=len(self._archives),
+                now_mono=now_mono,
+                limits={
                     "max_sessions": int(self._max_sessions),
                     "default_ttl_seconds": int(self._default_ttl_seconds),
                     "preconnect_ttl_seconds": int(self._preconnect_ttl_seconds),
                     "archive_ttl_seconds": int(self._archive_ttl_seconds),
                     "max_archives": int(self._max_archives),
                 },
-            }
+            )
 
     def _stats_log_path(self, session_id: str) -> Path:
         safe_id = str(session_id or "unknown").strip() or "unknown"

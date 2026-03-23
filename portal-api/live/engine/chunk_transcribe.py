@@ -22,7 +22,7 @@ _SPEAKER_PREFIX_RE = re.compile(
     re.IGNORECASE,
 )
 def _repo_root() -> Path:
-    # portal-api/live/chunk_transcribe.py -> live -> portal-api -> repo root
+    # portal-api/live/engine/chunk_transcribe.py -> engine -> live -> portal-api -> repo root
     return Path(__file__).resolve().parents[2]
 
 

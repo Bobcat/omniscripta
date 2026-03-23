@@ -11,9 +11,9 @@ from typing import Any, Callable, Mapping
 
 from fastapi import WebSocket, WebSocketDisconnect, status
 
-from live.chunk_transcribe import LiveChunkBatchBridge
+from live.engine.chunk_transcribe import LiveChunkBatchBridge
 from live._util import _normalize_optional_language, _safe_float
-from live.vad_silero import LiveSileroVadGate, LiveSileroVadSettings
+from live.engine.vad_silero import LiveSileroVadGate, LiveSileroVadSettings
 from live.protocol import (
     PROTOCOL_VERSION,
     control_ack_event,
@@ -25,7 +25,7 @@ from live.protocol import (
     result_event,
     stats_event,
 )
-from live.recordings import LiveWavRecorder
+from live.engine.recordings import LiveWavRecorder
 
 
 def _cfg(config: Mapping[str, Any], key: str) -> Any:

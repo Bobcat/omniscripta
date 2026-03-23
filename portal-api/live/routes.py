@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, HTTPException, Request, WebSocket
 from fastapi.responses import FileResponse, Response
 
-from live.artifacts import (
+from live.output.artifacts import (
     live_recording_wav_path_from_result,
     live_result_to_plain_text,
     live_result_to_srt_text,
@@ -24,8 +24,8 @@ from live.config import (
     rooted_path,
 )
 from live.protocol import PROTOCOL_VERSION
-from live.quality import score_live_text_against_fixture
-from live.rolling_context import run_live_session_ws_rolling_context
+from live.output.quality import score_live_text_against_fixture
+from live.engine.rolling_context import run_live_session_ws_rolling_context
 
 router = APIRouter()
 
