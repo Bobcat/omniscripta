@@ -33,7 +33,7 @@ def _utc_iso(ts: float) -> str:
 
 def _repo_root() -> Path:
     # portal-api/live/session/sessions.py -> session -> live -> portal-api -> repo root
-    return Path(__file__).resolve().parents[2]
+    return Path(__file__).resolve().parents[3]
 
 
 @dataclass
