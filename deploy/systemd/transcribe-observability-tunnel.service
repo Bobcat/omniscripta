@@ -1,6 +1,6 @@
 # /etc/systemd/system/transcribe-observability-tunnel.service
 [Unit]
-Description=SSH tunnel to transcribe observability endpoints on dc1 (localhost:8001/18090/18110)
+Description=SSH tunnel to transcribe observability endpoints on dc1 (localhost:8001/18090/18110/18111)
 After=network-online.target
 Wants=network-online.target
 
@@ -9,6 +9,7 @@ ExecStart=/usr/bin/ssh -N \
   -L 127.0.0.1:8001:127.0.0.1:8001 \
   -L 127.0.0.1:18090:127.0.0.1:18090 \
   -L 127.0.0.1:18110:127.0.0.1:18110 \
+  -L 127.0.0.1:18111:127.0.0.1:18111 \
   dc1 \
   -o ExitOnForwardFailure=yes \
   -o ServerAliveInterval=30 \
