@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from live.sessions import LiveSessionManager
+from live.session.sessions import LiveSessionManager
 from shared.app_config import get_bool, get_float, get_int, get_setting, get_str
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]

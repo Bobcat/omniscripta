@@ -13,7 +13,7 @@ DEFAULT_SAMPLE_WIDTH_BYTES = 2
 
 
 def _repo_root() -> Path:
-    # portal-api/live/recordings.py -> live -> portal-api -> repo root
+    # portal-api/live/engine/recordings.py -> engine -> live -> portal-api -> repo root
     return Path(__file__).resolve().parents[2]
 
 

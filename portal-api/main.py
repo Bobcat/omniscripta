@@ -12,7 +12,7 @@ if str(_REPO_ROOT) not in sys.path:
 from shared.app_config import get_str
 from live.routes import router as live_router
 from system_routes import router as system_router
-from upload.coordinator import UPLOAD_BATCH_COORDINATOR
+from upload.pipeline.coordinator import UPLOAD_BATCH_COORDINATOR
 from upload.routes import router as upload_router
 
 ROOT_PATH = get_str("service.root_path", "/api")
