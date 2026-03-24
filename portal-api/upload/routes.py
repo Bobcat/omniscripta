@@ -40,7 +40,21 @@ def _read_job_status(job_dir: Path) -> dict[str, Any]:
         raise HTTPException(status_code=500, detail=f"Failed to read status.json: {e!r}")
 
 
-def _project_upload_ui_status(status: dict[str, Any]) -> dict[str, Any]:
+def _queue_position(job_dir: Path, *, inbox_dir: Path) -> int | None:
+    try:
+        candidates = sorted(p for p in inbox_dir.iterdir() if p.is_dir() and not p.name.startswith(".tmp_"))
+    except Exception:
+        return None
+    for idx, candidate in enumerate(candidates, start=1):
+        try:
+            if candidate.resolve() == job_dir.resolve():
+                return idx
+        except Exception:
+            continue
+    return None
+
+
+def _project_upload_ui_status(status: dict[str, Any], *, job_dir: Path | None = None) -> dict[str, Any]:
     """
     Worker now writes done as soon as ASR is done.
     For upload UI, keep showing an in-progress topics phase until topics_status is present.
@@ -56,6 +70,20 @@ def _project_upload_ui_status(status: dict[str, Any]) -> dict[str, Any]:
         out["progress"] = min(0.99, max(0.0, float(out.get("progress") or 0.0)))
         if not str(out.get("message") or "").strip().lower().startswith("topics:"):
             out["message"] = "Topics: processing"
+    if job_dir is not None and state == "queued":
+        try:
+            in_upload_worker_inbox = job_dir.parent.resolve() == UPLOAD_WORKER_QUEUE.inbox.resolve()
+        except Exception:
+            in_upload_worker_inbox = False
+        if in_upload_worker_inbox:
+            pos = _queue_position(job_dir, inbox_dir=UPLOAD_WORKER_QUEUE.inbox)
+            if pos is not None:
+                out["queue_position"] = pos
+                out["message"] = (
+                    f"Waiting for ASR (position {pos} in queue)"
+                    if pos > 1
+                    else "Waiting for ASR (next in queue)"
+                )
     return out
 
 
@@ -216,7 +244,8 @@ def create_demo_job(
 
 @router.get("/demo/jobs/{job_id}")
 def get_demo_job(job_id: str) -> dict[str, Any]:
-    return _project_upload_ui_status(_read_job_status(_job_dir(job_id)))
+    job_dir = _job_dir(job_id)
+    return _project_upload_ui_status(_read_job_status(job_dir), job_dir=job_dir)
 
 
 @router.get("/demo/jobs/{job_id}/snippet")

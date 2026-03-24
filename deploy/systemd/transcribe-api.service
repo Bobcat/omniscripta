@@ -7,7 +7,7 @@ After=network.target
 User=gunnar
 Group=gunnar
 WorkingDirectory=/srv/transcribe/portal-api
-Environment="PATH=/srv/transcribe/portal-api/.venv/bin"
+Environment="PATH=/srv/transcribe/portal-api/.venv/bin:/usr/local/bin:/usr/bin:/bin"
 ExecStart=/srv/transcribe/portal-api/.venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000
 Restart=always
 RestartSec=2
