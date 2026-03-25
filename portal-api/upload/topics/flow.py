@@ -66,6 +66,7 @@ class _TopicsProgressTracker:
         self._eta_confidence = 0.0
         self._eta_hints: list[str] = []
         self._current_message = "Running..."
+        self._current_status_owner = "api-topics"
         self._last_progress = self._base_progress
         self._topics_started_t = 0.0
         self._topics_total = 0
@@ -90,6 +91,7 @@ class _TopicsProgressTracker:
         self._eta_confidence = max(0.0, float(eta_confidence))
         self._eta_hints = list(eta_hints)
         self._current_message = str(message or "").strip() or "Running..."
+        self._current_status_owner = "api-topics"
         self._last_progress = self._base_progress
         self._topics_expected_s = max(0.1, float(topics_expected_s))
         self._visible_remaining_band = max(0.0, 0.99 - self._base_progress)
@@ -139,6 +141,7 @@ class _TopicsProgressTracker:
             self._status_path,
             progress=progress,
             phase="topics",
+            status_owner=self._current_status_owner,
             message=self._current_message,
             progress_mode="predictive_v1",
             eta_total_s=round(max(0.0, est_total), 3),
@@ -148,19 +151,22 @@ class _TopicsProgressTracker:
             eta_hints=list(self._eta_hints),
         )
 
-    def start(self, *, message: str) -> None:
+    def start(self, *, message: str, status_owner: str = "api-topics") -> None:
         self._topics_started_t = time.monotonic()
         self._current_chunk_started_t = self._topics_started_t
         self._topics_done = 0
         self._topics_total = 0
         self._current_message = str(message or "").strip() or "Topics: preparing"
+        self._current_status_owner = str(status_owner or "api-topics").strip() or "api-topics"
         self._write()
 
-    def set_message(self, message: str) -> None:
+    def set_message(self, message: str, *, status_owner: str | None = None) -> None:
         self._current_message = str(message or "").strip() or self._current_message
+        if status_owner is not None:
+            self._current_status_owner = str(status_owner or "api-topics").strip() or "api-topics"
         self._write()
 
-    def update(self, *, done_count: int, total_count: int, message: str) -> None:
+    def update(self, *, done_count: int, total_count: int, message: str, status_owner: str | None = None) -> None:
         safe_total = max(0, int(total_count))
         safe_done = max(0, min(int(done_count), safe_total))
         if safe_done != self._topics_done:
@@ -170,6 +176,8 @@ class _TopicsProgressTracker:
         self._topics_total = safe_total
         self._topics_done = safe_done
         self._current_message = str(message or "").strip() or self._current_message
+        if status_owner is not None:
+            self._current_status_owner = str(status_owner or "api-topics").strip() or "api-topics"
         self._write()
 
     def elapsed_total_s(self) -> float:
@@ -208,6 +216,14 @@ class TopicsFlow:
             _write_status(status_path, **patch)
         except Exception:
             pass
+
+    def _status_owner(self, key: str, default: str) -> str:
+        status_owners = self._service_cfg.get("status_owners") or {}
+        if isinstance(status_owners, dict):
+            raw = str(status_owners.get(key) or "").strip()
+            if raw:
+                return raw
+        return default
 
     def _enqueue_topics_tasks(
         self,
@@ -377,11 +393,15 @@ class TopicsFlow:
         if topics_enabled:
             topics_status = "ok"
             try:
-                progress_tracker.start(message="Topics: enqueueing llm tasks")
+                progress_tracker.start(
+                    message="Topics: enqueueing llm tasks",
+                    status_owner=self._status_owner("llm_worker", "llm-worker"),
+                )
                 self._patch_status(
                     job.status_path,
                     phase="topics",
                     subphase="queue",
+                    status_owner=self._status_owner("llm_worker", "llm-worker"),
                     message="Topics: enqueueing llm tasks",
                 )
                 task_ids = self._enqueue_topics_tasks(
@@ -394,12 +414,14 @@ class TopicsFlow:
                     job.status_path,
                     phase="topics",
                     subphase="wait",
+                    status_owner=self._status_owner("llm_worker", "llm-worker"),
                     message=f"Topics: waiting for 0/{len(task_ids)} llm tasks",
                 )
                 progress_tracker.update(
                     done_count=0,
                     total_count=len(task_ids),
                     message=f"Topics: waiting for 0/{len(task_ids)} llm tasks",
+                    status_owner=self._status_owner("llm_worker", "llm-worker"),
                 )
                 chunk_outputs = self._wait_topics_tasks(task_ids, progress_tracker=progress_tracker)
                 for idx, text_path in sorted(chunk_outputs.items()):
@@ -432,7 +454,10 @@ class TopicsFlow:
                         out_merged_path=merged_path,
                     )
             except Exception as e:
-                progress_tracker.set_message(f"Topics failed: {e}")
+                progress_tracker.set_message(
+                    f"Topics failed: {e}",
+                    status_owner=self._status_owner("api_topics", "api-topics"),
+                )
                 topics_status = "failed"
                 topics_warning = str(e)
                 _append_log(job.log_path, f"topics_nonfatal error={e!r}")
@@ -457,6 +482,7 @@ class TopicsFlow:
             state="done",
             phase="done",
             subphase="",
+            status_owner=self._status_owner("api_topics", "api-topics"),
             progress=1.0,
             finished_at=datetime.now(timezone.utc).isoformat(),
             message="Done",

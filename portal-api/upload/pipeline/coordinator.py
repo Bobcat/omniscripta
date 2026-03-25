@@ -35,6 +35,15 @@ from upload.status_io import _write_status
 from upload.topics.flow import TopicsFlow
 
 
+def _api_status_owner() -> str:
+    return str(get_str("upload.status_owners.api", "api") or "api").strip() or "api"
+
+
+def _asr_worker_batch_status_owner() -> str:
+    raw = str(get_str("upload.status_owners.asr_worker_batch", "asr-worker-batch") or "").strip()
+    return raw or "asr-worker-batch"
+
+
 def _append_log(path: Path, message: str) -> None:
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     with path.open("a", encoding="utf-8") as f:
@@ -65,6 +74,12 @@ def _load_service_cfg() -> dict[str, Any]:
             "retries": 2,
             "retry_sleep_s": 2.0,
         },
+        "status_owners": {
+            "api": "api",
+            "asr_worker_batch": "asr-worker-batch",
+            "api_topics": "api-topics",
+            "llm_worker": "llm-worker",
+        },
     }
     raw_snip = get_setting("snip", {})
     if isinstance(raw_snip, dict):
@@ -86,6 +101,11 @@ def _load_service_cfg() -> dict[str, Any]:
         merged_tabby = dict(cfg["tabby"])
         merged_tabby.update(raw_tabby)
         cfg["tabby"] = merged_tabby
+    raw_status_owners = get_setting("upload.status_owners", {})
+    if isinstance(raw_status_owners, dict):
+        merged_status_owners = dict(cfg["status_owners"])
+        merged_status_owners.update(raw_status_owners)
+        cfg["status_owners"] = merged_status_owners
     return cfg
 
 
@@ -157,6 +177,7 @@ class _SnippingProgressTracker:
             self._status_path,
             state="running",
             phase="snipping",
+            status_owner=_api_status_owner(),
             progress=progress,
             started_at=self._started_at,
             message=self._message,
@@ -183,6 +204,7 @@ class _SnippingProgressTracker:
             state="queued",
             phase="awaiting_asr",
             subphase="handoff",
+            status_owner=_asr_worker_batch_status_owner(),
             progress=min(0.99, self._snipping_band),
             started_at=self._started_at,
             message="Snippet ready; queued for ASR",
@@ -399,6 +421,7 @@ class UploadBatchCoordinator:
                 job.status_path,
                 state="error",
                 phase="error",
+                status_owner=_api_status_owner(),
                 progress=1.0,
                 finished_at=datetime.now(timezone.utc).isoformat(),
                 message=f"Snipping failed: {e!r}",

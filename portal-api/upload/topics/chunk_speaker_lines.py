@@ -38,7 +38,7 @@ def chunk_speaker_lines(
   service_cfg: dict[str, Any],
   transcript_end_hms: str,
 ) -> Path:
-  _write_status(job.status_path, phase="topics", subphase="chunk_speaker_lines", message="Chunking speaker_lines…")
+  _write_status(job.status_path, phase="topics", subphase="chunk_speaker_lines", status_owner=_STATUS_OWNER, message="Chunking speaker_lines…")
   result_dir = (job.dir / "result").resolve()
 
   topics_cfg = service_cfg.get("topics", {}) if isinstance(service_cfg, dict) else {}
@@ -134,8 +134,10 @@ def chunk_speaker_lines(
     job.status_path,
     phase="topics",
     subphase="chunk_speaker_lines",
+    status_owner=_STATUS_OWNER,
     message=f"Chunking done: {len(chunks)} chunks",
     speaker_lines_manifest_filename=manifest_path.name,
     speaker_lines_chunk_count=len(chunks),
   )
   return manifest_path
+_STATUS_OWNER = "api-topics"

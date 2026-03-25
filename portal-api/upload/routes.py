@@ -14,10 +14,20 @@ from fastapi.responses import FileResponse, Response
 
 from jobs.queue_fs import JobPaths, find_job_dir, init_job_in_inbox
 from queue_roots import UPLOAD_PREP_QUEUE, UPLOAD_WORKER_QUEUE
+from shared.app_config import get_str
 
 router = APIRouter()
 
 NO_SPEAKER_VALUES = {"none", "off", "disabled", "no_speaker", "nospeaker", "no-speaker"}
+
+
+def _api_status_owner() -> str:
+    return str(get_str("upload.status_owners.api", "api") or "api").strip() or "api"
+
+
+def _api_topics_status_owner() -> str:
+    raw = str(get_str("upload.status_owners.api_topics", "api-topics") or "").strip()
+    return raw or "api-topics"
 
 
 def _job_dir(job_id: str) -> Path:
@@ -66,6 +76,7 @@ def _project_upload_ui_status(status: dict[str, Any], *, job_dir: Path | None = 
     if state == "done" and phase == "done" and topics_status is None:
         out["state"] = "running"
         out["phase"] = "topics"
+        out["status_owner"] = _api_topics_status_owner()
         out["subphase"] = str(out.get("subphase") or "wait")
         out["progress"] = min(0.99, max(0.0, float(out.get("progress") or 0.0)))
         if not str(out.get("message") or "").strip().lower().startswith("topics:"):
@@ -209,6 +220,7 @@ def create_demo_job(
             status_json={
                 "state": "queued",
                 "phase": "upload",
+                "status_owner": _api_status_owner(),
                 "progress": 0.0,
                 "message": "Queued",
                 "created_at": datetime.now(timezone.utc).isoformat(),
