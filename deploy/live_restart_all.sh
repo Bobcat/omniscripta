@@ -5,7 +5,7 @@ set -euo pipefail
 # If not run as root, this script uses sudo for system-level units.
 
 API_UNIT="transcribe-api.service"
-ASR_UNIT="transcribe-asr-pool.service"
+# ASR_UNIT="transcribe-asr-pool.service"
 BATCH_WORKER_UNIT="asr-worker-batch.service"
 LIVE_WORKER_UNIT="asr-worker-live.service"
 LLM_WORKER_UNIT="llm-worker.service"
@@ -80,8 +80,9 @@ print_status() {
   done
 }
 
-log "Restarting API + ASR pool..."
-systemctl_live restart "$API_UNIT" "$ASR_UNIT"
+log "Restarting API..."
+systemctl_live restart "$API_UNIT"
+# systemctl_live restart "$API_UNIT" "$ASR_UNIT"
 
 log "Waiting for API health..."
 wait_for_http "$API_HEALTH_URL" "$API_READY_TIMEOUT_S" "API health" "200"
@@ -96,7 +97,7 @@ echo
 echo "[live-restart] Service status:"
 print_status \
   "$API_UNIT" \
-  "$ASR_UNIT" \
+  # "$ASR_UNIT" \
   "$BATCH_WORKER_UNIT" \
   "$LIVE_WORKER_UNIT" \
   "$LLM_WORKER_UNIT" \

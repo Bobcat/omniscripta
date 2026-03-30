@@ -1,26 +1,48 @@
 from __future__ import annotations
 
-import json
+import os
 import re
+import sys
+import urllib.parse
 import wave
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from live._util import _normalize_optional_language
-from jobs.queue_fs import find_job_dir, init_job_in_inbox
-from queue_roots import LIVE_WORKER_QUEUE
 from shared.app_config import get_setting
+
+_POOL_REPO_ROOT_CANDIDATES = [
+    str(os.getenv("ASR_POOL_REPO_ROOT") or "").strip(),
+    "/home/gunnar/projects/asr-pool-dev",
+    "/srv/asr-pool",
+]
+for _candidate in _POOL_REPO_ROOT_CANDIDATES:
+    if not _candidate:
+        continue
+    _module_path = Path(_candidate) / "asr_pool_transport.py"
+    if _module_path.exists():
+        if _candidate not in sys.path:
+            sys.path.insert(0, _candidate)
+        break
+
+from asr_pool_transport import PoolTransportConfig
+from asr_pool_transport import _http_request_with_retry as _transport_http_request_with_retry
+from asr_pool_transport import download_request_srt_to_path as _transport_download_request_srt_to_path
+from asr_pool_transport import fetch_pending_status as _transport_fetch_pending_status
+from asr_pool_transport import submit_multipart_request as _transport_submit_multipart_request
 
 
 DEFAULT_SAMPLE_RATE_HZ = 16000
 DEFAULT_CHANNELS = 1
 DEFAULT_SAMPLE_WIDTH_BYTES = 2
+ASR_SCHEMA_VERSION = "asr_v2"
 _SPEAKER_PREFIX_RE = re.compile(
     r"^\s*\[?\s*((?:speaker[_ ]?\d+|spk[_ ]?\d+))\s*\]?\s*[:\-]",
     re.IGNORECASE,
 )
+
+
 def _repo_root() -> Path:
     # portal-api/live/engine/chunk_transcribe.py -> engine -> live -> portal-api -> repo root
     return Path(__file__).resolve().parents[2]
@@ -31,25 +53,6 @@ def _safe_session_id(session_id: str) -> str:
     if not text:
         return "unknown"
     return "".join(ch if (ch.isalnum() or ch in {"-", "_", "."}) else "_" for ch in text)
-
-
-def _read_json(path: Path) -> dict[str, Any]:
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def _pick_srt_result_path(job_dir: Path, status: dict[str, Any]) -> Path | None:
-    srt_name = str(status.get("srt_filename") or "").strip()
-    whisperx_dir = (job_dir / "whisperx").resolve()
-    if srt_name:
-        p = (whisperx_dir / srt_name).resolve()
-        if p.exists():
-            return p
-    if not whisperx_dir.exists():
-        return None
-    candidates = sorted(p for p in whisperx_dir.glob("*.srt") if p.is_file())
-    if not candidates:
-        return None
-    return candidates[-1]
 
 
 def _srt_ts_to_ms(token: str) -> int:
@@ -107,6 +110,13 @@ def _parse_srt_segments(srt_text: str, *, t0_offset_ms: int = 0) -> list[dict[st
 def _srt_to_plain_text(srt_text: str) -> str:
     segs = _parse_srt_segments(srt_text)
     return "\n".join(seg["text"] for seg in segs if str(seg.get("text") or "").strip())
+
+
+def _safe_float(value: Any) -> float | None:
+    try:
+        return max(0.0, float(value))
+    except Exception:
+        return None
 
 
 @dataclass(frozen=True)
@@ -194,6 +204,58 @@ class LiveChunkBatchBridge:
             and self.diarize_max_speakers < self.diarize_min_speakers
         ):
             self.diarize_max_speakers = int(self.diarize_min_speakers)
+        self._transport_cfg = PoolTransportConfig(
+            base_url=str(get_setting("asr_pool.base_url", "http://127.0.0.1:8090") or "http://127.0.0.1:8090"),
+            token=str(get_setting("asr_pool.token", "") or ""),
+        ).normalized()
+        self._request_meta: dict[str, dict[str, Any]] = {}
+
+    def _request_id(self, *, safe_session_id: str, chunk_index: int, t0_ms: int, t1_ms: int) -> str:
+        base = (
+            f"live_{safe_session_id[:48]}_"
+            f"{int(max(0, chunk_index)):06d}_"
+            f"{int(max(0, t0_ms)):09d}_"
+            f"{int(max(0, t1_ms)):09d}"
+        )
+        return base[:160]
+
+    def _request_consumer_id(self, *, safe_session_id: str) -> str:
+        return f"live_{safe_session_id[:96]}"
+
+    def _pool_status_from_response(self, *, request_id: str, response: dict[str, Any]) -> dict[str, Any]:
+        timings = dict(response.get("timings") or {})
+        runtime_meta = dict(response.get("runtime") or {})
+        return {
+            "state": "done",
+            "phase": "done",
+            "progress": 1.0,
+            "message": "Done",
+            "error": None,
+            "asr_request_id": str(request_id),
+            "asr_state": "completed",
+            "asr_runtime": runtime_meta,
+            "asr_timings": timings,
+            "asr_timing_whisperx_total_s": _safe_float(timings.get("total_s")),
+            "asr_timing_whisperx_prepare_s": _safe_float(timings.get("prepare_s")),
+            "asr_timing_whisperx_transcribe_call_s": _safe_float(timings.get("transcribe_call_s")),
+            "asr_timing_whisperx_transcribe_s": _safe_float(timings.get("transcribe_s")),
+            "asr_timing_whisperx_align_s": _safe_float(timings.get("align_s")),
+            "asr_timing_whisperx_diarize_s": _safe_float(timings.get("diarize_s")),
+            "asr_timing_whisperx_finalize_s": _safe_float(timings.get("finalize_s")),
+        }
+
+    def _fetch_request_lifecycle(self, *, request_id: str) -> tuple[int, dict[str, Any], int]:
+        rid = str(request_id or "").strip()
+        if not rid:
+            return 400, {}, 0
+        safe_rid = urllib.parse.quote(rid, safe="")
+        url = urllib.parse.urljoin(self._transport_cfg.base_url + "/", f"asr/v1/requests/{safe_rid}")
+        return _transport_http_request_with_retry(
+            config=self._transport_cfg,
+            method="GET",
+            url=url,
+            content_type="application/json",
+        )
 
     def enqueue_chunk_pcm16(
         self,
@@ -237,119 +299,183 @@ class LiveChunkBatchBridge:
         else:
             min_speakers = self.diarize_min_speakers
             max_speakers = self.diarize_max_speakers
-        job = init_job_in_inbox(
-            queue_root=LIVE_WORKER_QUEUE,
-            job_json={
-                "input": {
-                    "audio_relpath": str(Path("upload") / chunk_wav.name),
-                    "duration_ms": int(max(1, max(max(0, t0_ms), t1_ms) - max(0, t0_ms))),
-                    "format": "wav",
-                    "sample_rate_hz": int(self.sample_rate_hz),
-                    "channels": int(self.channels),
-                },
-                "request": {
-                    "language": resolved_language,
-                    "beam_size": (int(max(1, asr_beam_size)) if asr_beam_size is not None else None),
-                    "chunk_size": (int(max(1, asr_chunk_size)) if asr_chunk_size is not None else None),
-                    "asr_backend": (str(asr_backend).strip().lower() if asr_backend is not None else None),
-                    "speaker_mode": speaker_mode,
-                    "diarize_enabled": bool(self.diarize_enabled),
-                    "min_speakers": min_speakers,
-                    "max_speakers": max_speakers,
-                    "initial_prompt": prompt_text if prompt_text else None,
-                    "priority": "interactive",
-                    "align_enabled": bool(get_setting("live.align_enabled", False)),
-                    "routing": {
-                        "fairness_key": (str(session_id) or "live"),
-                    },
-                },
-                "outputs": {
-                    "status_relpath": "status.json",
-                    "srt_relpath": str(Path("whisperx") / f"{chunk_wav.stem}.srt"),
-                },
-                "worker_features": {
-                    "write_status_json": True,
-                    "track_pending_status": False,
-                    "predictive_progress": False,
-                    "write_timings_text": True,
-                    "include_runtime_meta": True,
-                    "download_srt": True,
-                },
-                "client_context": {
-                    "live_session_id": str(session_id),
-                    "live_chunk_index": int(idx),
-                    "live_chunk_t0_ms": int(max(0, t0_ms)),
-                    "live_chunk_t1_ms": int(max(max(0, t0_ms), t1_ms)),
-                    "live_lane": str(live_lane or "single"),
-                    "preview_seq": int(max(0, preview_seq)) if preview_seq is not None else None,
-                    "preview_audio_end_ms": int(max(0, preview_audio_end_ms)) if preview_audio_end_ms is not None else None,
-                },
-            },
-            status_json={
-                "state": "queued",
-                "phase": "queued",
-                "progress": 0.0,
-                "message": "Queued",
-                "created_at": datetime.now(timezone.utc).isoformat(),
-                "started_at": None,
-                "finished_at": None,
-                "error": None,
-                "srt_filename": None,
-            },
-            input_src_path=chunk_wav,
-            input_dst_relpath=str(Path("upload") / chunk_wav.name),
-            move_upload_src=True,
+        request_id = self._request_id(
+            safe_session_id=safe_id,
+            chunk_index=idx,
+            t0_ms=int(max(0, t0_ms)),
+            t1_ms=int(max(max(0, t0_ms), t1_ms)),
         )
-        chunk_upload_path = (job.dir / "upload" / chunk_wav.name).resolve()
+        consumer_id = self._request_consumer_id(safe_session_id=safe_id)
+        options: dict[str, Any] = {
+            "align_enabled": bool(get_setting("live.align_enabled", False)),
+            "diarize_enabled": bool(self.diarize_enabled) and speaker_mode != "none",
+            "speaker_mode": speaker_mode,
+        }
+        if resolved_language is not None:
+            options["language"] = resolved_language
+        if prompt_text:
+            options["initial_prompt"] = prompt_text
+        if asr_beam_size is not None:
+            options["beam_size"] = int(max(1, asr_beam_size))
+        if asr_chunk_size is not None:
+            options["chunk_size"] = int(max(1, asr_chunk_size))
+        if asr_backend is not None:
+            backend = str(asr_backend).strip().lower()
+            if backend:
+                options["asr_backend"] = backend
+        if speaker_mode == "fixed":
+            if min_speakers is not None:
+                options["min_speakers"] = int(max(1, min_speakers))
+            if max_speakers is not None:
+                options["max_speakers"] = int(max(1, max_speakers))
+        request_payload = {
+            "schema_version": ASR_SCHEMA_VERSION,
+            "request_id": str(request_id),
+            "consumer_id": str(consumer_id),
+            "priority": "interactive",
+            "routing": {
+                "fairness_key": (str(session_id) or "live"),
+            },
+            "audio": {
+                "local_path": str(chunk_wav),
+                "duration_ms": int(max(1, max(max(0, t0_ms), t1_ms) - max(0, t0_ms))),
+                "format": "wav",
+                "sample_rate_hz": int(self.sample_rate_hz),
+                "channels": int(self.channels),
+            },
+            "options": options,
+            "outputs": {
+                "text": False,
+                "segments": False,
+                "srt": True,
+                "srt_inline": False,
+            },
+        }
+        status_code, submit_body, _attempts_used = _transport_submit_multipart_request(
+            config=self._transport_cfg,
+            request_payload=request_payload,
+            audio_path=chunk_wav,
+        )
+        if int(status_code) not in {200, 202}:
+            err_code = str((submit_body or {}).get("code") or "ASR_POOL_SUBMIT_FAILED")
+            err_msg = str((submit_body or {}).get("message") or f"ASR pool submit failed with HTTP {status_code}")
+            raise RuntimeError(f"{err_code}: {err_msg}")
+        accepted_request_id = str((submit_body or {}).get("request_id") or request_id).strip() or request_id
+        srt_path = (sess_dir / f"{accepted_request_id}.srt").resolve()
+        self._request_meta[str(accepted_request_id)] = {
+            "session_id": str(session_id),
+            "consumer_id": str(consumer_id),
+            "srt_path": str(srt_path),
+        }
         return EnqueuedChunkJob(
             session_id=str(session_id),
             chunk_index=idx,
-            job_id=str(job.job_id),
-            job_dir=str(job.dir),
-            chunk_wav_path=str(chunk_upload_path),
+            job_id=str(accepted_request_id),
+            job_dir=str(sess_dir),
+            chunk_wav_path=str(chunk_wav),
             language=resolved_language,
             initial_prompt_chars=len(prompt_text),
             initial_prompt_words=prompt_words,
         )
 
     def poll_job(self, job_id: str, *, t0_offset_ms: int = 0) -> ChunkJobPollResult:
-        job_dir = find_job_dir(str(job_id), queue_roots=(LIVE_WORKER_QUEUE,))
-        if job_dir is None:
+        rid = str(job_id or "").strip()
+        if not rid:
             raise FileNotFoundError(f"Job not found: {job_id}")
+        meta = dict(self._request_meta.get(rid) or {})
+        consumer_id = str(meta.get("consumer_id") or "").strip()
+        if not consumer_id:
+            raise FileNotFoundError(f"Job metadata missing for: {rid}")
 
-        status_path = (job_dir / "status.json").resolve()
-        if not status_path.exists():
-            raise FileNotFoundError(f"status.json missing for job: {job_id}")
-        status = _read_json(status_path)
-        state = str(status.get("state") or "")
-        done = state in {"done", "error"}
-        ok = state == "done"
-        err = str(status.get("error") or "")
-        srt_text = ""
-        plain = ""
-        segments: list[dict[str, Any]] = []
-
-        # Primary result path: status == done and points to SRT.
-        srt_path: Path | None = None
-        if ok:
-            srt_path = _pick_srt_result_path(job_dir, status)
-        if srt_path is not None and srt_path.exists():
-            srt_text = srt_path.read_text(encoding="utf-8")
-            segments = _parse_srt_segments(srt_text, t0_offset_ms=int(max(0, t0_offset_ms)))
-            plain = "\n".join(
-                str(seg.get("text") or "").strip() for seg in segments if str(seg.get("text") or "").strip()
+        status_rows = _transport_fetch_pending_status(
+            config=self._transport_cfg,
+            consumer_id=consumer_id,
+            request_ids=[rid],
+            limit=1,
+        )
+        row = dict(status_rows[0]) if status_rows else {}
+        raw_state = str(row.get("state") or "").strip().lower()
+        if raw_state not in {"completed", "failed", "cancelled"}:
+            return ChunkJobPollResult(
+                job_id=rid,
+                state=raw_state or "queued",
+                status=row,
+                done=False,
+                ok=False,
+                error="",
+                text="",
+                srt_text="",
+                segments=[],
             )
-            if not plain:
-                plain = _srt_to_plain_text(srt_text)
 
+        lifecycle_status = 0
+        lifecycle_body: dict[str, Any] = {}
+        try:
+            lifecycle_status, lifecycle_body, _attempts = self._fetch_request_lifecycle(request_id=rid)
+        except Exception:
+            lifecycle_status = 0
+            lifecycle_body = {}
+        if lifecycle_status == 200:
+            row.update({k: v for k, v in dict(lifecycle_body).items() if k not in row})
+
+        if raw_state == "completed":
+            srt_text = ""
+            plain = ""
+            segments: list[dict[str, Any]] = []
+            srt_path_raw = str(meta.get("srt_path") or "").strip()
+            if not srt_path_raw:
+                raise RuntimeError(f"Missing SRT output path for request: {rid}")
+            srt_path = Path(srt_path_raw).resolve()
+            _transport_download_request_srt_to_path(
+                config=self._transport_cfg,
+                request_id=rid,
+                dst_path=srt_path,
+                allow_empty=True,
+            )
+            if srt_path.exists():
+                srt_text = srt_path.read_text(encoding="utf-8")
+                segments = _parse_srt_segments(srt_text, t0_offset_ms=int(max(0, t0_offset_ms)))
+                plain = "\n".join(
+                    str(seg.get("text") or "").strip() for seg in segments if str(seg.get("text") or "").strip()
+                )
+                if not plain:
+                    plain = _srt_to_plain_text(srt_text)
+            response = dict(row.get("response") or {})
+            status = self._pool_status_from_response(request_id=rid, response=response)
+            self._request_meta.pop(rid, None)
+            return ChunkJobPollResult(
+                job_id=rid,
+                state="done",
+                status=status,
+                done=True,
+                ok=True,
+                error="",
+                text=plain,
+                srt_text=srt_text,
+                segments=segments,
+            )
+
+        err_obj = dict(row.get("error") or {})
+        err_code = str(err_obj.get("code") or "ASR_REMOTE_TERMINAL_ERROR")
+        err_msg = str(err_obj.get("message") or f"ASR terminal state: {raw_state or 'unknown'}")
+        status = {
+            "state": "error",
+            "phase": "error",
+            "progress": 1.0,
+            "message": f"{err_code}: {err_msg}",
+            "error": f"{err_code}: {err_msg}",
+            "asr_request_id": rid,
+            "asr_state": raw_state,
+        }
+        self._request_meta.pop(rid, None)
         return ChunkJobPollResult(
-            job_id=str(job_id),
-            state=state,
+            job_id=rid,
+            state="error",
             status=status,
-            done=bool(done),
-            ok=bool(ok),
-            error=err,
-            text=plain,
-            srt_text=srt_text,
-            segments=segments,
+            done=True,
+            ok=False,
+            error=f"{err_code}: {err_msg}",
+            text="",
+            srt_text="",
+            segments=[],
         )

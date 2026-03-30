@@ -27,34 +27,6 @@
     /* Reduced margin/padding as requested */
 }
 
-.upload-wrap .top {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 10px 0 24px;
-    /* Increased bottom padding/gap */
-}
-
-@media (max-width: 600px) {
-    .upload-wrap .top {
-        justify-content: flex-end;
-        padding-bottom: 16px;
-        /* Adjusted mobile gap */
-    }
-}
-
-.upload-wrap .dot {
-    width: 14px;
-    height: 14px;
-    border-radius: 999px;
-    background: var(--accent);
-}
-
-.upload-wrap .brand {
-    font-weight: 600;
-    letter-spacing: .2px;
-    font-size: 15px;
-}
 
 .upload-wrap h1,
 .upload-wrap .subtle-header {
@@ -196,8 +168,7 @@
 
 @media (max-width: 600px) {
 
-    .desktop-only,
-    .upload-wrap .dot {
+    .desktop-only {
         display: none;
     }
 }
