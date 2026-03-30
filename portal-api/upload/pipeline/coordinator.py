@@ -265,6 +265,18 @@ class UploadBatchCoordinator:
         self._thread = None
         print("upload_batch_coordinator stopped", flush=True)
 
+    def metrics_snapshot(self) -> dict[str, Any]:
+        t = self._thread
+        running = bool(t is not None and t.is_alive())
+        return {
+            "enabled": bool(self._enabled),
+            "running": running,
+            "poll_interval_s": float(self._poll_interval_s),
+            "idle_log_interval_s": float(self._idle_log_interval_s),
+            "llm_wait_poll_s": float(self._llm_wait_poll_s),
+            "llm_wait_timeout_s": float(self._llm_wait_timeout_s),
+        }
+
     def _run_loop(self) -> None:
         while not self._stop.is_set():
             did_work = False
