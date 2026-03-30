@@ -310,3 +310,5 @@ mkdir -p ~/.config/transcribe && printf 'TABBY_API_KEY=VUL_HIER_DE_KEY_IN\n' > ~
 6. Use `deploy-dev.sh` for dev-backend testing.
 7. Keep both frontend tunnel paths available (`8080` live and `18010` dev) for fast A/B validation.
 8. Keep dev and live observability tunnels separate; live worker ops use `28110` and `28111` on purpose.
+9. In dev repos, do all development on `dev/*` branches (`dev/transcribe-dev`, `dev/asr-pool-dev`, `dev/asr-worker-dev`); use `main` only for controlled merge/release steps.
+10. If you temporarily check out `main` in a dev repo for merge/release work, switch back to the matching `dev/*` branch before continuing development.

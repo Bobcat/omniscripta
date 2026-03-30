@@ -1271,7 +1271,8 @@ class RollingContextSession:
         infer_seq = int(max(0, rt.rolling_infer_seq_next))
 
         try:
-            job = rt.chunk_bridge.enqueue_chunk_pcm16(
+            job = await asyncio.to_thread(
+                rt.chunk_bridge.enqueue_chunk_pcm16,
                 session_id=self.session_id,
                 chunk_index=infer_seq,
                 t0_ms=int(infer_t0_ms),
@@ -1369,7 +1370,14 @@ class RollingContextSession:
         empty_retry_call = bool(inflight.get("empty_retry"))
 
         try:
-            poll = rt.chunk_bridge.poll_job(job_id, t0_offset_ms=t0_ms)
+            has_terminal = rt.chunk_bridge.has_terminal_result(job_id)
+        except Exception as e:
+            self._append_log("rolling_inference_poll_error", seq=seq, job_id=job_id, error=f"{type(e).__name__}: {e}")
+            return
+        if not bool(has_terminal):
+            return
+        try:
+            poll = await asyncio.to_thread(rt.chunk_bridge.take_terminal_result, job_id, t0_offset_ms=t0_ms)
         except Exception as e:
             self._append_log("rolling_inference_poll_error", seq=seq, job_id=job_id, error=f"{type(e).__name__}: {e}")
             return
@@ -1762,6 +1770,7 @@ class RollingContextSession:
                     diarize_min_speakers=ctx["LIVE_DIARIZE_MIN_SPEAKERS"],
                     diarize_max_speakers=ctx["LIVE_DIARIZE_MAX_SPEAKERS"],
                 )
+                rt.chunk_bridge.start_completion_stream(session_id=session_id)
                 rt.recording_state = "recording"
                 rt.recording_path = str(rec_snap.wav_path)
                 rt.recording_bytes = int(rec_snap.bytes_written)
@@ -2052,6 +2061,11 @@ class RollingContextSession:
             await self._emit_result_event(force=True)
 
             live_sessions.close_session(session_id, reason=rt.stop_reason)
+            if rt.chunk_bridge is not None:
+                try:
+                    rt.chunk_bridge.stop_completion_stream()
+                except Exception:
+                    pass
             if rt.recorder is not None and not rt.recording_finalized:
                 try:
                     rt.recorder.abort()
