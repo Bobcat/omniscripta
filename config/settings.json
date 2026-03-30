@@ -10,7 +10,7 @@
   "live": {
     "session_ttl_s": 900,
     "session_preconnect_ttl_s": 30,
-    "max_sessions": 24,
+    "max_sessions": 12,
     "archive_ttl_s": 3600,
     "max_archives": 256,
     "audio_sample_rate_hz": 16000,

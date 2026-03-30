@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import re
 import sys
-import urllib.parse
+import threading
 import wave
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,9 +27,8 @@ for _candidate in _POOL_REPO_ROOT_CANDIDATES:
         break
 
 from asr_pool_transport import PoolTransportConfig
-from asr_pool_transport import _http_request_with_retry as _transport_http_request_with_retry
 from asr_pool_transport import download_request_srt_to_path as _transport_download_request_srt_to_path
-from asr_pool_transport import fetch_pending_status as _transport_fetch_pending_status
+from asr_pool_transport import stream_completions_forever as _transport_stream_completions_forever
 from asr_pool_transport import submit_multipart_request as _transport_submit_multipart_request
 
 
@@ -209,6 +208,12 @@ class LiveChunkBatchBridge:
             token=str(get_setting("asr_pool.token", "") or ""),
         ).normalized()
         self._request_meta: dict[str, dict[str, Any]] = {}
+        self._terminal_events: dict[str, dict[str, Any]] = {}
+        self._lock = threading.Lock()
+        self._stream_stop = threading.Event()
+        self._stream_thread: threading.Thread | None = None
+        self._stream_consumer_id: str = ""
+        self._feed_generation: int = 0
 
     def _request_id(self, *, safe_session_id: str, chunk_index: int, t0_ms: int, t1_ms: int) -> str:
         base = (
@@ -244,18 +249,76 @@ class LiveChunkBatchBridge:
             "asr_timing_whisperx_finalize_s": _safe_float(timings.get("finalize_s")),
         }
 
-    def _fetch_request_lifecycle(self, *, request_id: str) -> tuple[int, dict[str, Any], int]:
-        rid = str(request_id or "").strip()
-        if not rid:
-            return 400, {}, 0
-        safe_rid = urllib.parse.quote(rid, safe="")
-        url = urllib.parse.urljoin(self._transport_cfg.base_url + "/", f"asr/v1/requests/{safe_rid}")
-        return _transport_http_request_with_retry(
-            config=self._transport_cfg,
-            method="GET",
-            url=url,
-            content_type="application/json",
+    def _on_completion_stream_event(self, kind: str, payload: dict[str, Any]) -> None:
+        event_kind = str(kind or "").strip().lower()
+        data = dict(payload or {})
+        if event_kind == "completion":
+            rid = str(data.get("request_id") or "").strip()
+            state = str(data.get("state") or "").strip().lower()
+            if not rid or state not in {"completed", "failed", "cancelled"}:
+                return
+            with self._lock:
+                self._terminal_events[rid] = data
+            return
+        if event_kind == "feed_reset":
+            with self._lock:
+                self._feed_generation = int(max(0, self._feed_generation + 1))
+
+    def start_completion_stream(self, *, session_id: str) -> None:
+        safe_id = _safe_session_id(session_id)
+        consumer_id = self._request_consumer_id(safe_session_id=safe_id)
+        with self._lock:
+            running = self._stream_thread is not None and self._stream_thread.is_alive()
+            if running:
+                if self._stream_consumer_id != consumer_id:
+                    raise RuntimeError("Completion stream already running for a different consumer_id")
+                return
+            self._stream_consumer_id = str(consumer_id)
+            self._stream_stop = threading.Event()
+            self._terminal_events.clear()
+            self._feed_generation = 0
+            stop_event = self._stream_stop
+
+        def _run() -> None:
+            _transport_stream_completions_forever(
+                config=self._transport_cfg,
+                consumer_id=consumer_id,
+                start_since_seq=0,
+                stop_event=stop_event,
+                on_event=self._on_completion_stream_event,
+            )
+
+        thread = threading.Thread(
+            target=_run,
+            name=f"live-completions-{safe_id[:24]}",
+            daemon=True,
         )
+        with self._lock:
+            self._stream_thread = thread
+        thread.start()
+
+    def stop_completion_stream(self) -> None:
+        with self._lock:
+            stop_event = self._stream_stop
+            thread = self._stream_thread
+            self._stream_thread = None
+            self._stream_consumer_id = ""
+        stop_event.set()
+        if thread is not None:
+            thread.join(timeout=1.0)
+
+    def has_terminal_result(self, job_id: str) -> bool:
+        rid = str(job_id or "").strip()
+        if not rid:
+            return False
+        with self._lock:
+            if rid in self._terminal_events:
+                return True
+            meta = dict(self._request_meta.get(rid) or {})
+            if not meta:
+                return False
+            submitted_feed_generation = int(max(0, int(meta.get("feed_generation") or 0)))
+            return submitted_feed_generation < int(max(0, self._feed_generation))
 
     def enqueue_chunk_pcm16(
         self,
@@ -362,11 +425,14 @@ class LiveChunkBatchBridge:
             raise RuntimeError(f"{err_code}: {err_msg}")
         accepted_request_id = str((submit_body or {}).get("request_id") or request_id).strip() or request_id
         srt_path = (sess_dir / f"{accepted_request_id}.srt").resolve()
-        self._request_meta[str(accepted_request_id)] = {
-            "session_id": str(session_id),
-            "consumer_id": str(consumer_id),
-            "srt_path": str(srt_path),
-        }
+        with self._lock:
+            feed_generation = int(max(0, self._feed_generation))
+            self._request_meta[str(accepted_request_id)] = {
+                "session_id": str(session_id),
+                "consumer_id": str(consumer_id),
+                "srt_path": str(srt_path),
+                "feed_generation": int(feed_generation),
+            }
         return EnqueuedChunkJob(
             session_id=str(session_id),
             chunk_index=idx,
@@ -378,28 +444,47 @@ class LiveChunkBatchBridge:
             initial_prompt_words=prompt_words,
         )
 
-    def poll_job(self, job_id: str, *, t0_offset_ms: int = 0) -> ChunkJobPollResult:
+    def take_terminal_result(self, job_id: str, *, t0_offset_ms: int = 0) -> ChunkJobPollResult:
         rid = str(job_id or "").strip()
         if not rid:
             raise FileNotFoundError(f"Job not found: {job_id}")
-        meta = dict(self._request_meta.get(rid) or {})
-        consumer_id = str(meta.get("consumer_id") or "").strip()
-        if not consumer_id:
+        with self._lock:
+            meta = dict(self._request_meta.get(rid) or {})
+            terminal = dict(self._terminal_events.pop(rid, {}) or {})
+            feed_generation = int(max(0, self._feed_generation))
+        if not meta:
             raise FileNotFoundError(f"Job metadata missing for: {rid}")
-
-        status_rows = _transport_fetch_pending_status(
-            config=self._transport_cfg,
-            consumer_id=consumer_id,
-            request_ids=[rid],
-            limit=1,
-        )
-        row = dict(status_rows[0]) if status_rows else {}
-        raw_state = str(row.get("state") or "").strip().lower()
-        if raw_state not in {"completed", "failed", "cancelled"}:
+        submitted_feed_generation = int(max(0, int(meta.get("feed_generation") or 0)))
+        if not terminal:
+            if submitted_feed_generation < feed_generation:
+                err_code = "ASR_POOL_FEED_RESET"
+                err_msg = "ASR pool completion feed reset detected while request was in-flight"
+                status = {
+                    "state": "error",
+                    "phase": "error",
+                    "progress": 1.0,
+                    "message": f"{err_code}: {err_msg}",
+                    "error": f"{err_code}: {err_msg}",
+                    "asr_request_id": rid,
+                    "asr_state": "feed_reset",
+                }
+                with self._lock:
+                    self._request_meta.pop(rid, None)
+                return ChunkJobPollResult(
+                    job_id=rid,
+                    state="error",
+                    status=status,
+                    done=True,
+                    ok=False,
+                    error=f"{err_code}: {err_msg}",
+                    text="",
+                    srt_text="",
+                    segments=[],
+                )
             return ChunkJobPollResult(
                 job_id=rid,
-                state=raw_state or "queued",
-                status=row,
+                state="queued",
+                status={},
                 done=False,
                 ok=False,
                 error="",
@@ -407,17 +492,7 @@ class LiveChunkBatchBridge:
                 srt_text="",
                 segments=[],
             )
-
-        lifecycle_status = 0
-        lifecycle_body: dict[str, Any] = {}
-        try:
-            lifecycle_status, lifecycle_body, _attempts = self._fetch_request_lifecycle(request_id=rid)
-        except Exception:
-            lifecycle_status = 0
-            lifecycle_body = {}
-        if lifecycle_status == 200:
-            row.update({k: v for k, v in dict(lifecycle_body).items() if k not in row})
-
+        raw_state = str(terminal.get("state") or "").strip().lower()
         if raw_state == "completed":
             srt_text = ""
             plain = ""
@@ -440,9 +515,10 @@ class LiveChunkBatchBridge:
                 )
                 if not plain:
                     plain = _srt_to_plain_text(srt_text)
-            response = dict(row.get("response") or {})
+            response = dict(terminal.get("response") or {})
             status = self._pool_status_from_response(request_id=rid, response=response)
-            self._request_meta.pop(rid, None)
+            with self._lock:
+                self._request_meta.pop(rid, None)
             return ChunkJobPollResult(
                 job_id=rid,
                 state="done",
@@ -454,8 +530,7 @@ class LiveChunkBatchBridge:
                 srt_text=srt_text,
                 segments=segments,
             )
-
-        err_obj = dict(row.get("error") or {})
+        err_obj = dict(terminal.get("error") or {})
         err_code = str(err_obj.get("code") or "ASR_REMOTE_TERMINAL_ERROR")
         err_msg = str(err_obj.get("message") or f"ASR terminal state: {raw_state or 'unknown'}")
         status = {
@@ -467,7 +542,8 @@ class LiveChunkBatchBridge:
             "asr_request_id": rid,
             "asr_state": raw_state,
         }
-        self._request_meta.pop(rid, None)
+        with self._lock:
+            self._request_meta.pop(rid, None)
         return ChunkJobPollResult(
             job_id=rid,
             state="error",
