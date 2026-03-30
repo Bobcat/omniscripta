@@ -18,6 +18,10 @@
     "drain_wait_s": 20.0,
     "post_close_wait_s": 60.0,
     "asr_language": null,
+    "asr_beam_size": 5,
+    "asr_chunk_size": 10,
+    "asr_backend": "whisperx",
+    "align_enabled": false,
     "diarize_enabled": false,
     "diarize_speaker_mode": "fixed",
     "diarize_min_speakers": 1,
@@ -33,6 +37,10 @@
       "buffer_trim_threshold_ms": 30000,
       "buffer_trim_drop_ms": 20000,
       "min_new_audio_ms": 500,
+      "empty_retry": {
+        "enabled": false,
+        "after_audio_ms": 100
+      },
       "pacing": {
         "base_emit_ms": 250,
         "startup": {
@@ -70,69 +78,6 @@
     "asr_blob_cleanup_s": 120
   },
   
-  "asr_pool": {
-    "base_url": "http://127.0.0.1:8090",
-    "status_url": "http://127.0.0.1:8090/asr/v1/pool",
-    "token": "",
-    "root_path": "",
-    "work_root": "data/asr_pool",
-    "warm_start_enabled": true,
-    "warm_start_timeout_s": 180,
-    "warm_prewarm_timeout_s": 180,
-    "watchdog_enabled": true,
-    "watchdog_recover_timeout_s": 60,
-    "warm_request_timeout_s": 900,
-    
-    "queue_limits": {
-      "interactive": 8,
-      "normal": 20,
-      "background": 50
-    },
-    
-    "timeouts": {
-      "interactive": 30,
-      "normal": 120,
-      "background": 300
-    },
-    
-    "records": {
-      "max": 10000,
-      "ttl_completed_s": 900,
-      "ttl_failed_s": 1800,
-      "ttl_cancelled_s": 600
-    },
-    
-    "interactive_burst_max": 8,
-
-    "whisperx": {
-      "model": "large-v3",
-      "device": "cuda",
-      "compute_type": "int8",
-      "batch_size": 1,
-      "batch_size_default_cap": 4,
-      "chunk_size": 20,
-      "chunk_size_low_latency": 10,
-      "low_latency_backend": "whisperx",
-      "beam_size": 5,
-      "align_model": "jonatasgrosman/wav2vec2-large-xlsr-53-dutch",
-      "diarize_model": "pyannote/speaker-diarization-3.1",
-      "venv": "/home/gunnar/whisperx/.venv",
-      "threads": {
-        "omp": 8,
-        "mkl": 8,
-        "torch": 8,
-        "torch_interop": 1
-      }
-    },
-    
-    "warm": {
-      "prewarm_timeout_s": 180.0,
-      "prewarm_language": null,
-      "prewarm_align_enabled": false,
-      "request_timeout_s": 300.0
-    }
-  },
-  
   "jobs": {
     "upload_prep_base": "data/jobs/upload_prep",
     "upload_worker_base": "data/jobs/upload_worker",
@@ -167,13 +112,6 @@
     "idle_log_interval_s": 30.0,
     "llm_wait_poll_s": 0.5,
     "llm_wait_timeout_s": 1800.0
-  },
-
-  "worker_events": {
-    "sse_heartbeat_s": 10.0,
-    "inbox_debounce_ms": 40,
-    "coordinator_tick_s": 0.2,
-    "metrics_log_interval_s": 30.0
   },
 
   "snip": {
@@ -218,22 +156,6 @@
       "xtc_probability": 0,
       "stream": false
     }
-  },
-  
-  "live_chunk": {
-    "asr_profile": "live_fast",
-    "align_enabled": false
-  },
-  
-  "asr_remote": {
-    "timeout_interactive_s": 60,
-    "timeout_background_s": 420,
-    "timeout_normal_s": 180,
-    "http_timeout_s": 10.0,
-    "retry_attempts": 3,
-    "retry_base_delay_s": 0.2,
-    "retry_max_delay_s": 2.0,
-    "retry_jitter_s": 0.1
   },
   
   "asr_blob": {
