@@ -1,364 +1,3 @@
-:root {
-    --sidebar-width-expanded: 256px;
-    --sidebar-width-collapsed: 72px;
-    --header-height: 64px;
-    --transition-speed: 0.3s;
-    --sidebar-bg: #f0f4f9;
-    /* Gemini-like cool gray */
-    /* Gemini-like light gray */
-    --hover-bg: #e1e5ea;
-    --text-color: #444746;
-    --active-bg: #d3e3fd;
-    /* Light blue accent */
-    --active-text: #001d35;
-}
-
-/* Material Symbols Font Definition */
-.material-symbols-outlined {
-    font-family: 'Material Symbols Outlined';
-    font-weight: normal;
-    font-style: normal;
-    font-size: 24px;
-    /* Preferred icon size */
-    display: inline-block;
-    line-height: 1;
-    text-transform: none;
-    letter-spacing: normal;
-    word-wrap: normal;
-    white-space: nowrap;
-    direction: ltr;
-}
-
-/* Global Reset */
-*,
-*::before,
-*::after {
-    box-sizing: border-box;
-}
-
-body {
-    margin: 0;
-    padding: 0;
-    overflow-x: hidden;
-    width: 100%;
-    height: 100vh;
-}
-
-.app-container {
-    display: flex;
-    height: 100vh;
-    width: 100%;
-    overflow: hidden;
-    /* Prevent ANY child from causing scrollbars/overflow */
-}
-
-/* --- Sidebar --- */
-.sidebar {
-    background-color: var(--sidebar-bg);
-    height: 100%;
-    display: flex;
-    flex-direction: column;
-    flex-shrink: 0;
-    transition: width var(--transition-speed) ease;
-    border-right: 1px solid var(--border);
-    /* reusing --border from style.css if available or fallback */
-    z-index: 100;
-}
-
-.sidebar.expanded {
-    width: var(--sidebar-width-expanded);
-}
-
-.sidebar:not(.expanded) {
-    width: var(--sidebar-width-collapsed);
-}
-
-.sidebar-header {
-    height: 48px;
-    display: flex;
-    align-items: center;
-    /* Match the padding of .nav-links li (0 16px) to align icon perfectly */
-    padding: 0 16px;
-    /* Remove justify-content: center to allow left alignment in expanded mode */
-}
-
-/* Collapsed state needs centering */
-/* Collapsed state needs centering */
-.sidebar:not(.expanded) .sidebar-header {
-    justify-content: center;
-    padding: 0;
-    /* Remove padding strictly */
-    height: 48px;
-    /* Maintain height */
-    width: 100%;
-}
-
-/* Ensure hamburger centers exactly like list items */
-.sidebar:not(.expanded) .sidebar-header .icon-btn {
-    margin-left: auto;
-    margin-right: auto;
-}
-
-.sidebar-header .icon-btn {
-    width: 40px;
-    /* Match list item height for visual rhythm, or slightly smaller */
-    height: 40px;
-    padding: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    border-radius: 50%;
-    /* Ensure circular */
-}
-
-/* Ensure the icon inside is sized correctly */
-.sidebar-header .icon-btn .material-symbols-outlined {
-    font-size: 20px;
-    /* Reduced from 24px to match other icons */
-}
-
-.icon-btn {
-    background: none;
-    border: none;
-    cursor: pointer;
-    padding: 8px;
-    border-radius: 50%;
-    color: var(--text-color);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-}
-
-.icon-btn:hover {
-    background-color: var(--hover-bg);
-}
-
-.sidebar-content {
-    flex: 1;
-    overflow: hidden;
-    /* Prevent double scrollbars, let children scroll */
-    padding: 12px;
-    display: flex;
-    flex-direction: column;
-}
-
-.build-stamp {
-    padding: 8px 16px 4px;
-    font-size: 0.72rem;
-    color: var(--text-secondary);
-    opacity: 0.75;
-    letter-spacing: 0.02em;
-    user-select: none;
-}
-
-.sidebar:not(.expanded) .build-stamp {
-    display: none;
-}
-
-/* Ensure projects list takes available space and scrolls */
-.projects-list {
-    flex: 1;
-    overflow-y: auto;
-    min-height: 0;
-    /* Important for flex child scrolling */
-    margin-bottom: 12px;
-    /* Space before settings */
-}
-
-.nav-links {
-    list-style: none;
-    padding: 0;
-    margin: 0;
-    /* Removed flex-direction column here because now sidebar-content handles the main layout */
-}
-
-.nav-links li {
-    display: flex;
-    align-items: center;
-    padding: 0 16px;
-    /* Padding for the inner content */
-    height: 40px;
-    /* Reducded height from 48px */
-    border-radius: 20px;
-    /* Adjusted radius */
-    cursor: pointer;
-    color: var(--text-color);
-    margin-bottom: 4px;
-    transition: background-color 0.2s;
-    white-space: nowrap;
-    overflow: hidden;
-    font-size: 0.8rem;
-    /* Reduced to 0.8rem */
-}
-
-.nav-links li:hover {
-    background-color: var(--hover-bg);
-}
-
-.nav-links li.active {
-    background-color: var(--active-bg);
-    color: var(--active-text);
-    font-weight: 500;
-}
-
-.nav-links li.disabled {
-    opacity: 0.5;
-    cursor: default;
-}
-
-.nav-links li.disabled:hover {
-    background: none;
-}
-
-.nav-links li .material-symbols-outlined {
-    font-size: 20px;
-    /* Reverted to 20px */
-    margin-right: 12px;
-    flex-shrink: 0;
-}
-
-.nav-links li .link-text {
-    opacity: 1;
-    transition: opacity 0.2s;
-}
-
-/* Collapsed State Overrides */
-.sidebar:not(.expanded) .nav-links li {
-    padding: 0;
-    justify-content: center;
-    width: 40px;
-    /* Ensure square-ish clickable area */
-    margin-left: auto;
-    margin-right: auto;
-}
-
-.sidebar:not(.expanded) .nav-links li .material-symbols-outlined {
-    margin-right: 0;
-}
-
-.sidebar:not(.expanded) .link-text {
-    opacity: 0;
-    width: 0;
-    display: none;
-}
-
-/* Hide Separator in Collapsed State */
-.sidebar:not(.expanded) .separator {
-    display: none !important;
-}
-
-.sidebar:not(.expanded) .sidebar-header {
-    justify-content: center;
-    padding: 12px 0;
-}
-
-/* --- Main Content --- */
-.main-content {
-    flex: 1;
-    overflow: auto;
-    /* Handle both vertical and horizontal overflow */
-    height: 100vh;
-    background-color: #fff;
-    /* Optional: add some padding if needed, but views might handle their own */
-}
-
-/* Floating hamburger button (created by JS, lives outside sidebar) */
-#mobile-menu-toggle {
-    display: none;
-    position: fixed;
-    top: 4px;
-    left: 16px;
-    z-index: 10001;
-    width: 40px;
-    height: 40px;
-    padding: 0;
-    align-items: center;
-    justify-content: center;
-    border-radius: 50%;
-    background: rgba(255, 255, 255, 0.95);
-    border: 1px solid var(--border);
-    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
-    cursor: pointer;
-    line-height: 1;
-}
-
-#mobile-menu-toggle .material-symbols-outlined {
-    font-size: 20px;
-}
-
-@media (max-width: 600px) {
-    .main-content {
-        margin-left: 0;
-    }
-}
-
-
-/* --- Mobile Responsiveness --- */
-@media (max-width: 600px) {
-    .sidebar {
-        position: fixed;
-        /* When expanded, it covers content. When collapsed, it sits on left? 
-           Actually, usually mobile sidebars are drawers. 
-           User wants: "Always piece of sidebar visible".
-           So we keep it logical: 
-           Collapsed = 72px visible. 
-           Expanded = 256px (overlay or push).
-        */
-        z-index: 1000;
-        height: 100vh;
-    }
-
-    .sidebar:not(.expanded) {
-        width: 0;
-        overflow: hidden;
-        border-right: none;
-    }
-
-    .sidebar.expanded {
-        width: var(--sidebar-width-expanded);
-        box-shadow: 2px 0 8px rgba(0, 0, 0, 0.15);
-    }
-
-    /* We need a simplified toggle logic for mobile 
-       Actually, the logic: "expanded" class means visible on mobile.
-       "not expanded" means hidden. 
-    */
-
-    /* Overlay for mobile when sidebar is open */
-    .app-overlay {
-        position: fixed;
-        top: 0;
-        left: 0;
-        right: 0;
-        bottom: 0;
-        background: rgba(0, 0, 0, 0.3);
-        z-index: 99;
-        display: none;
-    }
-
-    body.sidebar-open .app-overlay {
-        display: block;
-    }
-
-    /* Show floating toggle on mobile when sidebar is NOT open */
-    #mobile-menu-toggle {
-        display: flex;
-    }
-
-    /* Hide floating toggle when sidebar is expanded (sidebar's own toggle takes over) */
-    body.sidebar-open #mobile-menu-toggle {
-        display: none;
-    }
-
-    /* Long-press on project items should not select text on mobile */
-    .projects-list li,
-    .projects-list .project-content,
-    .projects-list .link-text {
-        user-select: none;
-        -webkit-user-select: none;
-        -webkit-touch-callout: none;
-    }
-}
 
 /* Adjustments for existing CSS inputs/cards to fit new layout */
 .wrap {
@@ -421,6 +60,10 @@ body {
     /* Already hidden by general rule, but ensuring */
 }
 
+.sidebar:not(.expanded) .projects-separator {
+    display: none;
+}
+
 .project-menu-btn {
     background: none;
     border: none;
@@ -434,7 +77,7 @@ body {
     padding: 0;
 
     border-radius: 50%;
-    color: #444746;
+    color: var(--text-color);
 
     display: none;
     align-items: center;
@@ -450,7 +93,7 @@ body {
 
 .project-menu-btn:hover {
     background-color: #cfd6e0;
-    color: #111827;
+    color: var(--color-slate-900);
 }
 
 /* Reset margin on the icon inside the delete button 
@@ -481,7 +124,7 @@ body.mobile .projects-list .project-menu-btn {
 .project-action-menu {
     position: fixed;
     min-width: 148px;
-    background: #fff;
+    background: var(--bg);
     border: 1px solid var(--border);
     border-radius: 10px;
     box-shadow: 0 12px 30px rgba(0, 0, 0, 0.16);
@@ -498,7 +141,7 @@ body.mobile .projects-list .project-menu-btn {
     background: transparent;
     border-radius: 8px;
     padding: 10px 10px;
-    color: #111827;
+    color: var(--color-slate-900);
     font-size: 0.9rem;
     cursor: pointer;
 }
@@ -510,7 +153,7 @@ body.mobile .projects-list .project-menu-btn {
 
 .project-action-item.delete:hover {
     background: #f3f4f6;
-    color: #111827;
+    color: var(--color-slate-900);
 }
 
 .project-action-sheet-backdrop {
@@ -530,7 +173,7 @@ body.mobile .projects-list .project-menu-btn {
 
 .project-action-sheet {
     width: 100%;
-    background: #fff;
+    background: var(--bg);
     border-radius: 16px 16px 0 0;
     border-top: 1px solid var(--border);
     padding: 8px 12px calc(12px + env(safe-area-inset-bottom));
@@ -547,7 +190,7 @@ body.mobile .projects-list .project-menu-btn {
     width: 44px;
     height: 5px;
     border-radius: 999px;
-    background: #cbd5e1;
+    background: var(--color-slate-300);
     margin: 0 auto 10px;
 }
 

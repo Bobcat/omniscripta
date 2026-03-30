@@ -7,7 +7,14 @@
     --muted2: #768091;
     --border: #dce2ec;
     --accent: #2463eb;
+    --accent-border: #1a4fd1;
     --accentSoft: #e6f0ff;
+    --accent-soft-border: #c8dafc;
+    --surface-soft: #fafbfd;
+    --surface-disabled: #f1f5f9;
+    --border-disabled: #e2e8f0;
+    --progress-bg: #eef2f7;
+    --progress-fill: #93c5fd;
     --shadow: 0 10px 26px rgba(18, 23, 33, .07);
     --r: 14px;
 
@@ -68,57 +75,6 @@
     text-align: center;
 }
 
-.upload-wrap .steps {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 10px;
-    margin: 10px 0 12px;
-}
-
-@media (max-width: 600px) {
-    .upload-wrap .steps {
-        grid-template-columns: 1fr;
-    }
-}
-
-.upload-wrap .card {
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: var(--r);
-    box-shadow: var(--shadow);
-    padding: 10px 10px 9px;
-}
-
-.upload-wrap .badgeNum {
-    display: inline-flex;
-    width: 26px;
-    height: 26px;
-    align-items: center;
-    justify-content: center;
-    border-radius: 9px;
-    background: var(--accentSoft);
-    border: 1px solid #c8dafc;
-    color: var(--accent);
-    font-weight: 800;
-    margin-right: 8px;
-    vertical-align: middle;
-    font-size: 12px;
-}
-
-.upload-wrap .cardTitle {
-    display: inline-block;
-    font-weight: 800;
-    font-size: 14px;
-    vertical-align: middle;
-}
-
-.upload-wrap .cardText {
-    margin: 7px 0 0;
-    color: var(--muted);
-    line-height: 1.35;
-    font-size: 12.5px;
-}
-
 .upload-wrap .panel {
     background: var(--card);
     border: 1px solid var(--border);
@@ -127,20 +83,9 @@
     padding: 12px;
 }
 
-.upload-wrap .panel h2 {
-    margin: 0 0 2px;
-    font-size: 14px;
-}
-
-.upload-wrap .panel .hint {
-    margin: 0 0 8px;
-    color: var(--muted);
-    font-size: 12px;
-}
-
 .upload-wrap .btn {
     width: 100%;
-    border: 1px solid #1a4fd1;
+    border: 1px solid var(--accent-border);
     background: var(--accent);
     color: #fff;
     border-radius: 12px;
@@ -183,7 +128,7 @@
 .upload-wrap select {
     width: 100%;
     border: 1px solid var(--border);
-    background: #fafbfd;
+    background: var(--surface-soft);
     border-radius: 10px;
     padding: 10px 9px;
     font-size: 12.8px;
@@ -192,11 +137,11 @@
 }
 
 .upload-wrap select:disabled {
-    background: #f1f5f9;
+    background: var(--surface-disabled);
     color: var(--muted2);
     opacity: 0.7;
     cursor: not-allowed;
-    border-color: #e2e8f0;
+    border-color: var(--border-disabled);
 }
 
 .upload-wrap .progressWrap {
@@ -207,7 +152,7 @@
 .upload-wrap .bar {
     height: 10px;
     border-radius: 999px;
-    background: #eef2f7;
+    background: var(--progress-bg);
     border: 1px solid var(--border);
     overflow: hidden;
 }
@@ -215,7 +160,7 @@
 .upload-wrap .fill {
     width: 0%;
     height: 100%;
-    background: #93c5fd;
+    background: var(--progress-fill);
     transition: width 160ms linear;
 }
 
@@ -247,10 +192,6 @@
     line-height: 1.35;
     display: none;
     word-break: break-word;
-}
-
-.upload-wrap input[type="file"] {
-    display: none;
 }
 
 @media (max-width: 600px) {
