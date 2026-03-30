@@ -445,7 +445,11 @@ class UploadBatchCoordinator:
                 "format": str(snippet_path.suffix.lstrip(".") or "mp3"),
             },
             "request": {
-                "language": str(opts.get("language", "nl") or "nl"),
+                "language": (
+                    ""
+                    if str(opts.get("language") or "").strip().lower() in {"", "auto", "detect", "detect_auto", "detect-automatic", "detect-automatically"}
+                    else str(opts.get("language") or "").strip().lower()
+                ),
                 "speaker_mode": speaker_mode,
                 "min_speakers": opts.get("min_speakers"),
                 "max_speakers": opts.get("max_speakers"),
@@ -453,7 +457,6 @@ class UploadBatchCoordinator:
                 "align_enabled": True,
                 "initial_prompt": opts.get("initial_prompt"),
                 "priority": "background",
-                "latency_mode": "default",
                 "routing": {
                     "slot_affinity": 0,
                 },

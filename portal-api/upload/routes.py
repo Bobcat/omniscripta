@@ -19,6 +19,7 @@ from shared.app_config import get_str
 router = APIRouter()
 
 NO_SPEAKER_VALUES = {"none", "off", "disabled", "no_speaker", "nospeaker", "no-speaker"}
+AUTO_LANGUAGE_VALUES = {"", "auto", "detect", "detect_auto", "detect-automatic", "detect-automatically"}
 
 
 def _api_status_owner() -> str:
@@ -167,6 +168,13 @@ def _parse_speaker_options(speakers: str) -> dict[str, Any]:
     }
 
 
+def _normalize_upload_language(language: str | None) -> str:
+    raw = str(language or "").strip().lower()
+    if raw in AUTO_LANGUAGE_VALUES:
+        return ""
+    return raw
+
+
 def _snip_seconds_override(request: Request) -> int | None:
     raw = _request_param(request, "snip")
     if not raw:
@@ -184,13 +192,13 @@ def _snip_seconds_override(request: Request) -> int | None:
 def create_demo_job(
     request: Request,
     file: UploadFile = File(...),
-    language: str = Form("nl"),
+    language: str = Form(""),
     speakers: str = Form("none"),
 ) -> dict[str, Any]:
     orig_name = Path(file.filename or "").name or "upload.bin"
 
     base_options: dict[str, Any] = {
-        "language": language,
+        "language": _normalize_upload_language(language),
         **_parse_speaker_options(speakers),
     }
     snippet_seconds_override = _snip_seconds_override(request)

@@ -19,6 +19,19 @@ def _get_optional_setting_str(path: str) -> str | None:
     return text or None
 
 
+def _get_optional_setting_int(path: str, *, min_value: int | None = None) -> int | None:
+    raw = get_setting(path, None)
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except Exception:
+        return None
+    if min_value is not None:
+        value = int(max(int(min_value), value))
+    return value
+
+
 ROOT_PATH = get_str("service.root_path", "/api")
 LIVE_ENGINE = "rolling_context"
 LIVE_SESSION_TTL_S = get_int("live.session_ttl_s", 900, min_value=60)
@@ -33,6 +46,9 @@ LIVE_AUDIO_BYTES_PER_SECOND = int(max(1, LIVE_AUDIO_SAMPLE_RATE_HZ * LIVE_AUDIO_
 LIVE_DRAIN_WAIT_S = get_float("live.drain_wait_s", 20.0, min_value=0.0)
 LIVE_POST_CLOSE_WAIT_S = get_float("live.post_close_wait_s", 60.0, min_value=0.0)
 LIVE_ASR_LANGUAGE = _get_optional_setting_str("live.asr_language")
+LIVE_ASR_BEAM_SIZE = _get_optional_setting_int("live.asr_beam_size", min_value=1)
+LIVE_ASR_CHUNK_SIZE = _get_optional_setting_int("live.asr_chunk_size", min_value=1)
+LIVE_ASR_BACKEND = _get_optional_setting_str("live.asr_backend")
 LIVE_DIARIZE_ENABLED = get_bool("live.diarize_enabled", False)
 LIVE_DIARIZE_SPEAKER_MODE = get_str("live.diarize_speaker_mode", "fixed")
 LIVE_DIARIZE_MIN_SPEAKERS = get_int("live.diarize_min_speakers", 1, min_value=1)
@@ -65,6 +81,12 @@ LIVE_ROLLING_BUFFER_TRIM_DROP_MS = max(
     get_int("live.rolling.buffer_trim_drop_ms", 20000, min_value=1000),
 )
 LIVE_ROLLING_MIN_NEW_AUDIO_MS = get_int("live.rolling.min_new_audio_ms", LIVE_ROLLING_MIN_INFER_AUDIO_MS, min_value=0)
+LIVE_ROLLING_EMPTY_RETRY_ENABLED = get_bool("live.rolling.empty_retry.enabled", True)
+LIVE_ROLLING_EMPTY_RETRY_AFTER_AUDIO_MS = get_int(
+    "live.rolling.empty_retry.after_audio_ms",
+    LIVE_ROLLING_MIN_NEW_AUDIO_MS,
+    min_value=0,
+)
 LIVE_ROLLING_MIN_EMIT_INTERVAL_MS = get_int(
     "polling_intervals.live_rolling_emit_min_ms",
     LIVE_ROLLING_POLL_INTERVAL_MS,
@@ -130,6 +152,9 @@ LIVE_ROLLING_CONTEXT_CONFIG_KEYS = (
     "LIVE_DRAIN_WAIT_S",
     "LIVE_POST_CLOSE_WAIT_S",
     "LIVE_ASR_LANGUAGE",
+    "LIVE_ASR_BEAM_SIZE",
+    "LIVE_ASR_CHUNK_SIZE",
+    "LIVE_ASR_BACKEND",
     "LIVE_DIARIZE_ENABLED",
     "LIVE_DIARIZE_SPEAKER_MODE",
     "LIVE_DIARIZE_MIN_SPEAKERS",
@@ -144,6 +169,8 @@ LIVE_ROLLING_CONTEXT_CONFIG_KEYS = (
     "LIVE_ROLLING_BUFFER_TRIM_THRESHOLD_MS",
     "LIVE_ROLLING_BUFFER_TRIM_DROP_MS",
     "LIVE_ROLLING_MIN_NEW_AUDIO_MS",
+    "LIVE_ROLLING_EMPTY_RETRY_ENABLED",
+    "LIVE_ROLLING_EMPTY_RETRY_AFTER_AUDIO_MS",
     "LIVE_ROLLING_MIN_EMIT_INTERVAL_MS",
     "LIVE_ROLLING_PACING_BASE_EMIT_MS",
     "LIVE_ROLLING_PACING_STARTUP_DURATION_MS",
