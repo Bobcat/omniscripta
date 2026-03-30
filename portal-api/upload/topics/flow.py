@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import threading
 import time
 from datetime import datetime, timezone
@@ -48,6 +49,75 @@ def _unique_hints(values: Any) -> list[str]:
         if item and item not in out:
             out.append(item)
     return out
+
+
+def _safe_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+
+def _append_progress_run_record(
+    *,
+    runs_path: Path,
+    job_id: str,
+    status: dict[str, Any],
+    hardware_key: str,
+    speaker_mode: str,
+    topics_enabled: bool,
+    snippet_seconds: int,
+    base_elapsed_s: float,
+    final_elapsed_s: float,
+    topics_prep_elapsed_s: float,
+    topics_llm_elapsed_s: float,
+) -> None:
+    asr_timings = dict(status.get("asr_timings") or {})
+    asr_total_s = max(0.0, float(_safe_float(asr_timings.get("total_s")) or 0.0))
+    phase_seconds = {
+        "snipping": round(max(0.0, float(base_elapsed_s) - asr_total_s), 6),
+        "whisperx_prepare": round(max(0.0, float(_safe_float(asr_timings.get("prepare_s")) or 0.0)), 6),
+        "whisperx_transcribe": round(max(0.0, float(_safe_float(asr_timings.get("transcribe_s")) or 0.0)), 6),
+        "whisperx_align": round(max(0.0, float(_safe_float(asr_timings.get("align_s")) or 0.0)), 6),
+        "whisperx_diarize": round(max(0.0, float(_safe_float(asr_timings.get("diarize_s")) or 0.0)), 6),
+        "whisperx_finalize": round(max(0.0, float(_safe_float(asr_timings.get("finalize_s")) or 0.0)), 6),
+        "topics_prep": round(max(0.0, float(topics_prep_elapsed_s)), 6),
+    }
+    if topics_enabled:
+        phase_seconds["llm_topics"] = round(max(0.0, float(topics_llm_elapsed_s)), 6)
+    else:
+        phase_seconds["llm_topics_skipped"] = round(max(0.0, float(topics_llm_elapsed_s)), 6)
+
+    aligner_load_s = _safe_float(asr_timings.get("aligner_load_s"))
+    diarizer_load_s = _safe_float(asr_timings.get("diarizer_load_s"))
+    if aligner_load_s is not None:
+        phase_seconds["aligner_load_s"] = round(max(0.0, float(aligner_load_s)), 6)
+    if diarizer_load_s is not None:
+        phase_seconds["diarizer_load_s"] = round(max(0.0, float(diarizer_load_s)), 6)
+
+    record = {
+        "schema_version": "1.0",
+        "run_id": str(job_id),
+        "job_id": str(job_id),
+        "ts_start_utc": str(status.get("started_at") or "").strip() or datetime.now(timezone.utc).isoformat(),
+        "ts_end_utc": str(status.get("finished_at") or "").strip() or datetime.now(timezone.utc).isoformat(),
+        "host_id": "",
+        "worker_instance": "",
+        "snippet_seconds": int(max(1, int(snippet_seconds))),
+        "topics_enabled": bool(topics_enabled),
+        "speaker_mode": str(speaker_mode),
+        "chunks_count": 1,
+        "config_key": "",
+        "hardware_key": str(hardware_key),
+        "phase_seconds": phase_seconds,
+        "wait_seconds": {},
+        "total_seconds": round(max(0.0, float(final_elapsed_s)), 6),
+        "outcome": "done",
+        "error_text": "",
+    }
+    runs_path.parent.mkdir(parents=True, exist_ok=True)
+    with runs_path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 class _TopicsProgressTracker:
@@ -330,15 +400,25 @@ class TopicsFlow:
         service_cfg = self._service_cfg
         result_dir = (job.dir / "result").resolve()
         topics_cfg = dict(service_cfg.get("topics") or {})
+        snip_cfg = dict(service_cfg.get("snip") or {})
         topics_enabled = bool(topics_cfg.get("enabled", False))
+        speaker_mode = _normalize_speaker_mode(status.get("speaker_mode", "auto"))
+        snippet_seconds = _safe_int(status.get("snippet_seconds"))
+        if snippet_seconds is None or snippet_seconds <= 0:
+            try:
+                job_cfg = _read_json(job.job_path)
+            except Exception:
+                job_cfg = {}
+            duration_ms = _safe_int(((job_cfg.get("input") or {}).get("duration_ms")))
+            if duration_ms is not None and duration_ms > 0:
+                snippet_seconds = int((int(duration_ms) + 999) // 1000)
+            else:
+                snippet_seconds = int(snip_cfg.get("minutes_default", 15)) * 60
         prompt_id = str(topics_cfg.get("prompt_id") or "topics_v1")
         coord_started_mono = time.monotonic()
         base_elapsed_s = max(0.0, float(_safe_float(status.get("elapsed_s")) or 0.0))
         progress_tracker = _TopicsProgressTracker(status_path=job.status_path) if topics_enabled else None
         if progress_tracker is not None:
-            snip_cfg = dict(service_cfg.get("snip") or {})
-            snippet_seconds = int(status.get("snippet_seconds") or int(snip_cfg.get("minutes_default", 15)) * 60)
-            speaker_mode = _normalize_speaker_mode(status.get("speaker_mode", "auto"))
             prediction = build_prediction(
                 runs_path=self._progress_runs_path,
                 hardware_key=self._hardware_key,
@@ -375,6 +455,7 @@ class TopicsFlow:
         if srt_path is None:
             raise RuntimeError("No SRT found for topics handoff")
 
+        topics_prep_started_mono = time.monotonic()
         speaker_lines_path, transcript_end_hms = make_speaker_lines_from_srt(
             job=job,
             srt_path=srt_path,
@@ -387,6 +468,8 @@ class TopicsFlow:
             service_cfg=service_cfg,
             transcript_end_hms=transcript_end_hms,
         )
+        topics_prep_elapsed_s = max(0.0, time.monotonic() - topics_prep_started_mono)
+        topics_llm_started_mono = time.monotonic()
 
         topics_status = "disabled"
         topics_warning = ""
@@ -461,6 +544,7 @@ class TopicsFlow:
                 topics_status = "failed"
                 topics_warning = str(e)
                 _append_log(job.log_path, f"topics_nonfatal error={e!r}")
+        topics_llm_elapsed_s = max(0.0, time.monotonic() - topics_llm_started_mono)
 
         final_elapsed_s = (
             progress_tracker.elapsed_total_s()
@@ -498,4 +582,20 @@ class TopicsFlow:
             topics_status=topics_status,
             topics_warning=topics_warning,
         )
+        try:
+            _append_progress_run_record(
+                runs_path=self._progress_runs_path,
+                job_id=job.job_id,
+                status=_read_json(job.status_path),
+                hardware_key=self._hardware_key,
+                speaker_mode=speaker_mode,
+                topics_enabled=topics_enabled,
+                snippet_seconds=snippet_seconds,
+                base_elapsed_s=base_elapsed_s,
+                final_elapsed_s=final_elapsed_s,
+                topics_prep_elapsed_s=topics_prep_elapsed_s,
+                topics_llm_elapsed_s=topics_llm_elapsed_s,
+            )
+        except Exception as e:
+            _append_log(job.log_path, f"progress_runs_nonfatal error={e!r}")
         _append_log(job.log_path, "topics_done")
