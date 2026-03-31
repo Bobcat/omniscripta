@@ -14,7 +14,7 @@ DEFAULT_SAMPLE_WIDTH_BYTES = 2
 
 def _repo_root() -> Path:
     # portal-api/live/engine/recordings.py -> engine -> live -> portal-api -> repo root
-    return Path(__file__).resolve().parents[2]
+    return Path(__file__).resolve().parents[3]
 
 
 def _safe_session_id(session_id: str) -> str:
