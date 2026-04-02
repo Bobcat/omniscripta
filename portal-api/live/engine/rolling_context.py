@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from dataclasses import dataclass, field
 import hashlib
 import json
@@ -105,7 +106,6 @@ class _RollingRuntime:
     rolling_last_submitted_t1_ms: int = 0
     rolling_last_applied_seq: int = -1
     rolling_last_emit_mono: float = 0.0
-    rolling_last_poll_mono: float = 0.0
     rolling_gpu_proxy_transcribe_s: float = 0.0
     rolling_gpu_proxy_pipeline_s: float = 0.0
     rolling_result_emit_trace: dict[str, Any] | None = None
@@ -187,6 +187,8 @@ class RollingContextSession:
         self.config = config
         self.rt = _RollingRuntime()
         self._ctx: dict[str, Any] = {}
+        self._completion_ready: asyncio.Event | None = None
+        self._completion_loop: asyncio.AbstractEventLoop | None = None
 
     async def _send_event(self, payload: dict[str, Any]) -> None:
         out = dict(payload)
@@ -238,6 +240,65 @@ class RollingContextSession:
             pass
 
     @staticmethod
+    async def _cancel_pending_task(task: asyncio.Task[Any] | None) -> None:
+        if task is None or task.done():
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    def _notify_terminal_ready(self) -> None:
+        loop = self._completion_loop
+        ready = self._completion_ready
+        if loop is None or ready is None:
+            return
+        try:
+            loop.call_soon_threadsafe(ready.set)
+        except RuntimeError:
+            pass
+
+    async def _wait_for_websocket_or_completion(self) -> tuple[str, dict[str, Any] | None]:
+        ready = self._completion_ready
+        if ready is not None and ready.is_set():
+            ready.clear()
+            return "completion", None
+
+        receive_task: asyncio.Task[dict[str, Any]] = asyncio.create_task(self.websocket.receive())
+        completion_task: asyncio.Task[bool] | None = None
+        tasks: set[asyncio.Task[Any]] = {receive_task}
+        if ready is not None:
+            completion_task = asyncio.create_task(ready.wait())
+            tasks.add(completion_task)
+
+        done, _pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        if receive_task in done:
+            await self._cancel_pending_task(completion_task)
+            return "websocket", receive_task.result()
+
+        if ready is not None:
+            ready.clear()
+        await self._cancel_pending_task(receive_task)
+        return "completion", None
+
+    async def _wait_for_completion_or_timeout(self, *, timeout_s: float) -> bool:
+        safe_timeout_s = float(max(0.0, timeout_s))
+        if safe_timeout_s <= 0.0:
+            return False
+        ready = self._completion_ready
+        if ready is None:
+            await asyncio.sleep(safe_timeout_s)
+            return False
+        if ready.is_set():
+            ready.clear()
+            return True
+        try:
+            await asyncio.wait_for(ready.wait(), timeout=safe_timeout_s)
+        except asyncio.TimeoutError:
+            return False
+        ready.clear()
+        return True
+
+    @staticmethod
     def _preview_signature(value: str) -> str:
         return " ".join(str(value or "").strip().lower().split())
 
@@ -260,7 +321,6 @@ class RollingContextSession:
         live_diarize_speaker_mode = str(_cfg(config, "LIVE_DIARIZE_SPEAKER_MODE") or "fixed").strip().lower()
         live_diarize_min_speakers = int(max(1, int(_cfg(config, "LIVE_DIARIZE_MIN_SPEAKERS"))))
         live_diarize_max_speakers = int(max(1, int(_cfg(config, "LIVE_DIARIZE_MAX_SPEAKERS"))))
-        live_rolling_poll_interval_ms = int(_cfg(config, "LIVE_ROLLING_POLL_INTERVAL_MS"))
         live_rolling_min_infer_audio_ms = int(_cfg(config, "LIVE_ROLLING_MIN_INFER_AUDIO_MS"))
         live_rolling_single_commit_min_ms = int(_cfg(config, "LIVE_ROLLING_SINGLE_COMMIT_MIN_MS"))
         live_rolling_force_commit_repeats = int(_cfg(config, "LIVE_ROLLING_FORCE_COMMIT_REPEATS"))
@@ -289,7 +349,6 @@ class RollingContextSession:
             _cfg(config, "LIVE_ROLLING_SPEECH_GATE_FORCE_COMMIT_SILENCE_MS")
         )
 
-        poll_interval_s = max(0.02, float(live_rolling_poll_interval_ms) / 1000.0)
         min_new_audio_ms = int(max(0, live_rolling_min_new_audio_ms))
         single_segment_commit_min_ms = int(max(live_rolling_min_infer_audio_ms, live_rolling_single_commit_min_ms))
         force_commit_repeats = int(max(1, live_rolling_force_commit_repeats))
@@ -354,10 +413,8 @@ class RollingContextSession:
             "LIVE_DIARIZE_SPEAKER_MODE": live_diarize_speaker_mode,
             "LIVE_DIARIZE_MIN_SPEAKERS": live_diarize_min_speakers,
             "LIVE_DIARIZE_MAX_SPEAKERS": live_diarize_max_speakers,
-            "LIVE_ROLLING_POLL_INTERVAL_MS": live_rolling_poll_interval_ms,
             "LIVE_ROLLING_MIN_INFER_AUDIO_MS": live_rolling_min_infer_audio_ms,
             "LIVE_ROLLING_MIN_EMIT_INTERVAL_MS": live_rolling_min_emit_interval_ms,
-            "poll_interval_s": poll_interval_s,
             "min_new_audio_ms": min_new_audio_ms,
             "single_segment_commit_min_ms": single_segment_commit_min_ms,
             "force_commit_repeats": force_commit_repeats,
@@ -647,7 +704,6 @@ class RollingContextSession:
             },
             "guardrails": dict(rt.rolling_guardrail_metrics),
             "config": {
-                "poll_interval_ms": int(ctx["LIVE_ROLLING_POLL_INTERVAL_MS"]),
                 "min_infer_audio_ms": int(ctx["LIVE_ROLLING_MIN_INFER_AUDIO_MS"]),
                 "single_segment_commit_min_ms": int(ctx["single_segment_commit_min_ms"]),
                 "force_commit_repeats": int(ctx["force_commit_repeats"]),
@@ -1270,15 +1326,11 @@ class RollingContextSession:
             asr_backend=str(ctx["LIVE_ASR_BACKEND"] or ""),
         )
 
-    async def _poll_inference(self, *, force: bool = False) -> None:
+    async def _poll_inference(self) -> None:
         ctx = self._ctx
         rt = self.rt
         if rt.chunk_bridge is None or rt.rolling_inflight is None:
             return
-        now_mono = time.monotonic()
-        if (not force) and ((now_mono - rt.rolling_last_poll_mono) < ctx["poll_interval_s"]):
-            return
-        rt.rolling_last_poll_mono = now_mono
 
         inflight = dict(rt.rolling_inflight or {})
         seq = int(inflight.get("seq") or 0)
@@ -1623,12 +1675,12 @@ class RollingContextSession:
         }
         await self._update_state_and_emit_result()
 
-    async def _process_rolling(self, *, force_poll: bool = False, force_emit: bool = False) -> None:
-        await self._poll_inference(force=force_poll)
+    async def _process_rolling(self, *, force_emit: bool = False) -> None:
+        await self._poll_inference()
         await self._enqueue_inference(force=force_emit)
 
-    async def _drain_inflight_only(self, *, force_poll: bool = True) -> None:
-        await self._poll_inference(force=force_poll)
+    async def _drain_inflight_only(self) -> None:
+        await self._poll_inference()
 
     async def run(self) -> None:
         session_id = self.session_id
@@ -1648,6 +1700,8 @@ class RollingContextSession:
             return
 
         await websocket.accept()
+        self._completion_loop = asyncio.get_running_loop()
+        self._completion_ready = asyncio.Event()
         try:
             session_snapshot = live_sessions.snapshot(session_id)
             snap_lang = _normalize_optional_language((session_snapshot or {}).get("asr_language"))
@@ -1694,7 +1748,10 @@ class RollingContextSession:
                     diarize_min_speakers=ctx["LIVE_DIARIZE_MIN_SPEAKERS"],
                     diarize_max_speakers=ctx["LIVE_DIARIZE_MAX_SPEAKERS"],
                 )
-                rt.chunk_bridge.start_completion_stream(session_id=session_id)
+                rt.chunk_bridge.start_completion_stream(
+                    session_id=session_id,
+                    on_terminal_event=self._notify_terminal_ready,
+                )
                 rt.recording_state = "recording"
                 rt.recording_path = str(rec_snap.wav_path)
                 rt.recording_bytes = int(rec_snap.bytes_written)
@@ -1705,7 +1762,6 @@ class RollingContextSession:
                     "rolling_context_started",
                     recording=rec_snap.to_dict(),
                     config={
-                        "poll_interval_ms": int(ctx["LIVE_ROLLING_POLL_INTERVAL_MS"]),
                         "min_infer_audio_ms": int(ctx["LIVE_ROLLING_MIN_INFER_AUDIO_MS"]),
                         "single_segment_commit_min_ms": int(ctx["single_segment_commit_min_ms"]),
                         "force_commit_repeats": int(ctx["force_commit_repeats"]),
@@ -1750,11 +1806,9 @@ class RollingContextSession:
                 self._append_log("rolling_context_init_error", error=f"{type(e).__name__}: {e}")
 
             while True:
-                try:
-                    incoming = await asyncio.wait_for(websocket.receive(), timeout=ctx["poll_interval_s"])
-                except asyncio.TimeoutError:
-                    # Keep draining/polling inference even when no websocket frames arrive.
-                    await self._process_rolling(force_poll=False, force_emit=False)
+                wait_kind, incoming = await self._wait_for_websocket_or_completion()
+                if wait_kind == "completion":
+                    await self._process_rolling(force_emit=False)
                     continue
 
                 if incoming.get("type") == "websocket.disconnect":
@@ -1791,7 +1845,7 @@ class RollingContextSession:
                     if raw:
                         rt.rolling_pcm.extend(raw)
 
-                    await self._process_rolling(force_poll=False, force_emit=False)
+                    await self._process_rolling(force_emit=False)
 
                     should_emit_stats = snapshot["frames_received"] == 1 or (snapshot["frames_received"] % 50) == 0
                     if should_emit_stats:
@@ -1903,16 +1957,17 @@ class RollingContextSession:
                     if rt.finalization_state not in {"error", "ready"}:
                         rt.finalization_state = "finalizing"
                     await self._update_state_and_emit_result()
-                    await self._process_rolling(force_poll=True, force_emit=True)
+                    await self._process_rolling(force_emit=True)
                     wait_deadline = time.monotonic() + max(0.0, ctx["LIVE_DRAIN_WAIT_S"])
                     while time.monotonic() < wait_deadline:
-                        await self._drain_inflight_only(force_poll=True)
+                        await self._drain_inflight_only()
                         if rt.rolling_inflight is None:
                             break
-                        await asyncio.sleep(min(0.1, ctx["poll_interval_s"]))
+                        remaining_s = max(0.0, wait_deadline - time.monotonic())
+                        await self._wait_for_completion_or_timeout(timeout_s=min(0.1, remaining_s))
 
                     self._finalize_recording(reason=rt.stop_reason)
-                    await self._drain_inflight_only(force_poll=True)
+                    await self._drain_inflight_only()
                     self._commit_preview_tail_if_needed()
                     if rt.finalization_state != "error":
                         rt.finalization_state = "ready"
@@ -1959,18 +2014,19 @@ class RollingContextSession:
                     pass
         finally:
             self._finalize_recording(reason=rt.stop_reason)
-            await self._drain_inflight_only(force_poll=True)
+            await self._drain_inflight_only()
             if rt.stop_reason == "client_stop":
                 wait_timeout = 0.0
             else:
                 wait_timeout = ctx["LIVE_DRAIN_WAIT_S"]
             wait_deadline = time.monotonic() + max(0.0, float(wait_timeout))
             while time.monotonic() < wait_deadline:
-                await self._drain_inflight_only(force_poll=True)
+                await self._drain_inflight_only()
                 remaining_ms = int(max(0, rt.recording_duration_ms - rt.rolling_processed_offset_ms))
                 if (rt.rolling_inflight is None) and remaining_ms < ctx["LIVE_ROLLING_MIN_INFER_AUDIO_MS"]:
                     break
-                await asyncio.sleep(min(0.1, ctx["poll_interval_s"]))
+                remaining_s = max(0.0, wait_deadline - time.monotonic())
+                await self._wait_for_completion_or_timeout(timeout_s=min(0.1, remaining_s))
 
             self._commit_preview_tail_if_needed()
             if rt.finalization_state not in {"error", "ready"}:
@@ -1995,6 +2051,8 @@ class RollingContextSession:
                     rt.recorder.abort()
                 except Exception:
                     pass
+            self._completion_ready = None
+            self._completion_loop = None
 
 async def run_live_session_ws_rolling_context(
     session_id: str,

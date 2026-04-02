@@ -53,7 +53,6 @@ LIVE_DIARIZE_ENABLED = get_bool("live.diarize_enabled", False)
 LIVE_DIARIZE_SPEAKER_MODE = get_str("live.diarize_speaker_mode", "fixed")
 LIVE_DIARIZE_MIN_SPEAKERS = get_int("live.diarize_min_speakers", 1, min_value=1)
 LIVE_DIARIZE_MAX_SPEAKERS = get_int("live.diarize_max_speakers", 4, min_value=1)
-LIVE_ROLLING_POLL_INTERVAL_MS = get_int("polling_intervals.live_rolling_poll_ms", 250, min_value=20)
 LIVE_ROLLING_MIN_INFER_AUDIO_MS = get_int("live.rolling.min_infer_audio_ms", 1000, min_value=200)
 LIVE_ROLLING_SINGLE_COMMIT_MIN_MS = max(
     LIVE_ROLLING_MIN_INFER_AUDIO_MS,
@@ -83,7 +82,7 @@ LIVE_ROLLING_BUFFER_TRIM_DROP_MS = max(
 LIVE_ROLLING_MIN_NEW_AUDIO_MS = get_int("live.rolling.min_new_audio_ms", LIVE_ROLLING_MIN_INFER_AUDIO_MS, min_value=0)
 LIVE_ROLLING_MIN_EMIT_INTERVAL_MS = get_int(
     "polling_intervals.live_rolling_emit_min_ms",
-    LIVE_ROLLING_POLL_INTERVAL_MS,
+    250,
     min_value=0,
 )
 LIVE_ROLLING_PACING_BASE_EMIT_MS = get_int("live.rolling.pacing.base_emit_ms", 500, min_value=1)
@@ -153,7 +152,6 @@ LIVE_ROLLING_CONTEXT_CONFIG_KEYS = (
     "LIVE_DIARIZE_SPEAKER_MODE",
     "LIVE_DIARIZE_MIN_SPEAKERS",
     "LIVE_DIARIZE_MAX_SPEAKERS",
-    "LIVE_ROLLING_POLL_INTERVAL_MS",
     "LIVE_ROLLING_MIN_INFER_AUDIO_MS",
     "LIVE_ROLLING_SINGLE_COMMIT_MIN_MS",
     "LIVE_ROLLING_FORCE_COMMIT_REPEATS",

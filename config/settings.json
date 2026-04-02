@@ -60,7 +60,6 @@
   },
 
   "polling_intervals": {
-    "live_rolling_poll_ms": 100,
     "live_rolling_emit_min_ms": 120,
     "asr_blob_cleanup_s": 120
   },
