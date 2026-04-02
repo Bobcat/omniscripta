@@ -112,6 +112,7 @@ class _RollingRuntime:
     rolling_last_poll_mono: float = 0.0
     rolling_gpu_proxy_transcribe_s: float = 0.0
     rolling_gpu_proxy_pipeline_s: float = 0.0
+    rolling_result_emit_trace: dict[str, Any] | None = None
 
     rolling_call_audit_recent: list[dict[str, Any]] = field(default_factory=list)
     rolling_call_audit_summary: dict[str, Any] = field(
@@ -399,25 +400,45 @@ class RollingContextSession:
         }
         return self._ctx
 
-    async def _emit_result_event(self, *, force: bool = False) -> None:
+    async def _emit_result_event(self, *, force: bool = False) -> bool:
         rt = self.rt
         try:
             result_snapshot = self.live_sessions.live_result_snapshot(self.session_id)
         except Exception:
-            return
+            return False
         envelope = self._result_envelope_from_snapshot(result_snapshot, live_engine=self._ctx["LIVE_ENGINE"])
         try:
             signature = json.dumps(envelope, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         except Exception:
             signature = ""
+        trace = dict(rt.rolling_result_emit_trace or {})
         if not force and signature and signature == rt.last_result_event_signature:
-            return
+            if trace:
+                self._append_log(
+                    "rolling_result_event_skipped",
+                    reason="dedup_signature_match",
+                    force=bool(force),
+                    seq=(int(trace.get("seq")) if str(trace.get("seq") or "").strip() else None),
+                    job_id=str(trace.get("job_id") or ""),
+                    outcome=str(trace.get("outcome") or ""),
+                )
+            return False
         try:
             await self._send_event(result_event(self.session_id, envelope=envelope))
         except Exception:
-            return
+            return False
         if signature:
             rt.last_result_event_signature = signature
+        self._append_log(
+            "rolling_result_event_sent",
+            force=bool(force),
+            seq=(int(trace.get("seq")) if str(trace.get("seq") or "").strip() else None),
+            job_id=str(trace.get("job_id") or ""),
+            outcome=str(trace.get("outcome") or ""),
+            transcript_revision=int(max(0, int(envelope.get("transcript_revision") or 0))),
+            final_segments_count=int(len(envelope.get("final_segments") or [])),
+        )
+        return True
 
     def _sync_counts_from_result(self, result: dict[str, Any]) -> None:
         rt = self.rt
@@ -948,6 +969,7 @@ class RollingContextSession:
     async def _update_state_and_emit_result(self, *, force_result: bool = False) -> None:
         self._update_state()
         await self._emit_result_event(force=force_result)
+        self.rt.rolling_result_emit_trace = None
 
     def _archive_current_result(self, *, close_reason: str) -> dict[str, Any]:
         rt = self.rt
@@ -1376,6 +1398,15 @@ class RollingContextSession:
             return
         if not bool(has_terminal):
             return
+        self._append_log(
+            "rolling_inference_terminal_ready",
+            seq=int(seq),
+            job_id=str(job_id),
+            t0_ms=int(t0_ms),
+            t1_ms=int(t1_ms),
+            forced=bool(forced),
+            empty_retry=bool(empty_retry_call),
+        )
         try:
             poll = await asyncio.to_thread(rt.chunk_bridge.take_terminal_result, job_id, t0_offset_ms=t0_ms)
         except Exception as e:
@@ -1408,6 +1439,7 @@ class RollingContextSession:
             await self._update_state_and_emit_result()
             return
 
+        call_outcome = "error"
         if bool(poll.ok):
             raw_segments = poll.segments if isinstance(poll.segments, list) else []
             segments_returned_count = int(len(raw_segments))
@@ -1697,6 +1729,11 @@ class RollingContextSession:
         rt.rolling_inflight = None
         if rt.finalization_state not in {"error", "ready"}:
             rt.finalization_state = "recording" if str(rt.recording_state or "") == "recording" else "processing_chunks"
+        rt.rolling_result_emit_trace = {
+            "seq": int(seq),
+            "job_id": str(job_id),
+            "outcome": str(call_outcome),
+        }
         await self._update_state_and_emit_result()
 
     async def _process_rolling(self, *, force_poll: bool = False, force_emit: bool = False) -> None:

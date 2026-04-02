@@ -175,6 +175,11 @@ def _normalize_upload_language(language: str | None) -> str:
     return raw
 
 
+def _parse_align_options(align: str) -> bool:
+    """Parse align option: 'enabled' or 'disabled' (default)."""
+    return str(align or "").strip().lower() == "enabled"
+
+
 def _snip_seconds_override(request: Request) -> int | None:
     raw = _request_param(request, "snip")
     if not raw:
@@ -194,12 +199,14 @@ def create_demo_job(
     file: UploadFile = File(...),
     language: str = Form(""),
     speakers: str = Form("none"),
+    align: str = Form("disabled"),
 ) -> dict[str, Any]:
     orig_name = Path(file.filename or "").name or "upload.bin"
 
     base_options: dict[str, Any] = {
         "language": _normalize_upload_language(language),
         **_parse_speaker_options(speakers),
+        "align_enabled": _parse_align_options(align),
     }
     snippet_seconds_override = _snip_seconds_override(request)
     if snippet_seconds_override is not None:
@@ -242,6 +249,7 @@ def create_demo_job(
                 "min_speakers": base_options.get("min_speakers"),
                 "max_speakers": base_options.get("max_speakers"),
                 "snippet_seconds": base_options.get("snippet_seconds"),
+                "align_enabled": base_options.get("align_enabled"),
                 "asr_input_relpath": None,
                 "snippet_filename": None,
                 "srt_filename": None,

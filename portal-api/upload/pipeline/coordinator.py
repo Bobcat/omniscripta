@@ -466,7 +466,7 @@ class UploadBatchCoordinator:
                 "min_speakers": opts.get("min_speakers"),
                 "max_speakers": opts.get("max_speakers"),
                 "diarize_enabled": bool(speaker_mode != "none"),
-                "align_enabled": True,
+                "align_enabled": opts.get("align_enabled", True),
                 "initial_prompt": opts.get("initial_prompt"),
                 "priority": "background",
                 "routing": {
