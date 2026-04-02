@@ -1,9 +1,5 @@
 {
-  "_comment": "Standaard applicatie instellingen. Niet wijzigen - gebruik local.json voor overrides.",
-  
   "service": {
-    "host": "127.0.0.1",
-    "port": 8001,
     "root_path": "/api"
   },
   
@@ -37,10 +33,6 @@
       "buffer_trim_threshold_ms": 30000,
       "buffer_trim_drop_ms": 20000,
       "min_new_audio_ms": 500,
-      "empty_retry": {
-        "enabled": false,
-        "after_audio_ms": 100
-      },
       "pacing": {
         "base_emit_ms": 250,
         "startup": {
@@ -70,11 +62,6 @@
   "polling_intervals": {
     "live_rolling_poll_ms": 100,
     "live_rolling_emit_min_ms": 120,
-    "asr_pool_watchdog_poll_ms": 2000,
-    "asr_pool_stage_poll_ms": 150,
-    "asr_pool_warm_response_poll_ms": 50,
-    "asr_remote_pending_status_poll_s": 1.0,
-    "asr_pool_records_prune_s": 30,
     "asr_blob_cleanup_s": 120
   },
   
@@ -95,14 +82,9 @@
   },
   
   "worker": {
-    "queue_base": "data/jobs/upload_worker",
-    "queue_name": "",
-    "consumer_id": "",
-    "max_outstanding_requests": 1,
     "progress_db_dir": "data/progress_db",
     "progress_runs_path": "data/progress_db/runs_v1.jsonl",
     "host_id": "",
-    "instance": "1",
     "hardware_key": ""
   },
 
