@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Restart the full live backend stack in a stable order and wait for key HTTP endpoints.
+# Restart the full prod backend stack in a stable order and wait for key HTTP endpoints.
 # If not run as root, this script uses sudo for system-level units.
 
 API_UNIT="transcribe-api.service"
 # ASR_UNIT="transcribe-asr-pool.service"
 BATCH_WORKER_UNIT="asr-worker-batch.service"
-LIVE_WORKER_UNIT="asr-worker-live.service"
 LLM_WORKER_UNIT="llm-worker.service"
 TABBY_TUNNEL_UNIT="transcribe-tabby-tunnel.service"
 
@@ -86,11 +85,10 @@ systemctl_live restart "$API_UNIT"
 log "Waiting for API health..."
 wait_for_http "$API_HEALTH_URL" "$API_READY_TIMEOUT_S" "API health" "200"
 
-log "Waiting for ASR pool readiness (warm startup may take time)..."
+log "Waiting for ASR pool readiness via the dc1 prod access path..."
 wait_for_http "$ASR_POOL_URL" "$ASR_POOL_READY_TIMEOUT_S" "ASR pool readiness" "200,401"
 
-log "Restarting workers + tabby tunnel..."
-# systemctl_live restart "$BATCH_WORKER_UNIT" "$LIVE_WORKER_UNIT" "$LLM_WORKER_UNIT" "$TABBY_TUNNEL_UNIT"
+log "Restarting batch worker + tabby tunnel..."
 systemctl_live restart "$BATCH_WORKER_UNIT" "$LLM_WORKER_UNIT" "$TABBY_TUNNEL_UNIT"
 
 echo
@@ -98,7 +96,6 @@ echo "[live-restart] Service status:"
 print_status \
   "$API_UNIT" \
   "$BATCH_WORKER_UNIT" \
-  "$LIVE_WORKER_UNIT" \
   "$LLM_WORKER_UNIT" \
   "$TABBY_TUNNEL_UNIT"
 

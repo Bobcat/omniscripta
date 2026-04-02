@@ -7,7 +7,6 @@ set -euo pipefail
 API_UNIT="transcribe-api-dev.service"
 ASR_UNIT="transcribe-asr-pool-dev.service"
 BATCH_WORKER_UNIT="asr-worker-batch-dev@1.service"
-LIVE_WORKER_UNIT="asr-worker-live-dev@1.service"
 LLM_WORKER_UNIT="llm-worker-dev@1.service"
 FRONTEND_UNIT="transcribe-frontend-dev.service"
 
@@ -70,7 +69,7 @@ log "Waiting for ASR pool readiness (warm startup may take time)..."
 wait_for_http "$ASR_POOL_URL" "$ASR_POOL_READY_TIMEOUT_S" "ASR pool readiness"
 
 log "Restarting workers..."
-systemctl --user restart "$BATCH_WORKER_UNIT" "$LIVE_WORKER_UNIT" "$LLM_WORKER_UNIT"
+systemctl --user restart "$BATCH_WORKER_UNIT" "$LLM_WORKER_UNIT"
 
 log "Restarting frontend proxy..."
 systemctl --user restart "$FRONTEND_UNIT"
@@ -84,7 +83,6 @@ print_status \
   "$API_UNIT" \
   "$ASR_UNIT" \
   "$BATCH_WORKER_UNIT" \
-  "$LIVE_WORKER_UNIT" \
   "$LLM_WORKER_UNIT" \
   "$FRONTEND_UNIT"
 

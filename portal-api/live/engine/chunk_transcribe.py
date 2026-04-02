@@ -1,41 +1,31 @@
 from __future__ import annotations
 
-import os
 import re
-import sys
 import threading
 import wave
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
+from asr_pool_api import (
+    ASRAudioFile,
+    ASRCompletionEvent,
+    ASRCompletionFeedReset,
+    ASROutputSelection,
+    ASRPoolClient,
+    ASRPoolClientConfig,
+    ASRPoolError,
+    ASRRequestOptions,
+    ASRRequestRouting,
+    ASRSubmitRequest,
+)
 from live._util import _normalize_optional_language
 from shared.app_config import get_setting
-
-_POOL_REPO_ROOT_CANDIDATES = [
-    str(os.getenv("ASR_POOL_REPO_ROOT") or "").strip(),
-    "/home/gunnar/projects/asr-pool-dev",
-    "/srv/asr-pool",
-]
-for _candidate in _POOL_REPO_ROOT_CANDIDATES:
-    if not _candidate:
-        continue
-    _module_path = Path(_candidate) / "asr_pool_transport.py"
-    if _module_path.exists():
-        if _candidate not in sys.path:
-            sys.path.insert(0, _candidate)
-        break
-
-from asr_pool_transport import PoolTransportConfig
-from asr_pool_transport import download_request_srt_to_path as _transport_download_request_srt_to_path
-from asr_pool_transport import stream_completions_forever as _transport_stream_completions_forever
-from asr_pool_transport import submit_multipart_request as _transport_submit_multipart_request
 
 
 DEFAULT_SAMPLE_RATE_HZ = 16000
 DEFAULT_CHANNELS = 1
 DEFAULT_SAMPLE_WIDTH_BYTES = 2
-ASR_SCHEMA_VERSION = "asr_v2"
 _SPEAKER_PREFIX_RE = re.compile(
     r"^\s*\[?\s*((?:speaker[_ ]?\d+|spk[_ ]?\d+))\s*\]?\s*[:\-]",
     re.IGNORECASE,
@@ -203,10 +193,12 @@ class LiveChunkBatchBridge:
             and self.diarize_max_speakers < self.diarize_min_speakers
         ):
             self.diarize_max_speakers = int(self.diarize_min_speakers)
-        self._transport_cfg = PoolTransportConfig(
-            base_url=str(get_setting("asr_pool.base_url", "http://127.0.0.1:8090") or "http://127.0.0.1:8090"),
-            token=str(get_setting("asr_pool.token", "") or ""),
-        ).normalized()
+        self._pool_client = ASRPoolClient(
+            ASRPoolClientConfig(
+                base_url=str(get_setting("asr_pool.base_url", "http://127.0.0.1:8090") or "http://127.0.0.1:8090"),
+                token=str(get_setting("asr_pool.token", "") or ""),
+            )
+        )
         self._request_meta: dict[str, dict[str, Any]] = {}
         self._terminal_events: dict[str, dict[str, Any]] = {}
         self._lock = threading.Lock()
@@ -296,13 +288,27 @@ class LiveChunkBatchBridge:
             stop_event = self._stream_stop
 
         def _run() -> None:
-            _transport_stream_completions_forever(
-                config=self._transport_cfg,
-                consumer_id=consumer_id,
-                start_since_seq=0,
-                stop_event=stop_event,
-                on_event=self._on_completion_stream_event,
-            )
+            try:
+                for event in self._pool_client.iter_completions(
+                    consumer_id=consumer_id,
+                    since_seq=0,
+                    stop_event=stop_event,
+                ):
+                    if isinstance(event, ASRCompletionEvent):
+                        payload = event.status.to_dict()
+                        payload["seq"] = int(event.seq)
+                        payload["ts_utc"] = str(event.ts_utc)
+                        self._on_completion_stream_event("completion", payload)
+                    elif isinstance(event, ASRCompletionFeedReset):
+                        self._on_completion_stream_event(
+                            "feed_reset",
+                            {
+                                "old_feed_id": str(event.old_feed_id),
+                                "new_feed_id": str(event.new_feed_id),
+                            },
+                        )
+            except ASRPoolError:
+                return
 
         thread = threading.Thread(
             target=_run,
@@ -386,61 +392,49 @@ class LiveChunkBatchBridge:
             t1_ms=int(max(max(0, t0_ms), t1_ms)),
         )
         consumer_id = self._request_consumer_id(safe_session_id=safe_id)
-        options: dict[str, Any] = {
-            "align_enabled": bool(get_setting("live.asr.align_enabled", False)),
-            "diarize_enabled": bool(self.diarize_enabled) and speaker_mode != "none",
-            "speaker_mode": speaker_mode,
-        }
-        if resolved_language is not None:
-            options["language"] = resolved_language
-        if prompt_text:
-            options["initial_prompt"] = prompt_text
-        if asr_beam_size is not None:
-            options["beam_size"] = int(max(1, asr_beam_size))
-        if asr_chunk_size is not None:
-            options["chunk_size"] = int(max(1, asr_chunk_size))
+        resolved_backend: str | None = None
         if asr_backend is not None:
             backend = str(asr_backend).strip().lower()
             if backend:
-                options["asr_backend"] = backend
-        if speaker_mode == "fixed":
-            if min_speakers is not None:
-                options["min_speakers"] = int(max(1, min_speakers))
-            if max_speakers is not None:
-                options["max_speakers"] = int(max(1, max_speakers))
-        request_payload = {
-            "schema_version": ASR_SCHEMA_VERSION,
-            "request_id": str(request_id),
-            "consumer_id": str(consumer_id),
-            "priority": "interactive",
-            "routing": {
-                "fairness_key": (str(session_id) or "live"),
-            },
-            "audio": {
-                "local_path": str(chunk_wav),
-                "duration_ms": int(max(1, max(max(0, t0_ms), t1_ms) - max(0, t0_ms))),
-                "format": "wav",
-                "sample_rate_hz": int(self.sample_rate_hz),
-                "channels": int(self.channels),
-            },
-            "options": options,
-            "outputs": {
-                "text": False,
-                "segments": False,
-                "srt": True,
-                "srt_inline": False,
-            },
-        }
-        status_code, submit_body, _attempts_used = _transport_submit_multipart_request(
-            config=self._transport_cfg,
-            request_payload=request_payload,
-            audio_path=chunk_wav,
+                resolved_backend = backend
+        submit_request = ASRSubmitRequest(
+            request_id=str(request_id),
+            consumer_id=str(consumer_id),
+            priority="interactive",
+            routing=ASRRequestRouting(
+                fairness_key=(str(session_id) or "live"),
+            ),
+            audio=ASRAudioFile(
+                path=chunk_wav,
+                duration_ms=int(max(1, max(max(0, t0_ms), t1_ms) - max(0, t0_ms))),
+                format="wav",
+                sample_rate_hz=int(self.sample_rate_hz),
+                channels=int(self.channels),
+            ),
+            options=ASRRequestOptions(
+                language=resolved_language,
+                initial_prompt=(prompt_text or None),
+                align_enabled=bool(get_setting("live.asr.align_enabled", False)),
+                diarize_enabled=bool(self.diarize_enabled) and speaker_mode != "none",
+                speaker_mode=speaker_mode,
+                min_speakers=(int(max(1, min_speakers)) if speaker_mode == "fixed" and min_speakers is not None else None),
+                max_speakers=(int(max(1, max_speakers)) if speaker_mode == "fixed" and max_speakers is not None else None),
+                beam_size=(int(max(1, asr_beam_size)) if asr_beam_size is not None else None),
+                chunk_size=(int(max(1, asr_chunk_size)) if asr_chunk_size is not None else None),
+                asr_backend=resolved_backend,
+            ),
+            outputs=ASROutputSelection(
+                text=False,
+                segments=False,
+                srt=True,
+                srt_inline=False,
+            ),
         )
-        if int(status_code) not in {200, 202}:
-            err_code = str((submit_body or {}).get("code") or "ASR_POOL_SUBMIT_FAILED")
-            err_msg = str((submit_body or {}).get("message") or f"ASR pool submit failed with HTTP {status_code}")
-            raise RuntimeError(f"{err_code}: {err_msg}")
-        accepted_request_id = str((submit_body or {}).get("request_id") or request_id).strip() or request_id
+        try:
+            submit_status = self._pool_client.submit_audio(submit_request)
+        except ASRPoolError as e:
+            raise RuntimeError(f"{e.code}: {e.message}") from e
+        accepted_request_id = str(submit_status.request_id or request_id).strip() or request_id
         srt_path = (sess_dir / f"{accepted_request_id}.srt").resolve()
         with self._lock:
             feed_generation = int(max(0, self._feed_generation))
@@ -518,12 +512,14 @@ class LiveChunkBatchBridge:
             if not srt_path_raw:
                 raise RuntimeError(f"Missing SRT output path for request: {rid}")
             srt_path = Path(srt_path_raw).resolve()
-            _transport_download_request_srt_to_path(
-                config=self._transport_cfg,
-                request_id=rid,
-                dst_path=srt_path,
-                allow_empty=True,
-            )
+            try:
+                self._pool_client.download_srt(
+                    request_id=rid,
+                    dst_path=srt_path,
+                    allow_empty=True,
+                )
+            except ASRPoolError as e:
+                raise RuntimeError(f"{e.code}: {e.message}") from e
             if srt_path.exists():
                 srt_text = srt_path.read_text(encoding="utf-8")
                 segments = _parse_srt_segments(srt_text, t0_offset_ms=int(max(0, t0_offset_ms)))
