@@ -387,7 +387,7 @@ class LiveChunkBatchBridge:
         )
         consumer_id = self._request_consumer_id(safe_session_id=safe_id)
         options: dict[str, Any] = {
-            "align_enabled": bool(get_setting("live.align_enabled", False)),
+            "align_enabled": bool(get_setting("live.asr.align_enabled", False)),
             "diarize_enabled": bool(self.diarize_enabled) and speaker_mode != "none",
             "speaker_mode": speaker_mode,
         }

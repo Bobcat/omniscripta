@@ -9,19 +9,26 @@
     "max_sessions": 12,
     "archive_ttl_s": 3600,
     "max_archives": 256,
-    "audio_sample_rate_hz": 16000,
-    "audio_channels": 1,
-    "drain_wait_s": 20.0,
-    "post_close_wait_s": 60.0,
-    "asr_language": null,
-    "asr_beam_size": 5,
-    "asr_chunk_size": 10,
-    "asr_backend": "whisperx",
-    "align_enabled": false,
-    "diarize_enabled": false,
-    "diarize_speaker_mode": "fixed",
-    "diarize_min_speakers": 1,
-    "diarize_max_speakers": 4,
+    "audio": {
+      "sample_rate_hz": 16000,
+      "channels": 1
+    },
+    "timing": {
+      "drain_wait_s": 20.0,
+      "post_close_wait_s": 60.0,
+      "emit_min_ms": 120
+    },
+    "asr": {
+      "language": null,
+      "beam_size": 5,
+      "chunk_size": 10,
+      "backend": "whisperx",
+      "align_enabled": false,
+      "diarize_enabled": false,
+      "diarize_speaker_mode": "fixed",
+      "diarize_min_speakers": 1,
+      "diarize_max_speakers": 4
+    },
     
     "rolling": {
       "min_infer_audio_ms": 500,
@@ -59,46 +66,6 @@
     }
   },
 
-  "polling_intervals": {
-    "live_rolling_emit_min_ms": 120,
-    "asr_blob_cleanup_s": 120
-  },
-  
-  "jobs": {
-    "upload_prep_base": "data/jobs/upload_prep",
-    "upload_worker_base": "data/jobs/upload_worker",
-    "live_worker_base": "data/jobs/live_worker"
-  },
-
-  "janitor": {
-    "enabled": true,
-    "min_age_s": 3600,
-    "max_per_state": 3000,
-    "dry_run": false,
-    "allow_nonstandard_base": false,
-    "verbose_items": false,
-    "verbose_items_max": 20
-  },
-  
-  "worker": {
-    "progress_db_dir": "data/progress_db",
-    "progress_runs_path": "data/progress_db/runs_v1.jsonl",
-    "host_id": "",
-    "hardware_key": ""
-  },
-
-  "upload_coordinator": {
-    "enabled": true,
-    "poll_interval_s": 0.5,
-    "idle_log_interval_s": 30.0,
-    "llm_wait_poll_s": 0.5,
-    "llm_wait_timeout_s": 1800.0
-  },
-
-  "snip": {
-    "minutes_default": 15
-  },
-
   "tabby": {
     "base_url": "http://127.0.0.1:5001",
     "api_key_env": "TABBY_API_KEY",
@@ -107,50 +74,63 @@
     "retry_sleep_s": 2
   },
 
-  "topics": {
-    "chunk_minutes": 15,
-    "ctx_len": 16384,
-    "ctx_safety": 0.85,
-    "prompt_overhead_tokens_est": 1200,
-    "token_estimator": "chars_div4",
-    "enabled": true,
-    "prompt_id": "topics_v1",
-    "prompt_path": "portal-api/upload/prompts/simple_prompt5.txt",
-    "model": "matatonic_Mistral-Small-24B-Instruct-2501-4.0bpw-exl2",
-    "generation": {
-      "max_tokens": 2048,
-      "temperature": 0.01,
-      "top_p": 1,
-      "top_k": 1,
-      "typical": 1,
-      "min_p": 0,
-      "tfs": 1,
-      "top_a": 0,
-      "smoothing_factor": 0,
-      "repetition_penalty": 1,
-      "penalty_range": 1024,
-      "frequency_penalty": 0,
-      "presence_penalty": 0,
-      "dry_multiplier": 0,
-      "mirostat_mode": 0,
-      "xtc_threshold": 0.1,
-      "xtc_probability": 0,
-      "stream": false
+  "upload": {
+    "queue": {
+      "prep_base": "data/jobs/upload_prep",
+      "worker_base": "data/jobs/upload_worker"
+    },
+    "worker": {
+      "progress_db_dir": "data/progress_db",
+      "progress_runs_path": "data/progress_db/runs_v1.jsonl",
+      "host_id": "",
+      "hardware_key": ""
+    },
+    "coordinator": {
+      "poll_interval_s": 0.5,
+      "idle_log_interval_s": 30.0,
+      "llm_wait_poll_s": 0.5,
+      "llm_wait_timeout_s": 1800.0
+    },
+    "snip": {
+      "minutes_default": 15
+    },
+    "topics": {
+      "chunk_minutes": 15,
+      "ctx_len": 16384,
+      "ctx_safety": 0.85,
+      "prompt_overhead_tokens_est": 1200,
+      "token_estimator": "chars_div4",
+      "enabled": true,
+      "prompt_id": "topics_v1",
+      "prompt_path": "portal-api/upload/prompts/simple_prompt5.txt",
+      "model": "matatonic_Mistral-Small-24B-Instruct-2501-4.0bpw-exl2",
+      "generation": {
+        "max_tokens": 2048,
+        "temperature": 0.01,
+        "top_p": 1,
+        "top_k": 1,
+        "typical": 1,
+        "min_p": 0,
+        "tfs": 1,
+        "top_a": 0,
+        "smoothing_factor": 0,
+        "repetition_penalty": 1,
+        "penalty_range": 1024,
+        "frequency_penalty": 0,
+        "presence_penalty": 0,
+        "dry_multiplier": 0,
+        "mirostat_mode": 0,
+        "xtc_threshold": 0.1,
+        "xtc_probability": 0,
+        "stream": false
+      }
     }
   },
   
   "asr_blob": {
     "root": "data/asr_blobs",
     "ttl_s": 3600,
+    "cleanup_interval_s": 120,
     "cleanup_max_scan_files": 5000
-  },
-  
-  "frontend_dev": {
-    "frontend_dir": "/home/gunnar/projects/transcribe-dev/static",
-    "api_base": "http://127.0.0.1:8001",
-    "host": "127.0.0.1",
-    "port": 8010,
-    "ws_buffer_bytes": 65536,
-    "ws_idle_timeout_s": 1800.0
   }
 }

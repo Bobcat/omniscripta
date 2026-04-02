@@ -10,7 +10,6 @@ BATCH_WORKER_UNIT="asr-worker-batch.service"
 LIVE_WORKER_UNIT="asr-worker-live.service"
 LLM_WORKER_UNIT="llm-worker.service"
 TABBY_TUNNEL_UNIT="transcribe-tabby-tunnel.service"
-JANITOR_TIMER_UNIT="transcribe-demo-jobs-janitor.timer"
 
 API_HEALTH_URL="http://127.0.0.1:8000/health"
 ASR_POOL_URL="http://127.0.0.1:8090/asr/v1/pool"
@@ -90,9 +89,9 @@ wait_for_http "$API_HEALTH_URL" "$API_READY_TIMEOUT_S" "API health" "200"
 log "Waiting for ASR pool readiness (warm startup may take time)..."
 wait_for_http "$ASR_POOL_URL" "$ASR_POOL_READY_TIMEOUT_S" "ASR pool readiness" "200,401"
 
-log "Restarting workers + tabby tunnel + janitor timer..."
-# systemctl_live restart "$BATCH_WORKER_UNIT" "$LIVE_WORKER_UNIT" "$LLM_WORKER_UNIT" "$TABBY_TUNNEL_UNIT" "$JANITOR_TIMER_UNIT"
-systemctl_live restart "$BATCH_WORKER_UNIT" "$LLM_WORKER_UNIT" "$TABBY_TUNNEL_UNIT" "$JANITOR_TIMER_UNIT"
+log "Restarting workers + tabby tunnel..."
+# systemctl_live restart "$BATCH_WORKER_UNIT" "$LIVE_WORKER_UNIT" "$LLM_WORKER_UNIT" "$TABBY_TUNNEL_UNIT"
+systemctl_live restart "$BATCH_WORKER_UNIT" "$LLM_WORKER_UNIT" "$TABBY_TUNNEL_UNIT"
 
 echo
 echo "[live-restart] Service status:"
@@ -101,8 +100,7 @@ print_status \
   "$BATCH_WORKER_UNIT" \
   "$LIVE_WORKER_UNIT" \
   "$LLM_WORKER_UNIT" \
-  "$TABBY_TUNNEL_UNIT" \
-  "$JANITOR_TIMER_UNIT"
+  "$TABBY_TUNNEL_UNIT"
 
 echo
 echo "[live-restart] OK"
