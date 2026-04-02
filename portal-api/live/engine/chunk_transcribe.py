@@ -213,6 +213,7 @@ class LiveChunkBatchBridge:
         self._stream_stop = threading.Event()
         self._stream_thread: threading.Thread | None = None
         self._stream_consumer_id: str = ""
+        self._stream_terminal_notify: Callable[[], None] | None = None
         self._feed_generation: int = 0
 
     def _request_id(self, *, safe_session_id: str, chunk_index: int, t0_ms: int, t1_ms: int) -> str:
@@ -252,6 +253,7 @@ class LiveChunkBatchBridge:
     def _on_completion_stream_event(self, kind: str, payload: dict[str, Any]) -> None:
         event_kind = str(kind or "").strip().lower()
         data = dict(payload or {})
+        notify: Callable[[], None] | None = None
         if event_kind == "completion":
             rid = str(data.get("request_id") or "").strip()
             state = str(data.get("state") or "").strip().lower()
@@ -259,12 +261,24 @@ class LiveChunkBatchBridge:
                 return
             with self._lock:
                 self._terminal_events[rid] = data
+                notify = self._stream_terminal_notify
+            if notify is not None:
+                try:
+                    notify()
+                except Exception:
+                    pass
             return
         if event_kind == "feed_reset":
             with self._lock:
                 self._feed_generation = int(max(0, self._feed_generation + 1))
+                notify = self._stream_terminal_notify
+            if notify is not None:
+                try:
+                    notify()
+                except Exception:
+                    pass
 
-    def start_completion_stream(self, *, session_id: str) -> None:
+    def start_completion_stream(self, *, session_id: str, on_terminal_event: Callable[[], None] | None = None) -> None:
         safe_id = _safe_session_id(session_id)
         consumer_id = self._request_consumer_id(safe_session_id=safe_id)
         with self._lock:
@@ -272,8 +286,10 @@ class LiveChunkBatchBridge:
             if running:
                 if self._stream_consumer_id != consumer_id:
                     raise RuntimeError("Completion stream already running for a different consumer_id")
+                self._stream_terminal_notify = on_terminal_event
                 return
             self._stream_consumer_id = str(consumer_id)
+            self._stream_terminal_notify = on_terminal_event
             self._stream_stop = threading.Event()
             self._terminal_events.clear()
             self._feed_generation = 0
@@ -303,6 +319,7 @@ class LiveChunkBatchBridge:
             thread = self._stream_thread
             self._stream_thread = None
             self._stream_consumer_id = ""
+            self._stream_terminal_notify = None
         stop_event.set()
         if thread is not None:
             thread.join(timeout=1.0)
@@ -370,7 +387,7 @@ class LiveChunkBatchBridge:
         )
         consumer_id = self._request_consumer_id(safe_session_id=safe_id)
         options: dict[str, Any] = {
-            "align_enabled": bool(get_setting("live.align_enabled", False)),
+            "align_enabled": bool(get_setting("live.asr.align_enabled", False)),
             "diarize_enabled": bool(self.diarize_enabled) and speaker_mode != "none",
             "speaker_mode": speaker_mode,
         }

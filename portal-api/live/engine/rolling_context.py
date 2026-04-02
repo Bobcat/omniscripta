@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from dataclasses import dataclass, field
 import hashlib
 import json
@@ -94,6 +95,7 @@ class _RollingRuntime:
     rolling_pcm: bytearray = field(default_factory=bytearray)
     rolling_pcm_base_ms: int = 0
     rolling_processed_offset_ms: int = 0
+    rolling_decode_offset_ms: int = 0
     rolling_commit_index_next: int = 0
     rolling_chunks_total: int = 0
     rolling_chunks_done: int = 0
@@ -102,14 +104,8 @@ class _RollingRuntime:
     rolling_infer_seq_next: int = 0
     rolling_inflight: dict[str, Any] | None = None
     rolling_last_submitted_t1_ms: int = 0
-    rolling_empty_retry_pending: bool = False
-    rolling_empty_retry_source_seq: int = -1
-    rolling_empty_retry_t0_ms: int = 0
-    rolling_empty_retry_t1_ms: int = 0
-    rolling_empty_retry_target_audio_ms: int = 0
     rolling_last_applied_seq: int = -1
     rolling_last_emit_mono: float = 0.0
-    rolling_last_poll_mono: float = 0.0
     rolling_gpu_proxy_transcribe_s: float = 0.0
     rolling_gpu_proxy_pipeline_s: float = 0.0
     rolling_result_emit_trace: dict[str, Any] | None = None
@@ -138,6 +134,7 @@ class _RollingRuntime:
     rolling_same_preview_audio_repeats: int = 0
     rolling_last_preview_text: str = ""
     rolling_last_preview_audio_end_fallback_ms: int = 0
+    rolling_last_preview_source_t0_ms: int = 0
     rolling_pacing_epoch_mono_ms: int = 0
     rolling_pacing_last_slot_index: int = -1
     rolling_speech_gate_state: str = "active"
@@ -168,9 +165,6 @@ class _RollingRuntime:
             "speech_gate_state_transitions": 0,
             "speech_gate_silence_flush_count": 0,
             "speech_gate_forced_commit_count": 0,
-            "empty_retry_scheduled_count": 0,
-            "empty_retry_enqueued_count": 0,
-            "empty_retry_canceled_count": 0,
         }
     )
     last_result_event_signature: str = ""
@@ -193,6 +187,8 @@ class RollingContextSession:
         self.config = config
         self.rt = _RollingRuntime()
         self._ctx: dict[str, Any] = {}
+        self._completion_ready: asyncio.Event | None = None
+        self._completion_loop: asyncio.AbstractEventLoop | None = None
 
     async def _send_event(self, payload: dict[str, Any]) -> None:
         out = dict(payload)
@@ -244,6 +240,65 @@ class RollingContextSession:
             pass
 
     @staticmethod
+    async def _cancel_pending_task(task: asyncio.Task[Any] | None) -> None:
+        if task is None or task.done():
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    def _notify_terminal_ready(self) -> None:
+        loop = self._completion_loop
+        ready = self._completion_ready
+        if loop is None or ready is None:
+            return
+        try:
+            loop.call_soon_threadsafe(ready.set)
+        except RuntimeError:
+            pass
+
+    async def _wait_for_websocket_or_completion(self) -> tuple[str, dict[str, Any] | None]:
+        ready = self._completion_ready
+        if ready is not None and ready.is_set():
+            ready.clear()
+            return "completion", None
+
+        receive_task: asyncio.Task[dict[str, Any]] = asyncio.create_task(self.websocket.receive())
+        completion_task: asyncio.Task[bool] | None = None
+        tasks: set[asyncio.Task[Any]] = {receive_task}
+        if ready is not None:
+            completion_task = asyncio.create_task(ready.wait())
+            tasks.add(completion_task)
+
+        done, _pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        if receive_task in done:
+            await self._cancel_pending_task(completion_task)
+            return "websocket", receive_task.result()
+
+        if ready is not None:
+            ready.clear()
+        await self._cancel_pending_task(receive_task)
+        return "completion", None
+
+    async def _wait_for_completion_or_timeout(self, *, timeout_s: float) -> bool:
+        safe_timeout_s = float(max(0.0, timeout_s))
+        if safe_timeout_s <= 0.0:
+            return False
+        ready = self._completion_ready
+        if ready is None:
+            await asyncio.sleep(safe_timeout_s)
+            return False
+        if ready.is_set():
+            ready.clear()
+            return True
+        try:
+            await asyncio.wait_for(ready.wait(), timeout=safe_timeout_s)
+        except asyncio.TimeoutError:
+            return False
+        ready.clear()
+        return True
+
+    @staticmethod
     def _preview_signature(value: str) -> str:
         return " ".join(str(value or "").strip().lower().split())
 
@@ -266,7 +321,6 @@ class RollingContextSession:
         live_diarize_speaker_mode = str(_cfg(config, "LIVE_DIARIZE_SPEAKER_MODE") or "fixed").strip().lower()
         live_diarize_min_speakers = int(max(1, int(_cfg(config, "LIVE_DIARIZE_MIN_SPEAKERS"))))
         live_diarize_max_speakers = int(max(1, int(_cfg(config, "LIVE_DIARIZE_MAX_SPEAKERS"))))
-        live_rolling_poll_interval_ms = int(_cfg(config, "LIVE_ROLLING_POLL_INTERVAL_MS"))
         live_rolling_min_infer_audio_ms = int(_cfg(config, "LIVE_ROLLING_MIN_INFER_AUDIO_MS"))
         live_rolling_single_commit_min_ms = int(_cfg(config, "LIVE_ROLLING_SINGLE_COMMIT_MIN_MS"))
         live_rolling_force_commit_repeats = int(_cfg(config, "LIVE_ROLLING_FORCE_COMMIT_REPEATS"))
@@ -276,8 +330,6 @@ class RollingContextSession:
         live_rolling_buffer_trim_threshold_ms = int(_cfg(config, "LIVE_ROLLING_BUFFER_TRIM_THRESHOLD_MS"))
         live_rolling_buffer_trim_drop_ms = int(_cfg(config, "LIVE_ROLLING_BUFFER_TRIM_DROP_MS"))
         live_rolling_min_new_audio_ms = int(_cfg(config, "LIVE_ROLLING_MIN_NEW_AUDIO_MS"))
-        live_rolling_empty_retry_enabled = bool(_cfg(config, "LIVE_ROLLING_EMPTY_RETRY_ENABLED"))
-        live_rolling_empty_retry_after_audio_ms = int(_cfg(config, "LIVE_ROLLING_EMPTY_RETRY_AFTER_AUDIO_MS"))
         live_rolling_min_emit_interval_ms = int(_cfg(config, "LIVE_ROLLING_MIN_EMIT_INTERVAL_MS"))
         live_rolling_pacing_base_emit_ms = int(_cfg(config, "LIVE_ROLLING_PACING_BASE_EMIT_MS"))
         live_rolling_pacing_startup_duration_ms = int(_cfg(config, "LIVE_ROLLING_PACING_STARTUP_DURATION_MS"))
@@ -297,7 +349,6 @@ class RollingContextSession:
             _cfg(config, "LIVE_ROLLING_SPEECH_GATE_FORCE_COMMIT_SILENCE_MS")
         )
 
-        poll_interval_s = max(0.02, float(live_rolling_poll_interval_ms) / 1000.0)
         min_new_audio_ms = int(max(0, live_rolling_min_new_audio_ms))
         single_segment_commit_min_ms = int(max(live_rolling_min_infer_audio_ms, live_rolling_single_commit_min_ms))
         force_commit_repeats = int(max(1, live_rolling_force_commit_repeats))
@@ -310,8 +361,6 @@ class RollingContextSession:
         )
         buffer_trim_threshold_ms = int(max(max_decode_window_ms, live_rolling_buffer_trim_threshold_ms))
         buffer_trim_drop_ms = int(max(live_rolling_min_infer_audio_ms, live_rolling_buffer_trim_drop_ms))
-        empty_retry_enabled = bool(live_rolling_empty_retry_enabled)
-        empty_retry_after_audio_ms = int(max(0, live_rolling_empty_retry_after_audio_ms))
         pacing_base_emit_ms = int(max(1, live_rolling_pacing_base_emit_ms))
         startup_duration_ms = int(max(0, live_rolling_pacing_startup_duration_ms))
         startup_emit_ms = int(max(1, live_rolling_pacing_startup_emit_ms))
@@ -364,13 +413,9 @@ class RollingContextSession:
             "LIVE_DIARIZE_SPEAKER_MODE": live_diarize_speaker_mode,
             "LIVE_DIARIZE_MIN_SPEAKERS": live_diarize_min_speakers,
             "LIVE_DIARIZE_MAX_SPEAKERS": live_diarize_max_speakers,
-            "LIVE_ROLLING_POLL_INTERVAL_MS": live_rolling_poll_interval_ms,
             "LIVE_ROLLING_MIN_INFER_AUDIO_MS": live_rolling_min_infer_audio_ms,
             "LIVE_ROLLING_MIN_EMIT_INTERVAL_MS": live_rolling_min_emit_interval_ms,
-            "poll_interval_s": poll_interval_s,
             "min_new_audio_ms": min_new_audio_ms,
-            "empty_retry_enabled": empty_retry_enabled,
-            "empty_retry_after_audio_ms": empty_retry_after_audio_ms,
             "single_segment_commit_min_ms": single_segment_commit_min_ms,
             "force_commit_repeats": force_commit_repeats,
             "max_decode_window_ms": max_decode_window_ms,
@@ -480,60 +525,6 @@ class RollingContextSession:
             prev_state=prev,
             next_state=safe_next,
             reason=str(reason or ""),
-        )
-
-    def _schedule_empty_retry(self, *, seq: int, t0_ms: int, t1_ms: int) -> None:
-        ctx = self._ctx
-        rt = self.rt
-        if not bool(ctx["empty_retry_enabled"]):
-            return
-        if rt.rolling_empty_retry_pending:
-            self._cancel_empty_retry(reason="replaced")
-        retry_after_audio_ms = int(max(0, ctx["empty_retry_after_audio_ms"]))
-        safe_t0 = int(max(0, t0_ms))
-        safe_t1 = int(max(safe_t0, t1_ms))
-        rt.rolling_empty_retry_pending = True
-        rt.rolling_empty_retry_source_seq = int(max(0, seq))
-        rt.rolling_empty_retry_t0_ms = safe_t0
-        rt.rolling_empty_retry_t1_ms = safe_t1
-        rt.rolling_empty_retry_target_audio_ms = int(safe_t1 + retry_after_audio_ms)
-        rt.rolling_guardrail_metrics["empty_retry_scheduled_count"] = int(
-            max(0, int(rt.rolling_guardrail_metrics.get("empty_retry_scheduled_count") or 0)) + 1
-        )
-        self._append_log(
-            "rolling_empty_retry_scheduled",
-            source_seq=int(max(0, seq)),
-            source_t0_ms=int(safe_t0),
-            source_t1_ms=int(safe_t1),
-            retry_after_audio_ms=int(retry_after_audio_ms),
-            target_audio_ms=int(rt.rolling_empty_retry_target_audio_ms),
-        )
-
-    def _cancel_empty_retry(self, *, reason: str) -> None:
-        rt = self.rt
-        if not rt.rolling_empty_retry_pending:
-            return
-        source_seq = int(rt.rolling_empty_retry_source_seq)
-        source_t0_ms = int(rt.rolling_empty_retry_t0_ms)
-        source_t1_ms = int(rt.rolling_empty_retry_t1_ms)
-        target_audio_ms = int(rt.rolling_empty_retry_target_audio_ms)
-        remaining_audio_ms = int(max(0, target_audio_ms - int(rt.recording_duration_ms)))
-        rt.rolling_empty_retry_pending = False
-        rt.rolling_empty_retry_source_seq = -1
-        rt.rolling_empty_retry_t0_ms = 0
-        rt.rolling_empty_retry_t1_ms = 0
-        rt.rolling_empty_retry_target_audio_ms = 0
-        rt.rolling_guardrail_metrics["empty_retry_canceled_count"] = int(
-            max(0, int(rt.rolling_guardrail_metrics.get("empty_retry_canceled_count") or 0)) + 1
-        )
-        self._append_log(
-            "rolling_empty_retry_canceled",
-            reason=str(reason or ""),
-            source_seq=int(max(0, source_seq)),
-            source_t0_ms=int(max(0, source_t0_ms)),
-            source_t1_ms=int(max(0, source_t1_ms)),
-            target_audio_ms=int(max(0, target_audio_ms)),
-            remaining_audio_ms=int(max(0, remaining_audio_ms)),
         )
 
     def _recent_pcm_window(self, *, end_ms: int, window_ms: int, min_t0_ms: int | None = None) -> bytes:
@@ -662,23 +653,6 @@ class RollingContextSession:
         silence_elapsed_ms = None
         if rt.rolling_last_recent_speech_mono > 0.0:
             silence_elapsed_ms = int(max(0.0, float(time.monotonic() - rt.rolling_last_recent_speech_mono) * 1000.0))
-        empty_retry_payload: dict[str, Any] = {
-            "enabled": bool(ctx["empty_retry_enabled"]),
-            "pending": bool(rt.rolling_empty_retry_pending),
-            "retry_after_audio_ms": int(max(0, ctx["empty_retry_after_audio_ms"])),
-        }
-        if rt.rolling_empty_retry_pending:
-            empty_retry_payload.update(
-                {
-                    "source_seq": int(max(0, rt.rolling_empty_retry_source_seq)),
-                    "source_t0_ms": int(max(0, rt.rolling_empty_retry_t0_ms)),
-                    "source_t1_ms": int(max(0, rt.rolling_empty_retry_t1_ms)),
-                    "target_audio_ms": int(max(0, rt.rolling_empty_retry_target_audio_ms)),
-                    "remaining_audio_ms": int(
-                        max(0, int(rt.rolling_empty_retry_target_audio_ms) - int(rt.recording_duration_ms))
-                    ),
-                }
-            )
         return {
             "inflight": bool(inflight_count > 0),
             "inflight_count": int(inflight_count),
@@ -728,10 +702,8 @@ class RollingContextSession:
                 "rearm_window_ms": int(max(100, ctx["speech_gate_rearm_window_ms"])),
                 "force_commit_silence_ms": int(max(100, ctx["speech_gate_force_commit_silence_ms"])),
             },
-            "empty_retry": empty_retry_payload,
             "guardrails": dict(rt.rolling_guardrail_metrics),
             "config": {
-                "poll_interval_ms": int(ctx["LIVE_ROLLING_POLL_INTERVAL_MS"]),
                 "min_infer_audio_ms": int(ctx["LIVE_ROLLING_MIN_INFER_AUDIO_MS"]),
                 "single_segment_commit_min_ms": int(ctx["single_segment_commit_min_ms"]),
                 "force_commit_repeats": int(ctx["force_commit_repeats"]),
@@ -741,8 +713,6 @@ class RollingContextSession:
                 "buffer_trim_threshold_ms": int(ctx["buffer_trim_threshold_ms"]),
                 "buffer_trim_drop_ms": int(ctx["buffer_trim_drop_ms"]),
                 "min_new_audio_ms": int(ctx["min_new_audio_ms"]),
-                "empty_retry_enabled": bool(ctx["empty_retry_enabled"]),
-                "empty_retry_after_audio_ms": int(max(0, ctx["empty_retry_after_audio_ms"])),
                 "min_emit_interval_ms": int(ctx["LIVE_ROLLING_MIN_EMIT_INTERVAL_MS"]),
                 "pacing_base_emit_ms": int(max(1, ctx["pacing_base_emit_ms"])),
                 "pacing_effective_emit_ms": int(max(1, ctx["pacing_effective_emit_ms"])),
@@ -877,6 +847,8 @@ class RollingContextSession:
         rt.rolling_pcm_base_ms = int(rt.rolling_pcm_base_ms + dropped_ms)
         if rt.rolling_processed_offset_ms < rt.rolling_pcm_base_ms:
             rt.rolling_processed_offset_ms = int(rt.rolling_pcm_base_ms)
+        if rt.rolling_decode_offset_ms < rt.rolling_pcm_base_ms:
+            rt.rolling_decode_offset_ms = int(rt.rolling_pcm_base_ms)
         self._append_log(
             "rolling_buffer_drop",
             reason=str(reason or ""),
@@ -913,6 +885,7 @@ class RollingContextSession:
             return
         dropped_uncommitted_ms = int(max(0, clip_target_ms - rt.rolling_processed_offset_ms))
         rt.rolling_processed_offset_ms = int(clip_target_ms)
+        rt.rolling_decode_offset_ms = int(max(rt.rolling_decode_offset_ms, clip_target_ms))
         dropped_buffer_ms = self._drop_pcm_prefix_to_ms(target_base_ms=clip_target_ms, reason="hard_clip")
         rt.rolling_guardrail_metrics["hard_clip_count"] = int(
             max(0, int(rt.rolling_guardrail_metrics.get("hard_clip_count") or 0)) + 1
@@ -1061,7 +1034,7 @@ class RollingContextSession:
         if preview_audio_end_ms <= 0:
             preview_audio_end_ms = int(max(0, rt.rolling_last_preview_audio_end_fallback_ms))
 
-        commit_t0 = int(max(0, rt.rolling_processed_offset_ms))
+        commit_t0 = int(max(0, rt.rolling_processed_offset_ms, rt.rolling_last_preview_source_t0_ms))
         commit_t1_candidates = [int(commit_t0), int(preview_audio_end_ms)]
         if include_recording_end:
             commit_t1_candidates.append(int(max(0, rt.recording_duration_ms)))
@@ -1095,6 +1068,7 @@ class RollingContextSession:
             self._sync_counts_from_result(stored)
             rt.rolling_commit_index_next += 1
             rt.rolling_processed_offset_ms = int(max(rt.rolling_processed_offset_ms, commit_t1))
+            rt.rolling_decode_offset_ms = int(max(rt.rolling_decode_offset_ms, commit_t1))
             self._maybe_trim_pcm_buffer()
             rt.rolling_last_preview_signature = ""
             rt.rolling_same_preview_repeats = 0
@@ -1102,6 +1076,7 @@ class RollingContextSession:
             rt.rolling_same_preview_audio_repeats = 0
             rt.rolling_last_preview_text = ""
             rt.rolling_last_preview_audio_end_fallback_ms = 0
+            rt.rolling_last_preview_source_t0_ms = 0
             self._append_log("rolling_tail_preview_committed", t0_ms=commit_t0, t1_ms=commit_t1, chars=len(preview_text))
             return True
         except Exception:
@@ -1123,14 +1098,11 @@ class RollingContextSession:
 
         end_ms = int(max(0, rt.recording_duration_ms))
         self._maybe_apply_hard_clip(end_ms=end_ms)
-        if rt.rolling_empty_retry_pending and rt.rolling_processed_offset_ms >= rt.rolling_empty_retry_t1_ms:
-            self._cancel_empty_retry(reason="source_consumed")
         if end_ms <= rt.rolling_processed_offset_ms:
             return
         use_force = bool(force)
         startup_active = (not use_force) and (ctx["startup_duration_ms"] > 0) and (int(end_ms) < int(ctx["startup_duration_ms"]))
         forced_preview_committed = False
-        use_empty_retry = False
 
         if not use_force:
             if startup_active:
@@ -1170,13 +1142,6 @@ class RollingContextSession:
             if speech_hit:
                 rt.rolling_last_recent_speech_mono = float(max(0.0, now_mono))
                 rt.rolling_speech_gate_recent_hits_mono.append(float(now_mono))
-                if rt.rolling_empty_retry_pending:
-                    self._cancel_empty_retry(reason="new_speech_detected")
-
-            empty_retry_ready = False
-            if rt.rolling_empty_retry_pending and not speech_hit:
-                target_audio_ms = int(max(0, rt.rolling_empty_retry_target_audio_ms))
-                empty_retry_ready = int(end_ms) >= target_audio_ms
 
             if rt.rolling_speech_gate_state == "quiet":
                 if len(rt.rolling_speech_gate_recent_hits_mono) >= int(max(1, ctx["speech_gate_rearm_hits"])):
@@ -1188,7 +1153,7 @@ class RollingContextSession:
                     rt.rolling_guardrail_metrics["speech_gate_rearm_count"] = int(
                         max(0, int(rt.rolling_guardrail_metrics.get("speech_gate_rearm_count") or 0)) + 1
                     )
-                elif not empty_retry_ready:
+                else:
                     rt.rolling_guardrail_metrics["speech_gate_quiet_skips"] = int(
                         max(0, int(rt.rolling_guardrail_metrics.get("speech_gate_quiet_skips") or 0)) + 1
                     )
@@ -1217,15 +1182,13 @@ class RollingContextSession:
                         rearm_from_ms=pending_t0_ms,
                     )
 
-            if not speech_hit and not empty_retry_ready:
+            if not speech_hit:
                 rt.rolling_guardrail_metrics["speech_gate_quiet_skips"] = int(
                     max(0, int(rt.rolling_guardrail_metrics.get("speech_gate_quiet_skips") or 0)) + 1
                 )
                 if forced_preview_committed:
                     await self._update_state_and_emit_result()
                 return
-            if empty_retry_ready:
-                use_empty_retry = True
 
         effective_min_infer_audio_ms = int(ctx["LIVE_ROLLING_MIN_INFER_AUDIO_MS"])
         if startup_active and ctx["startup_min_infer_audio_ms"] > 0:
@@ -1244,7 +1207,7 @@ class RollingContextSession:
                 )
                 return
 
-        infer_t0_ms = int(max(rt.rolling_processed_offset_ms, rt.rolling_pcm_base_ms))
+        infer_t0_ms = int(max(rt.rolling_processed_offset_ms, rt.rolling_decode_offset_ms, rt.rolling_pcm_base_ms))
         infer_t1_ms = int(max(infer_t0_ms, end_ms))
         infer_window_ms = int(max(0, infer_t1_ms - infer_t0_ms))
         if infer_window_ms > ctx["max_decode_window_ms"]:
@@ -1262,8 +1225,27 @@ class RollingContextSession:
                     max_decode_window_ms=int(ctx["max_decode_window_ms"]),
                 )
         if (not use_force) and infer_t1_ms <= rt.rolling_last_submitted_t1_ms:
-            if use_empty_retry and rt.rolling_empty_retry_pending:
-                self._cancel_empty_retry(reason="retry_window_no_progress")
+            if infer_window_ms >= ctx["max_decode_window_ms"]:
+                slide_ms = int(max(1, effective_min_new_audio_ms))
+                next_decode_offset_ms = int(
+                    max(
+                        rt.rolling_processed_offset_ms,
+                        infer_t0_ms + slide_ms,
+                        int(rt.rolling_last_submitted_t1_ms) - int(ctx["max_decode_window_ms"]) + slide_ms,
+                    )
+                )
+                if next_decode_offset_ms > int(rt.rolling_decode_offset_ms):
+                    prev_decode_offset_ms = int(rt.rolling_decode_offset_ms)
+                    rt.rolling_decode_offset_ms = int(next_decode_offset_ms)
+                    self._append_log(
+                        "rolling_decode_window_slid",
+                        processed_offset_ms=int(rt.rolling_processed_offset_ms),
+                        prev_decode_offset_ms=int(prev_decode_offset_ms),
+                        next_decode_offset_ms=int(rt.rolling_decode_offset_ms),
+                        last_submitted_t1_ms=int(rt.rolling_last_submitted_t1_ms),
+                        slide_ms=int(slide_ms),
+                        max_decode_window_ms=int(ctx["max_decode_window_ms"]),
+                    )
             rt.rolling_guardrail_metrics["window_no_progress_skips"] = int(
                 max(0, int(rt.rolling_guardrail_metrics.get("window_no_progress_skips") or 0)) + 1
             )
@@ -1281,13 +1263,9 @@ class RollingContextSession:
         )
         end_b = min(end_b, len(rt.rolling_pcm))
         if end_b <= start_b:
-            if use_empty_retry and rt.rolling_empty_retry_pending:
-                self._cancel_empty_retry(reason="retry_no_pcm")
             return
         pcm = bytes(rt.rolling_pcm[start_b:end_b])
         if not pcm:
-            if use_empty_retry and rt.rolling_empty_retry_pending:
-                self._cancel_empty_retry(reason="retry_no_pcm")
             return
 
         infer_seq = int(max(0, rt.rolling_infer_seq_next))
@@ -1329,32 +1307,8 @@ class RollingContextSession:
             "t0_ms": int(infer_t0_ms),
             "t1_ms": int(infer_t1_ms),
             "forced": bool(use_force),
-            "empty_retry": bool(use_empty_retry),
             "enqueued_mono": float(now_mono),
         }
-        if use_empty_retry:
-            retry_source_seq = int(max(0, rt.rolling_empty_retry_source_seq))
-            retry_source_t0_ms = int(max(0, rt.rolling_empty_retry_t0_ms))
-            retry_source_t1_ms = int(max(0, rt.rolling_empty_retry_t1_ms))
-            rt.rolling_empty_retry_pending = False
-            rt.rolling_empty_retry_source_seq = -1
-            rt.rolling_empty_retry_t0_ms = 0
-            rt.rolling_empty_retry_t1_ms = 0
-            rt.rolling_empty_retry_target_audio_ms = 0
-            rt.rolling_guardrail_metrics["empty_retry_enqueued_count"] = int(
-                max(0, int(rt.rolling_guardrail_metrics.get("empty_retry_enqueued_count") or 0)) + 1
-            )
-            self._append_log(
-                "rolling_empty_retry_enqueued",
-                seq=int(infer_seq),
-                job_id=str(job.job_id),
-                source_seq=int(retry_source_seq),
-                source_t0_ms=int(retry_source_t0_ms),
-                source_t1_ms=int(retry_source_t1_ms),
-                retry_t0_ms=int(infer_t0_ms),
-                retry_t1_ms=int(infer_t1_ms),
-                extra_audio_ms=int(max(0, infer_t1_ms - retry_source_t1_ms)),
-            )
         if rt.finalization_state not in {"error", "ready"}:
             rt.finalization_state = "processing_chunks"
         await self._update_state_and_emit_result()
@@ -1366,22 +1320,17 @@ class RollingContextSession:
             t1_ms=int(infer_t1_ms),
             audio_bytes=len(pcm),
             forced=bool(use_force),
-            empty_retry=bool(use_empty_retry),
             speech_gate_state=str(rt.rolling_speech_gate_state or ""),
             asr_beam_size=(int(ctx["LIVE_ASR_BEAM_SIZE"]) if ctx["LIVE_ASR_BEAM_SIZE"] is not None else None),
             asr_chunk_size=(int(ctx["LIVE_ASR_CHUNK_SIZE"]) if ctx["LIVE_ASR_CHUNK_SIZE"] is not None else None),
             asr_backend=str(ctx["LIVE_ASR_BACKEND"] or ""),
         )
 
-    async def _poll_inference(self, *, force: bool = False) -> None:
+    async def _poll_inference(self) -> None:
         ctx = self._ctx
         rt = self.rt
         if rt.chunk_bridge is None or rt.rolling_inflight is None:
             return
-        now_mono = time.monotonic()
-        if (not force) and ((now_mono - rt.rolling_last_poll_mono) < ctx["poll_interval_s"]):
-            return
-        rt.rolling_last_poll_mono = now_mono
 
         inflight = dict(rt.rolling_inflight or {})
         seq = int(inflight.get("seq") or 0)
@@ -1389,7 +1338,6 @@ class RollingContextSession:
         t0_ms = int(max(0, int(inflight.get("t0_ms") or 0)))
         t1_ms = int(max(t0_ms, int(inflight.get("t1_ms") or t0_ms)))
         forced = bool(inflight.get("forced"))
-        empty_retry_call = bool(inflight.get("empty_retry"))
 
         try:
             has_terminal = rt.chunk_bridge.has_terminal_result(job_id)
@@ -1405,7 +1353,6 @@ class RollingContextSession:
             t0_ms=int(t0_ms),
             t1_ms=int(t1_ms),
             forced=bool(forced),
-            empty_retry=bool(empty_retry_call),
         )
         try:
             poll = await asyncio.to_thread(rt.chunk_bridge.take_terminal_result, job_id, t0_offset_ms=t0_ms)
@@ -1530,7 +1477,7 @@ class RollingContextSession:
                         )
 
             if commit_segments:
-                commit_t0_ms = int(max(0, rt.rolling_processed_offset_ms))
+                commit_t0_ms = int(max(0, rt.rolling_processed_offset_ms, t0_ms))
                 normalized_commit_segments: list[dict[str, Any]] = []
                 for raw_seg in commit_segments:
                     if not isinstance(raw_seg, dict):
@@ -1583,6 +1530,7 @@ class RollingContextSession:
                             self._sync_counts_from_result(result)
                             rt.rolling_commit_index_next += 1
                             rt.rolling_processed_offset_ms = int(max(rt.rolling_processed_offset_ms, commit_t1_ms))
+                            rt.rolling_decode_offset_ms = int(max(rt.rolling_decode_offset_ms, commit_t1_ms))
                             committed_this_poll = True
                             call_outcome = "commit"
                             self._maybe_trim_pcm_buffer()
@@ -1602,6 +1550,7 @@ class RollingContextSession:
                                 rt.rolling_same_preview_audio_repeats = 0
                                 rt.rolling_last_preview_text = ""
                                 rt.rolling_last_preview_audio_end_fallback_ms = 0
+                                rt.rolling_last_preview_source_t0_ms = 0
                         except Exception as e:
                             call_outcome = "error"
                             call_error = f"{type(e).__name__}: {e}"
@@ -1618,6 +1567,7 @@ class RollingContextSession:
                     call_outcome = "preview_only"
                 rt.rolling_last_preview_text = str(preview_text or "")
                 rt.rolling_last_preview_audio_end_fallback_ms = int(max(0, preview_audio_end_ms))
+                rt.rolling_last_preview_source_t0_ms = int(max(0, t0_ms))
                 try:
                     self.live_sessions.update_live_preview(
                         self.session_id,
@@ -1643,18 +1593,7 @@ class RollingContextSession:
                     rt.rolling_same_preview_repeats = 0
                     rt.rolling_last_preview_audio_end_ms = -1
                     rt.rolling_same_preview_audio_repeats = 0
-            if call_outcome == "empty":
-                if (not forced) and (not empty_retry_call) and str(rt.recording_state or "") == "recording":
-                    self._schedule_empty_retry(seq=seq, t0_ms=t0_ms, t1_ms=t1_ms)
-                elif rt.rolling_empty_retry_pending:
-                    no_retry_reason = "forced_empty_call"
-                    if empty_retry_call:
-                        no_retry_reason = "retry_exhausted"
-                    elif str(rt.recording_state or "") != "recording":
-                        no_retry_reason = "recording_not_active"
-                    self._cancel_empty_retry(reason=no_retry_reason)
-            elif rt.rolling_empty_retry_pending:
-                self._cancel_empty_retry(reason="call_produced_output")
+                    rt.rolling_last_preview_source_t0_ms = 0
             self._record_call_audit(
                 seq=seq,
                 job_id=job_id,
@@ -1693,6 +1632,7 @@ class RollingContextSession:
             except Exception:
                 pass
             rt.rolling_processed_offset_ms = int(max(rt.rolling_processed_offset_ms, t1_ms))
+            rt.rolling_decode_offset_ms = int(max(rt.rolling_decode_offset_ms, t1_ms))
             self._maybe_trim_pcm_buffer()
             rt.finalization_state = "error"
             rt.rolling_last_applied_seq = int(max(rt.rolling_last_applied_seq, seq))
@@ -1706,13 +1646,12 @@ class RollingContextSession:
                 outcome="error",
                 error=err,
             )
-            if rt.rolling_empty_retry_pending:
-                self._cancel_empty_retry(reason="call_error")
 
         if (rt.vad_gate is not None) and (rt.rolling_speech_gate_state == "flush"):
             flush_window_end_ms = int(max(t0_ms, t1_ms))
             self._commit_preview_tail_if_needed(include_recording_end=False, max_t1_ms=flush_window_end_ms)
             rt.rolling_processed_offset_ms = int(max(rt.rolling_processed_offset_ms, flush_window_end_ms))
+            rt.rolling_decode_offset_ms = int(max(rt.rolling_decode_offset_ms, flush_window_end_ms))
             rt.rolling_last_submitted_t1_ms = int(max(rt.rolling_last_submitted_t1_ms, flush_window_end_ms))
             rt.rolling_speech_gate_recent_hits_mono = []
             rt.rolling_last_recent_speech_mono = 0.0
@@ -1736,12 +1675,12 @@ class RollingContextSession:
         }
         await self._update_state_and_emit_result()
 
-    async def _process_rolling(self, *, force_poll: bool = False, force_emit: bool = False) -> None:
-        await self._poll_inference(force=force_poll)
+    async def _process_rolling(self, *, force_emit: bool = False) -> None:
+        await self._poll_inference()
         await self._enqueue_inference(force=force_emit)
 
-    async def _drain_inflight_only(self, *, force_poll: bool = True) -> None:
-        await self._poll_inference(force=force_poll)
+    async def _drain_inflight_only(self) -> None:
+        await self._poll_inference()
 
     async def run(self) -> None:
         session_id = self.session_id
@@ -1761,6 +1700,8 @@ class RollingContextSession:
             return
 
         await websocket.accept()
+        self._completion_loop = asyncio.get_running_loop()
+        self._completion_ready = asyncio.Event()
         try:
             session_snapshot = live_sessions.snapshot(session_id)
             snap_lang = _normalize_optional_language((session_snapshot or {}).get("asr_language"))
@@ -1807,7 +1748,10 @@ class RollingContextSession:
                     diarize_min_speakers=ctx["LIVE_DIARIZE_MIN_SPEAKERS"],
                     diarize_max_speakers=ctx["LIVE_DIARIZE_MAX_SPEAKERS"],
                 )
-                rt.chunk_bridge.start_completion_stream(session_id=session_id)
+                rt.chunk_bridge.start_completion_stream(
+                    session_id=session_id,
+                    on_terminal_event=self._notify_terminal_ready,
+                )
                 rt.recording_state = "recording"
                 rt.recording_path = str(rec_snap.wav_path)
                 rt.recording_bytes = int(rec_snap.bytes_written)
@@ -1818,7 +1762,6 @@ class RollingContextSession:
                     "rolling_context_started",
                     recording=rec_snap.to_dict(),
                     config={
-                        "poll_interval_ms": int(ctx["LIVE_ROLLING_POLL_INTERVAL_MS"]),
                         "min_infer_audio_ms": int(ctx["LIVE_ROLLING_MIN_INFER_AUDIO_MS"]),
                         "single_segment_commit_min_ms": int(ctx["single_segment_commit_min_ms"]),
                         "force_commit_repeats": int(ctx["force_commit_repeats"]),
@@ -1863,11 +1806,9 @@ class RollingContextSession:
                 self._append_log("rolling_context_init_error", error=f"{type(e).__name__}: {e}")
 
             while True:
-                try:
-                    incoming = await asyncio.wait_for(websocket.receive(), timeout=ctx["poll_interval_s"])
-                except asyncio.TimeoutError:
-                    # Keep draining/polling inference even when no websocket frames arrive.
-                    await self._process_rolling(force_poll=False, force_emit=False)
+                wait_kind, incoming = await self._wait_for_websocket_or_completion()
+                if wait_kind == "completion":
+                    await self._process_rolling(force_emit=False)
                     continue
 
                 if incoming.get("type") == "websocket.disconnect":
@@ -1904,7 +1845,7 @@ class RollingContextSession:
                     if raw:
                         rt.rolling_pcm.extend(raw)
 
-                    await self._process_rolling(force_poll=False, force_emit=False)
+                    await self._process_rolling(force_emit=False)
 
                     should_emit_stats = snapshot["frames_received"] == 1 or (snapshot["frames_received"] % 50) == 0
                     if should_emit_stats:
@@ -2016,16 +1957,17 @@ class RollingContextSession:
                     if rt.finalization_state not in {"error", "ready"}:
                         rt.finalization_state = "finalizing"
                     await self._update_state_and_emit_result()
-                    await self._process_rolling(force_poll=True, force_emit=True)
+                    await self._process_rolling(force_emit=True)
                     wait_deadline = time.monotonic() + max(0.0, ctx["LIVE_DRAIN_WAIT_S"])
                     while time.monotonic() < wait_deadline:
-                        await self._drain_inflight_only(force_poll=True)
+                        await self._drain_inflight_only()
                         if rt.rolling_inflight is None:
                             break
-                        await asyncio.sleep(min(0.1, ctx["poll_interval_s"]))
+                        remaining_s = max(0.0, wait_deadline - time.monotonic())
+                        await self._wait_for_completion_or_timeout(timeout_s=min(0.1, remaining_s))
 
                     self._finalize_recording(reason=rt.stop_reason)
-                    await self._drain_inflight_only(force_poll=True)
+                    await self._drain_inflight_only()
                     self._commit_preview_tail_if_needed()
                     if rt.finalization_state != "error":
                         rt.finalization_state = "ready"
@@ -2072,18 +2014,19 @@ class RollingContextSession:
                     pass
         finally:
             self._finalize_recording(reason=rt.stop_reason)
-            await self._drain_inflight_only(force_poll=True)
+            await self._drain_inflight_only()
             if rt.stop_reason == "client_stop":
                 wait_timeout = 0.0
             else:
                 wait_timeout = ctx["LIVE_DRAIN_WAIT_S"]
             wait_deadline = time.monotonic() + max(0.0, float(wait_timeout))
             while time.monotonic() < wait_deadline:
-                await self._drain_inflight_only(force_poll=True)
+                await self._drain_inflight_only()
                 remaining_ms = int(max(0, rt.recording_duration_ms - rt.rolling_processed_offset_ms))
                 if (rt.rolling_inflight is None) and remaining_ms < ctx["LIVE_ROLLING_MIN_INFER_AUDIO_MS"]:
                     break
-                await asyncio.sleep(min(0.1, ctx["poll_interval_s"]))
+                remaining_s = max(0.0, wait_deadline - time.monotonic())
+                await self._wait_for_completion_or_timeout(timeout_s=min(0.1, remaining_s))
 
             self._commit_preview_tail_if_needed()
             if rt.finalization_state not in {"error", "ready"}:
@@ -2108,6 +2051,8 @@ class RollingContextSession:
                     rt.recorder.abort()
                 except Exception:
                     pass
+            self._completion_ready = None
+            self._completion_loop = None
 
 async def run_live_session_ws_rolling_context(
     session_id: str,

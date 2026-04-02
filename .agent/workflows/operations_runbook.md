@@ -13,7 +13,7 @@ description: Canonical workflow for Omniscripta frontend + Transcribe backend (l
 
 2. Verify server-side dev services on `dc1`:
 ```bash
-systemctl --user --no-pager status transcribe-api-dev.service transcribe-asr-pool-dev.service transcribe-frontend-dev.service asr-worker-live-dev@1.service asr-worker-batch-dev@1.service llm-worker-dev@1.service transcribe-demo-jobs-janitor-dev.timer
+systemctl --user --no-pager status transcribe-api-dev.service transcribe-asr-pool-dev.service transcribe-frontend-dev.service asr-worker-live-dev@1.service asr-worker-batch-dev@1.service llm-worker-dev@1.service
 ```
 
 3. If you changed backend code and want the full dev stack fresh:
@@ -38,7 +38,7 @@ systemctl --user --no-pager status transcribe-api-dev.service transcribe-asr-poo
    - Treat all three as live environment; avoid direct development changes there.
 
 3. **Backend dev worktree (persistent)**: `~/projects/transcribe-dev`
-   - Safe API/LLM/janitor/backend development environment.
+   - Safe API/LLM/backend development environment.
    - Separate data/config paths from live.
 
 4. **Standalone ASR pool repo**: `~/projects/asr-pool-dev`
@@ -60,13 +60,12 @@ systemctl --user --no-pager status transcribe-api-dev.service transcribe-asr-poo
 - Worker service: `asr-worker-live.service` (ops on 127.0.0.1:28110)
 - Worker service: `asr-worker-batch.service` (ops on 127.0.0.1:28111)
 - LLM worker service: `llm-worker.service`
-- API/LLM/janitor env file: `/etc/transcribe/transcribe.env`
+- API/LLM env file: `/etc/transcribe/transcribe.env`
 - ASR pool env file: `/etc/asr-pool/asr-pool.env`
 - ASR worker env file: `/etc/asr-worker/asr-worker.env`
 - Tabby tunnel service: `transcribe-tabby-tunnel.service`
-- Janitor timer: `transcribe-demo-jobs-janitor.timer`
 - Frontend static target: `/srv/transcribe/static` (served by nginx)
-- Worker queue roots: `/srv/transcribe/data/jobs/live_worker` and `/srv/transcribe/data/jobs/upload_worker`
+- Worker queue root: `/srv/transcribe/data/jobs/upload_worker`
 - API `/ops` on live uses the local systemd drop-in `/etc/systemd/system/transcribe-api.service.d/ops-env.conf` so it points at pool `:8090` and worker ops `:28110` / `:28111`.
 - Note: live ASR pool currently uses `/srv/asr-pool/config/local.json` to point the WhisperX runner at the shared `~/whisperx/.venv`.
 
@@ -81,7 +80,7 @@ systemctl --user --no-pager status transcribe-api-dev.service transcribe-asr-poo
 - LLM worker service template: `llm-worker-dev@.service`
 - Janitor timer: `transcribe-demo-jobs-janitor-dev.timer`
 - Frontend proxy service: `transcribe-frontend-dev.service` (127.0.0.1:8010)
-- API/LLM/frontend/janitor env file: `~/.config/transcribe/dev.env`
+- API/LLM/frontend env file: `~/.config/transcribe/dev.env`
 - ASR pool env file: `~/.config/asr-pool/asr-pool.env`
 - ASR worker env file: `~/.config/asr-worker/asr-worker.dev.env`
 - Dev frontend static target: `~/projects/transcribe-dev/static`
@@ -163,7 +162,6 @@ systemctl --user enable --now transcribe-frontend-dev.service
 systemctl --user enable --now asr-worker-live-dev@1.service
 systemctl --user enable --now asr-worker-batch-dev@1.service
 systemctl --user enable --now llm-worker-dev@1.service
-systemctl --user enable --now transcribe-demo-jobs-janitor-dev.timer
 ```
 
 ### On server (`dc1`) - live services (system scope)
@@ -175,7 +173,6 @@ sudo systemctl enable --now asr-worker-live.service
 sudo systemctl enable --now asr-worker-batch.service
 sudo systemctl enable --now llm-worker.service
 sudo systemctl enable --now transcribe-tabby-tunnel.service
-sudo systemctl enable --now transcribe-demo-jobs-janitor.timer
 ```
 
 ## 7) Tunnel Services on Your Other Computer

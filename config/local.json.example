@@ -16,28 +16,28 @@
   },
   
   "live": {
+    "timing": {
+      "emit_min_ms": 120
+    },
     "rolling": {
       "min_infer_audio_ms": 1000,
       "force_commit_repeats": 3
     }
   },
-
-  "polling_intervals": {
-    "live_rolling_poll_ms": 250
-  },
   
-  "jobs": {
-    "upload_prep_base": "data/jobs/upload_prep",
-    "upload_worker_base": "data/jobs/upload_worker",
-    "live_worker_base": "data/jobs/live_worker"
-  },
-
-  "worker": {
-    "queue_base": "data/jobs/upload_worker",
-    "max_outstanding_requests": 1
+  "upload": {
+    "queue": {
+      "prep_base": "data/jobs/upload_prep",
+      "worker_base": "data/jobs/upload_worker"
+    }
   },
   
   "frontend_dev": {
-    "api_base": "http://127.0.0.1:8001"
+    "frontend_dir": "/home/gunnar/projects/transcribe-dev/static",
+    "api_base": "http://127.0.0.1:8001",
+    "host": "127.0.0.1",
+    "port": 8010,
+    "ws_buffer_bytes": 65536,
+    "ws_idle_timeout_s": 1800.0
   }
 }

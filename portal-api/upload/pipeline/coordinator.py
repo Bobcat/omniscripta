@@ -81,12 +81,12 @@ def _load_service_cfg() -> dict[str, Any]:
             "llm_worker": "llm-worker",
         },
     }
-    raw_snip = get_setting("snip", {})
+    raw_snip = get_setting("upload.snip", {})
     if isinstance(raw_snip, dict):
         merged_snip = dict(cfg["snip"])
         merged_snip.update(raw_snip)
         cfg["snip"] = merged_snip
-    raw_topics = get_setting("topics", {})
+    raw_topics = get_setting("upload.topics", {})
     if isinstance(raw_topics, dict):
         merged = dict(cfg["topics"])
         merged.update(raw_topics)
@@ -116,22 +116,25 @@ def _resolve_cfg_path(path_value: str, *, fallback_rel: str) -> Path:
 
 
 def _progress_runs_path() -> Path:
-    raw = get_str("worker.progress_runs_path", "").strip()
+    raw = get_str("upload.worker.progress_runs_path", "").strip()
     if raw:
         return _resolve_cfg_path(raw, fallback_rel="data/progress_db/runs_v1.jsonl")
-    base = _resolve_cfg_path(get_str("worker.progress_db_dir", "data/progress_db"), fallback_rel="data/progress_db")
+    base = _resolve_cfg_path(
+        get_str("upload.worker.progress_db_dir", "data/progress_db"),
+        fallback_rel="data/progress_db",
+    )
     return (base / "runs_v1.jsonl").resolve()
 
 
 def _host_id() -> str:
-    raw = get_str("worker.host_id", "").strip()
+    raw = get_str("upload.worker.host_id", "").strip()
     if raw:
         return raw
     return socket.gethostname().split(".")[0]
 
 
 def _hardware_key(host_id: str) -> str:
-    raw = get_str("worker.hardware_key", "").strip()
+    raw = get_str("upload.worker.hardware_key", "").strip()
     if raw:
         return raw
     if host_id == "dc1":
@@ -222,25 +225,27 @@ class _SnippingProgressTracker:
 
 class UploadBatchCoordinator:
     def __init__(self) -> None:
-        self._enabled = get_bool("upload_coordinator.enabled", True)
-        self._poll_interval_s = max(0.1, float(get_float("upload_coordinator.poll_interval_s", 0.5, min_value=0.1)))
+        self._poll_interval_s = max(
+            0.1,
+            float(get_float("upload.coordinator.poll_interval_s", 0.5, min_value=0.1)),
+        )
         self._idle_log_interval_s = max(
             1.0,
-            float(get_float("upload_coordinator.idle_log_interval_s", 30.0, min_value=1.0)),
+            float(get_float("upload.coordinator.idle_log_interval_s", 30.0, min_value=1.0)),
         )
-        self._llm_wait_poll_s = max(0.1, float(get_float("upload_coordinator.llm_wait_poll_s", 0.5, min_value=0.1)))
+        self._llm_wait_poll_s = max(
+            0.1,
+            float(get_float("upload.coordinator.llm_wait_poll_s", 0.5, min_value=0.1)),
+        )
         self._llm_wait_timeout_s = max(
             30.0,
-            float(get_float("upload_coordinator.llm_wait_timeout_s", 1800.0, min_value=30.0)),
+            float(get_float("upload.coordinator.llm_wait_timeout_s", 1800.0, min_value=30.0)),
         )
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._last_idle_log_mono = 0.0
 
     def start(self) -> None:
-        if not self._enabled:
-            print("upload_batch_coordinator disabled", flush=True)
-            return
         if self._thread is not None and self._thread.is_alive():
             return
         self._stop.clear()
@@ -269,7 +274,6 @@ class UploadBatchCoordinator:
         t = self._thread
         running = bool(t is not None and t.is_alive())
         return {
-            "enabled": bool(self._enabled),
             "running": running,
             "poll_interval_s": float(self._poll_interval_s),
             "idle_log_interval_s": float(self._idle_log_interval_s),
