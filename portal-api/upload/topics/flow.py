@@ -58,6 +58,21 @@ def _safe_int(value: Any) -> int | None:
         return None
 
 
+def _topics_enabled_for_job(
+    *,
+    status: dict[str, Any],
+    job_cfg: dict[str, Any],
+    service_cfg: dict[str, Any],
+) -> bool:
+    if "topics_enabled" in status:
+        return bool(status.get("topics_enabled"))
+    upload_cfg = job_cfg.get("upload") or {}
+    if isinstance(upload_cfg, dict) and "topics_enabled" in upload_cfg:
+        return bool(upload_cfg.get("topics_enabled"))
+    topics_cfg = dict(service_cfg.get("topics") or {})
+    return bool(topics_cfg.get("enabled", False))
+
+
 def _append_progress_run_record(
     *,
     runs_path: Path,
@@ -401,14 +416,14 @@ class TopicsFlow:
         result_dir = (job.dir / "result").resolve()
         topics_cfg = dict(service_cfg.get("topics") or {})
         snip_cfg = dict(service_cfg.get("snip") or {})
-        topics_enabled = bool(topics_cfg.get("enabled", False))
+        try:
+            job_cfg = _read_json(job.job_path)
+        except Exception:
+            job_cfg = {}
+        topics_enabled = _topics_enabled_for_job(status=status, job_cfg=job_cfg, service_cfg=service_cfg)
         speaker_mode = _normalize_speaker_mode(status.get("speaker_mode", "auto"))
         snippet_seconds = _safe_int(status.get("snippet_seconds"))
         if snippet_seconds is None or snippet_seconds <= 0:
-            try:
-                job_cfg = _read_json(job.job_path)
-            except Exception:
-                job_cfg = {}
             duration_ms = _safe_int(((job_cfg.get("input") or {}).get("duration_ms")))
             if duration_ms is not None and duration_ms > 0:
                 snippet_seconds = int((int(duration_ms) + 999) // 1000)
@@ -441,19 +456,64 @@ class TopicsFlow:
                 eta_hints=list(prediction.hints),
                 message=str(status.get("message") or "Running..."),
             )
+        orig_filename = str(status.get("orig_filename") or "").strip()
+        orig_stem = Path(orig_filename).stem if orig_filename else "transcript"
+        srt_path = _pick_srt_path(job=job, status=status)
+        if srt_path is None:
+            raise RuntimeError("No SRT found for topics handoff")
+
+        if not topics_enabled:
+            final_elapsed_s = base_elapsed_s
+            final_eta_confidence = max(0.0, float(_safe_float(status.get("eta_confidence")) or 0.0))
+            final_eta_hints = _unique_hints(status.get("eta_hints"))
+            self._patch_status(
+                job.status_path,
+                state="done",
+                phase="done",
+                subphase="",
+                status_owner=self._status_owner("api_topics", "api-topics"),
+                progress=1.0,
+                finished_at=datetime.now(timezone.utc).isoformat(),
+                message="Done",
+                progress_mode="predictive_v1",
+                elapsed_s=round(final_elapsed_s, 3),
+                eta_total_s=round(final_elapsed_s, 3),
+                eta_remaining_s=0.0,
+                eta_confidence=round(float(final_eta_confidence), 3),
+                eta_hints=list(final_eta_hints),
+                srt_filename=srt_path.name,
+                topics_enabled=topics_enabled,
+                topics_status="disabled",
+                topics_warning="",
+            )
+            try:
+                _append_progress_run_record(
+                    runs_path=self._progress_runs_path,
+                    job_id=job.job_id,
+                    status=_read_json(job.status_path),
+                    hardware_key=self._hardware_key,
+                    speaker_mode=speaker_mode,
+                    topics_enabled=topics_enabled,
+                    snippet_seconds=snippet_seconds,
+                    base_elapsed_s=base_elapsed_s,
+                    final_elapsed_s=final_elapsed_s,
+                    topics_prep_elapsed_s=0.0,
+                    topics_llm_elapsed_s=0.0,
+                )
+            except Exception as e:
+                _append_log(job.log_path, f"progress_runs_nonfatal error={e!r}")
+            _append_log(job.log_path, "topics_skipped disabled")
+            _append_log(job.log_path, "topics_done")
+            return
+
         self._patch_status(
             job.status_path,
             state="running",
             phase="topics",
             subphase="speaker_lines",
             message="Topics: generating speaker_lines",
+            topics_enabled=topics_enabled,
         )
-
-        orig_filename = str(status.get("orig_filename") or "").strip()
-        orig_stem = Path(orig_filename).stem if orig_filename else "transcript"
-        srt_path = _pick_srt_path(job=job, status=status)
-        if srt_path is None:
-            raise RuntimeError("No SRT found for topics handoff")
 
         topics_prep_started_mono = time.monotonic()
         speaker_lines_path, transcript_end_hms = make_speaker_lines_from_srt(
@@ -581,6 +641,7 @@ class TopicsFlow:
             speaker_lines_manifest_filename=manifest_path.name,
             topics_status=topics_status,
             topics_warning=topics_warning,
+            topics_enabled=topics_enabled,
         )
         try:
             _append_progress_run_record(

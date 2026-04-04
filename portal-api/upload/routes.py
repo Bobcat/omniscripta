@@ -20,6 +20,8 @@ router = APIRouter()
 
 NO_SPEAKER_VALUES = {"none", "off", "disabled", "no_speaker", "nospeaker", "no-speaker"}
 AUTO_LANGUAGE_VALUES = {"", "auto", "detect", "detect_auto", "detect-automatic", "detect-automatically"}
+TOPICS_ENABLED_VALUES = {"1", "true", "yes", "on", "enabled"}
+TOPICS_DISABLED_VALUES = {"0", "false", "no", "off", "disabled"}
 
 
 def _api_status_owner() -> str:
@@ -71,6 +73,17 @@ def _project_upload_ui_status(status: dict[str, Any], *, job_dir: Path | None = 
     For upload UI, keep showing an in-progress topics phase until topics_status is present.
     """
     out = dict(status or {})
+    if out.get("topics_enabled") is None and job_dir is not None:
+        try:
+            job_cfg = json.loads((job_dir / "job.json").read_text(encoding="utf-8"))
+        except Exception:
+            job_cfg = {}
+        upload_cfg = job_cfg.get("upload") or {}
+        options_cfg = job_cfg.get("options") or {}
+        if isinstance(upload_cfg, dict) and "topics_enabled" in upload_cfg:
+            out["topics_enabled"] = bool(upload_cfg.get("topics_enabled"))
+        elif isinstance(options_cfg, dict) and "topics_enabled" in options_cfg:
+            out["topics_enabled"] = bool(options_cfg.get("topics_enabled"))
     state = str(out.get("state") or "").strip().lower()
     phase = str(out.get("phase") or "").strip().lower()
     topics_status = out.get("topics_status")
@@ -180,6 +193,17 @@ def _parse_align_options(align: str) -> bool:
     return str(align or "").strip().lower() == "enabled"
 
 
+def _parse_topics_enabled(topics_enabled: str | None) -> bool:
+    raw = str(topics_enabled or "").strip().lower()
+    if not raw:
+        return True
+    if raw in TOPICS_ENABLED_VALUES:
+        return True
+    if raw in TOPICS_DISABLED_VALUES:
+        return False
+    raise HTTPException(status_code=400, detail="topics_enabled must be enabled/disabled or true/false")
+
+
 def _snip_seconds_override(request: Request) -> int | None:
     raw = _request_param(request, "snip")
     if not raw:
@@ -200,6 +224,7 @@ def create_demo_job(
     language: str = Form(""),
     speakers: str = Form("none"),
     align: str = Form("disabled"),
+    topics_enabled: str = Form("enabled"),
 ) -> dict[str, Any]:
     orig_name = Path(file.filename or "").name or "upload.bin"
 
@@ -207,6 +232,7 @@ def create_demo_job(
         "language": _normalize_upload_language(language),
         **_parse_speaker_options(speakers),
         "align_enabled": _parse_align_options(align),
+        "topics_enabled": _parse_topics_enabled(topics_enabled),
     }
     snippet_seconds_override = _snip_seconds_override(request)
     if snippet_seconds_override is not None:
@@ -250,6 +276,7 @@ def create_demo_job(
                 "max_speakers": base_options.get("max_speakers"),
                 "snippet_seconds": base_options.get("snippet_seconds"),
                 "align_enabled": base_options.get("align_enabled"),
+                "topics_enabled": base_options.get("topics_enabled"),
                 "asr_input_relpath": None,
                 "snippet_filename": None,
                 "srt_filename": None,
@@ -262,6 +289,7 @@ def create_demo_job(
             "job_id": jp.job_id,
             "state": "queued",
             "snippet_seconds": base_options.get("snippet_seconds"),
+            "topics_enabled": base_options.get("topics_enabled"),
         }
     finally:
         try:

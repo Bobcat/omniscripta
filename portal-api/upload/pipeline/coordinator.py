@@ -50,6 +50,13 @@ def _append_log(path: Path, message: str) -> None:
         f.write(f"[{ts}] COORD {message}\n")
 
 
+def _topics_enabled_for_job(*, opts: dict[str, Any], service_cfg: dict[str, Any]) -> bool:
+    if "topics_enabled" in opts:
+        return bool(opts.get("topics_enabled"))
+    topics_cfg = dict(service_cfg.get("topics") or {})
+    return bool(topics_cfg.get("enabled", False))
+
+
 def _load_service_cfg() -> dict[str, Any]:
     cfg: dict[str, Any] = {
         "snip": {
@@ -391,14 +398,14 @@ class UploadBatchCoordinator:
         if not input_path.exists():
             raise RuntimeError(f"Upload missing: {input_path}")
 
-        topics_cfg = dict(service_cfg.get("topics") or {})
         snip_cfg = dict(service_cfg.get("snip") or {})
         snippet_seconds = int(opts.get("snippet_seconds") or int(snip_cfg.get("minutes_default", 15)) * 60)
         speaker_mode = _normalize_speaker_mode(opts.get("speaker_mode", "auto"))
+        topics_enabled = _topics_enabled_for_job(opts=opts, service_cfg=service_cfg)
         prediction = build_prediction(
             runs_path=_progress_runs_path(),
             hardware_key=_hardware_key(_host_id()),
-            topics_enabled=bool(topics_cfg.get("enabled", False)),
+            topics_enabled=topics_enabled,
             speaker_mode=speaker_mode,
             snippet_seconds=snippet_seconds,
         )
@@ -476,6 +483,9 @@ class UploadBatchCoordinator:
                 "routing": {
                     "slot_affinity": 0,
                 },
+            },
+            "upload": {
+                "topics_enabled": topics_enabled,
             },
             "outputs": {
                 "status_relpath": "status.json",
