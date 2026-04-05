@@ -1,4 +1,3 @@
-
 /* Adjustments for existing CSS inputs/cards to fit new layout */
 .wrap {
     max-width: 1000px;
@@ -151,7 +150,7 @@ body.mobile .projects-list .project-menu-btn {
     font-size: 18px !important;
 }
 
-.project-action-item.delete:hover {
+.project-action-item:hover {
     background: #f3f4f6;
     color: var(--color-slate-900);
 }
@@ -169,6 +168,26 @@ body.mobile .projects-list .project-menu-btn {
 
 .project-action-sheet-backdrop.open {
     background: rgba(15, 23, 42, 0.35);
+}
+
+.sidebar-live-indicator {
+    display: none;
+}
+
+@media (max-width: 600px) {
+    .sidebar:not(.expanded) .sidebar-live-indicator.recording {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        position: absolute;
+        right: 10px;
+        top: 50%;
+        transform: translateY(-50%);
+        color: #dc2626;
+        font-size: 20px;
+        line-height: 1;
+        pointer-events: none;
+    }
 }
 
 .project-action-sheet {
@@ -198,4 +217,17 @@ body.mobile .projects-list .project-menu-btn {
     .project-action-sheet-backdrop {
         display: none !important;
     }
+}
+
+/* Screen reader only utility class for SEO and web accessibility */
+.sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border-width: 0;
 }

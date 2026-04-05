@@ -48,11 +48,79 @@
 }
 
 .upload-wrap .panel {
+    position: relative;
     background: var(--card);
     border: 1px solid var(--border);
     border-radius: calc(var(--r) + 2px);
     box-shadow: var(--shadow);
     padding: 12px;
+}
+
+.upload-wrap .upload-demo-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 5;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    background: rgba(246, 247, 251, 0.72);
+    backdrop-filter: blur(2px);
+    border-radius: calc(var(--r) + 2px);
+}
+
+.upload-wrap .upload-demo-overlay.hidden {
+    display: none;
+}
+
+.upload-wrap .upload-demo-dialog {
+    width: min(520px, 100%);
+    background: rgba(255, 255, 255, 0.98);
+    border: 1px solid var(--accent-soft-border);
+    border-radius: 18px;
+    box-shadow: 0 18px 44px rgba(18, 23, 33, .14);
+    padding: 18px 18px 16px;
+}
+
+.upload-wrap .upload-demo-eyebrow {
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--accent-border);
+    margin-bottom: 8px;
+}
+
+.upload-wrap .upload-demo-dialog h2 {
+    margin: 0 0 8px;
+    font-size: 19px;
+    line-height: 1.25;
+    letter-spacing: -0.01em;
+}
+
+.upload-wrap .upload-demo-dialog p {
+    margin: 0;
+    color: var(--muted);
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.upload-wrap .upload-demo-actions {
+    display: flex;
+    gap: 10px;
+    margin-top: 16px;
+}
+
+.upload-wrap .btn.secondary {
+    background: var(--surface-soft);
+    color: var(--ink);
+    border-color: var(--border);
+}
+
+@media (max-width: 600px) {
+    .upload-wrap .upload-demo-actions {
+        flex-direction: column;
+    }
 }
 
 .upload-wrap .btn {
@@ -78,7 +146,7 @@
 
 .upload-wrap .row {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
     gap: 10px;
     margin-top: 8px;
 }

@@ -4,84 +4,118 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Omniscripta</title>
-  <meta name="description" content="Audio Transcription and Editing" />
-
-  <!-- Cache Control for Mobile Browsers -->
-  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
-  <meta http-equiv="Pragma" content="no-cache" />
-  <meta http-equiv="Expires" content="0" />
-
-  <!-- Material Symbols -->
+  <title>Omniscripta - Professional Audio Transcription & AI Editing</title>
+  <meta name="description"
+    content="Transcribe audio to text with Omniscripta. Upload recordings, capture live speech, edit transcripts, and export finished documents in one workspace." />
   <link rel="stylesheet"
     href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" />
-  <link rel="stylesheet" href="style.css?v=310">
-  <link rel="stylesheet" href="layout.css?v=310">
-  <link rel="stylesheet" href="upload.css?v=310">
+  <link rel="stylesheet" href="/style.css?v=456">
+  <link rel="stylesheet" href="/layout.css?v=456">
 </head>
 
-<body>
-  <div class="app-container">
-    <nav class="sidebar expanded" id="app-sidebar">
-      <!-- Top section with Toggle -->
-      <div class="sidebar-header">
-        <div class="sidebar-brand" aria-label="Omniscripta">
-          <span class="sidebar-brand-title" style="color: #334155;">Omniscripta</span>
-        </div>
-        <button id="menu-toggle" class="icon-btn" title="Expand/Collapse">
-          <span class="toggle-icon material-symbols-outlined" aria-hidden="true">menu</span>
-        </button>
-      </div>
+<body class="landing-page">
+  <main class="intro-view landing-view">
+    <header class="landing-topbar">
+      <a class="landing-brand" href="/">Omniscripta</a>
+      <a class="landing-nav-link" href="/app/">Open app</a>
+    </header>
 
-      <div class="sidebar-content">
-        <ul class="nav-links">
-          <li data-action="live" title="Live recording">
-            <span class="material-symbols-outlined">mic</span>
-            <span class="link-text">Live recording</span>
-          </li>
-          <li data-action="upload" class="active" title="Upload Audio">
-            <span class="material-symbols-outlined">upload</span>
-            <span class="link-text">Upload audio</span>
-          </li>
-          <li data-action="open-local" title="Open local .srt">
-            <span class="material-symbols-outlined">folder_open</span>
-            <span class="link-text">Open local project</span>
-          </li>
-          <input type="file" id="localProjectInput" accept=".srt" hidden />
-        </ul>
+    <section class="intro-hero landing-hero">
+      <p class="landing-kicker">Audio transcription workspace</p>
+      <h1>Transcribe audio, capture live speech, and edit transcripts in one tool.</h1>
+      <p class="intro-subtitle">
+        Omniscripta lets you capture live speech, upload audio, edit transcripts, review topic lists,
+        and export the final result in one place.
+      </p>
+    </section>
 
-        <!-- Projects will be injected here by app.js -->
-
-        <ul class="nav-links" style="margin-top: auto;">
-          <li data-action="settings" title="Settings">
-            <span class="material-symbols-outlined">settings</span>
-            <span class="link-text">Settings</span>
-          </li>
-          <li data-action="intro" title="Quick start" style="margin-top: 4px;">
-            <span class="material-symbols-outlined">info</span>
-            <span class="link-text">Quick start</span>
-          </li>
-        </ul>
-      </div>
-    </nav>
-
-    <main class="main-content" id="main-view">
-      <!-- Dynamic Content Injected Here -->
-    </main>
-  </div>
-
-  <!-- Alert modal -->
-  <div aria-labelledby="alertTitle" aria-modal="true" class="modal hidden" id="alertModal" role="dialog">
-    <div class="modal-card">
-      <h3 id="alertTitle">Notification</h3>
-      <p id="alertMessage" style="margin-top: 10px; line-height: 1.5; color: var(--muted);"></p>
-      <div class="modal-actions">
-        <button class="primary" id="alertOkBtn">OK</button>
-      </div>
+    <div class="intro-tabs-container">
+      <nav class="intro-tabs" aria-label="Omniscripta features">
+        <a href="#section-live" class="intro-tab active">Live Recording</a>
+        <a href="#section-upload" class="intro-tab">Upload Audio</a>
+        <a href="#section-editor" class="intro-tab">Editor</a>
+        <a href="#section-document" class="intro-tab">Document & Export</a>
+      </nav>
     </div>
-  </div>
 
-  <script  src="app.bundle.js?v=310"></script>
+    <div class="intro-content">
+      <section id="section-live" class="intro-section">
+        <div class="intro-text">
+          <h2>Live Recording</h2>
+          <p>
+            Capture microphone audio and watch transcript text build up while you record. Use it for meetings,
+            interviews, dictation, and fast live notes.
+          </p>
+        </div>
+        <div class="intro-media">
+          <div class="intro-screenshot-placeholder">
+            <span class="material-symbols-outlined" style="font-size: 48px; color: var(--border); margin-bottom: 8px;">mic</span>
+            <span style="color: var(--text-secondary); font-size: 0.9rem;">Live transcription view</span>
+          </div>
+          <div class="intro-media-caption">
+            <a href="/app/?demo=live-demo#live" class="intro-link">Try live demo</a>
+          </div>
+        </div>
+      </section>
+
+      <section id="section-upload" class="intro-section">
+        <div class="intro-text">
+          <h2>Upload Audio</h2>
+          <p>
+            Upload audio files for transcription. Omniscripta turns recordings into editable text with timestamps,
+            speaker labels, subtitles, and optional AI topic lists.
+          </p>
+        </div>
+        <div class="intro-media">
+          <div class="intro-screenshot-placeholder">
+            <span class="material-symbols-outlined" style="font-size: 48px; color: var(--border); margin-bottom: 8px;">upload_file</span>
+            <span style="color: var(--text-secondary); font-size: 0.9rem;">Upload transcription view</span>
+          </div>
+          <div class="intro-media-caption">
+            <a href="/app/?demo=upload-prefill#upload" class="intro-link">Try upload workflow</a>
+          </div>
+        </div>
+      </section>
+
+      <section id="section-editor" class="intro-section">
+        <div class="intro-text">
+          <h2>Editor</h2>
+          <p>
+            Work through a transcript in an editor that stays aligned with audio playback. Adjust wording,
+            timing, and speaker labels without leaving the workspace.
+          </p>
+        </div>
+        <div class="intro-media">
+          <div class="intro-screenshot-placeholder">
+            <span class="material-symbols-outlined" style="font-size: 48px; color: var(--border); margin-bottom: 8px;">edit_note</span>
+            <span style="color: var(--text-secondary); font-size: 0.9rem;">Audio-synced transcript editor</span>
+          </div>
+          <div class="intro-media-caption">
+            <a href="/app/?audioUrl=%2Fdev-fixtures%2Fpanel_120s_v1_08m09s_10m09s.mp3&srtUrl=%2Fdev-fixtures%2Fpanel_120s_v1_08m09s_10m09s.srt&mode=segments#editor" class="intro-link">Test the editor</a>
+          </div>
+        </div>
+      </section>
+
+      <section id="section-document" class="intro-section">
+        <div class="intro-text">
+          <h2>Document & Export</h2>
+          <p>
+            Switch from segment editing to a cleaner reading view, review optional AI topic lists, and export the
+            final result for review, handoff, or publishing.
+          </p>
+        </div>
+        <div class="intro-media">
+          <div class="intro-screenshot-placeholder">
+            <span class="material-symbols-outlined" style="font-size: 48px; color: var(--border); margin-bottom: 8px;">description</span>
+            <span style="color: var(--text-secondary); font-size: 0.9rem;">Document view and export tools</span>
+          </div>
+          <div class="intro-media-caption">
+            <a href="/app/?audioUrl=%2Fdev-fixtures%2Fpanel_120s_v1_08m09s_10m09s.mp3&srtUrl=%2Fdev-fixtures%2Fpanel_120s_v1_08m09s_10m09s.srt&mode=text#editor" class="intro-link">Open sample document</a>
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
 </body>
 
 </html>

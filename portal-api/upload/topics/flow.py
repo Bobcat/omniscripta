@@ -588,6 +588,12 @@ class TopicsFlow:
                     topics_warning = f"Topics validation failed: {report_path.name}"
                     _append_log(job.log_path, f"topics_nonfatal validation_failed report={report_path.name}")
                 else:
+                    salvaged_chunks = int(report.get("salvaged_chunks") or 0)
+                    if salvaged_chunks > 0:
+                        _append_log(
+                            job.log_path,
+                            f"topics_validation_salvaged chunks={salvaged_chunks} report={report_path.name}",
+                        )
                     merged_path = (result_dir / f"{orig_stem}_{prompt_id}_merged.json").resolve()
                     merge_topics(
                         manifest_path=manifest_path,
