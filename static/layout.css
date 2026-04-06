@@ -174,13 +174,79 @@ body.mobile .projects-list .project-menu-btn {
     display: none;
 }
 
+.mobile-editor-actions {
+    display: none;
+    position: relative;
+    margin-left: auto;
+}
+
+#mobile-editor-menu-btn {
+    width: 34px;
+    height: 34px;
+    border-radius: 10px;
+}
+
+#mobile-editor-menu-btn .material-symbols-outlined {
+    font-size: 20px;
+}
+
+.mobile-editor-menu {
+    display: none;
+    position: absolute;
+    top: calc(100% + 8px);
+    right: 0;
+    min-width: 188px;
+    padding: 6px;
+    border-radius: 12px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    box-shadow: 0 12px 30px rgba(15, 23, 42, 0.16);
+    flex-direction: column;
+    z-index: 12060;
+}
+
+.mobile-editor-menu.show-menu {
+    display: flex;
+}
+
+.mobile-editor-menu-item {
+    width: 100%;
+    margin: 0;
+    border: none;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--color-slate-900);
+    font-size: 0.9rem;
+    padding: 9px 10px;
+    text-align: left;
+    cursor: pointer;
+}
+
+.mobile-editor-menu-item:hover {
+    background: #f3f4f6;
+}
+
 @media (max-width: 600px) {
+    .sidebar:not(.expanded) .sidebar-header .sidebar-brand {
+        order: 1;
+        margin-left: 8px;
+        margin-right: auto;
+    }
+
+    .sidebar:not(.expanded) .mobile-editor-actions {
+        display: inline-flex;
+        align-items: center;
+        order: 2;
+        margin-left: 0;
+        margin-right: 0;
+    }
+
     .sidebar:not(.expanded) .sidebar-live-indicator.recording {
         display: inline-flex;
         align-items: center;
         justify-content: center;
         position: absolute;
-        right: 10px;
+        right: 48px;
         top: 50%;
         transform: translateY(-50%);
         color: #dc2626;

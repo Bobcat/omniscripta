@@ -16,9 +16,9 @@
   <!-- Material Symbols -->
   <link rel="stylesheet"
     href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" />
-  <link rel="stylesheet" href="/style.css?v=456">
-  <link rel="stylesheet" href="/layout.css?v=456">
-  <link rel="stylesheet" href="/upload.css?v=456">
+  <link rel="stylesheet" href="/style.css?v=472">
+  <link rel="stylesheet" href="/layout.css?v=472">
+  <link rel="stylesheet" href="/upload.css?v=472">
 </head>
 
 <body>
@@ -33,6 +33,16 @@
         </button>
         <span id="mobile-live-recording-indicator" class="material-symbols-outlined sidebar-live-indicator"
           aria-hidden="true">mic</span>
+        <div id="mobile-editor-actions" class="mobile-editor-actions hidden" aria-hidden="true">
+          <button id="mobile-editor-menu-btn" class="icon-btn" type="button" title="Editor actions"
+            aria-label="Editor actions" aria-haspopup="menu" aria-expanded="false">
+            <span class="material-symbols-outlined" aria-hidden="true">more_vert</span>
+          </button>
+          <div id="mobile-editor-menu" class="mobile-editor-menu" role="menu" aria-label="Editor actions">
+            <button id="mobile-editor-export-btn" class="mobile-editor-menu-item" type="button"
+              title="Export document">Export document</button>
+          </div>
+        </div>
       </div>
 
       <div class="sidebar-content">
@@ -80,7 +90,7 @@
     </div>
   </div>
 
-  <script  src="/app.bundle.js?v=456"></script>
+  <script  src="/app.bundle.js?v=472"></script>
 </body>
 
 </html>

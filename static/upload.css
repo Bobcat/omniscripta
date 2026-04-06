@@ -111,6 +111,12 @@
     margin-top: 16px;
 }
 
+.upload-wrap .upload-demo-actions .btn {
+    width: auto;
+    flex: 1 1 0;
+    min-width: 0;
+}
+
 .upload-wrap .btn.secondary {
     background: var(--surface-soft);
     color: var(--ink);
@@ -120,6 +126,11 @@
 @media (max-width: 600px) {
     .upload-wrap .upload-demo-actions {
         flex-direction: column;
+    }
+
+    .upload-wrap .upload-demo-actions .btn {
+        width: 100%;
+        flex: 0 0 auto;
     }
 }
 
@@ -235,6 +246,17 @@
 }
 
 @media (max-width: 600px) {
+    .upload-wrap {
+        padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 22px);
+    }
+
+    .upload-wrap .panel {
+        margin-bottom: 0;
+    }
+
+    .upload-wrap .wrap {
+        padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 20px);
+    }
 
     .desktop-only {
         display: none;

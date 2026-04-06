@@ -9,8 +9,8 @@
     content="Transcribe audio to text with Omniscripta. Upload recordings, capture live speech, edit transcripts, and export finished documents in one workspace." />
   <link rel="stylesheet"
     href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" />
-  <link rel="stylesheet" href="/style.css?v=456">
-  <link rel="stylesheet" href="/layout.css?v=456">
+  <link rel="stylesheet" href="/style.css?v=472">
+  <link rel="stylesheet" href="/layout.css?v=472">
 </head>
 
 <body class="landing-page">
@@ -27,6 +27,9 @@
         Omniscripta lets you capture live speech, upload audio, edit transcripts, review topic lists,
         and export the final result in one place.
       </p>
+      <div class="landing-hero-actions">
+        <a href="/app/" class="landing-hero-btn">Open Omniscripta</a>
+      </div>
     </section>
 
     <div class="intro-tabs-container">
@@ -49,8 +52,8 @@
         </div>
         <div class="intro-media">
           <div class="intro-screenshot-placeholder">
-            <span class="material-symbols-outlined" style="font-size: 48px; color: var(--border); margin-bottom: 8px;">mic</span>
-            <span style="color: var(--text-secondary); font-size: 0.9rem;">Live transcription view</span>
+            <img src="/landing-screenshots/omniscripta_live_recording.png?v=472" alt="Live recording view"
+              class="intro-screenshot-image">
           </div>
           <div class="intro-media-caption">
             <a href="/app/?demo=live-demo#live" class="intro-link">Try live demo</a>
@@ -68,8 +71,8 @@
         </div>
         <div class="intro-media">
           <div class="intro-screenshot-placeholder">
-            <span class="material-symbols-outlined" style="font-size: 48px; color: var(--border); margin-bottom: 8px;">upload_file</span>
-            <span style="color: var(--text-secondary); font-size: 0.9rem;">Upload transcription view</span>
+            <img src="/landing-screenshots/omniscripta_upload_transcribing.png?v=472" alt="Upload transcription view"
+              class="intro-screenshot-image">
           </div>
           <div class="intro-media-caption">
             <a href="/app/?demo=upload-prefill#upload" class="intro-link">Try upload workflow</a>
@@ -87,11 +90,13 @@
         </div>
         <div class="intro-media">
           <div class="intro-screenshot-placeholder">
-            <span class="material-symbols-outlined" style="font-size: 48px; color: var(--border); margin-bottom: 8px;">edit_note</span>
-            <span style="color: var(--text-secondary); font-size: 0.9rem;">Audio-synced transcript editor</span>
+            <img src="/landing-screenshots/omniscripta_transcript_editor.png?v=472" alt="Transcript editor view"
+              class="intro-screenshot-image">
           </div>
           <div class="intro-media-caption">
-            <a href="/app/?audioUrl=%2Fdev-fixtures%2Fpanel_120s_v1_08m09s_10m09s.mp3&srtUrl=%2Fdev-fixtures%2Fpanel_120s_v1_08m09s_10m09s.srt&mode=segments#editor" class="intro-link">Test the editor</a>
+            <a id="landingEditorLink"
+              href="/app/?audioUrl=%2Fdev-fixtures%2Fpanel_discussion_120s.mp3&srtUrl=%2Fdev-fixtures%2Fpanel_discussion_120s.srt&mode=segments#editor"
+              class="intro-link">Test the editor</a>
           </div>
         </div>
       </section>
@@ -106,16 +111,168 @@
         </div>
         <div class="intro-media">
           <div class="intro-screenshot-placeholder">
-            <span class="material-symbols-outlined" style="font-size: 48px; color: var(--border); margin-bottom: 8px;">description</span>
-            <span style="color: var(--text-secondary); font-size: 0.9rem;">Document view and export tools</span>
+            <img src="/landing-screenshots/omniscripta_document_topics.png?v=472" alt="Document view with topics"
+              class="intro-screenshot-image">
           </div>
           <div class="intro-media-caption">
-            <a href="/app/?audioUrl=%2Fdev-fixtures%2Fpanel_120s_v1_08m09s_10m09s.mp3&srtUrl=%2Fdev-fixtures%2Fpanel_120s_v1_08m09s_10m09s.srt&mode=text#editor" class="intro-link">Open sample document</a>
+            <a href="/app/?audioUrl=%2Fdev-fixtures%2Fpanel_discussion_120s.mp3&srtUrl=%2Fdev-fixtures%2Fpanel_discussion_120s.srt&mode=text#editor"
+              class="intro-link">Open sample document</a>
           </div>
         </div>
       </section>
     </div>
   </main>
+  <div id="landingEditorMobileDialog" class="landing-mobile-dialog hidden" role="dialog" aria-modal="true"
+    aria-labelledby="landingEditorMobileDialogTitle">
+    <div class="landing-mobile-dialog-card">
+      <h2 id="landingEditorMobileDialogTitle">Requires desktop or laptop</h2>
+      <p>The full transcript editor is available on desktop or laptop. On mobile, you can open the sample document
+        instead.</p>
+      <div class="landing-mobile-dialog-actions">
+        <a href="/app/?audioUrl=%2Fdev-fixtures%2Fpanel_discussion_120s.mp3&srtUrl=%2Fdev-fixtures%2Fpanel_discussion_120s.srt&mode=text#editor"
+          class="landing-mobile-dialog-link">Open sample document</a>
+        <button id="landingEditorMobileDialogClose" type="button" class="landing-mobile-dialog-close">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="landingScreenshotLightbox" class="landing-screenshot-lightbox hidden" role="dialog" aria-modal="true"
+    aria-label="Screenshot preview">
+    <button id="landingScreenshotLightboxClose" type="button" class="landing-screenshot-lightbox-close"
+      aria-label="Close screenshot preview">Close</button>
+    <img id="landingScreenshotLightboxImage" src="" alt="" class="landing-screenshot-lightbox-image">
+  </div>
+
+  <script>
+    (() => {
+      const tabs = Array.from(document.querySelectorAll('.intro-tab[href^="#"]'));
+      const sections = tabs
+        .map((tab) => document.querySelector(tab.getAttribute('href')))
+        .filter(Boolean);
+
+      const setActiveTab = (id) => {
+        tabs.forEach((tab) => {
+          tab.classList.toggle('active', tab.getAttribute('href') === `#${id}`);
+        });
+      };
+
+      const getStickyOffset = () => {
+        const topbar = document.querySelector('.landing-topbar');
+        const tabsContainer = document.querySelector('.intro-tabs-container');
+        const topbarHeight = topbar ? topbar.getBoundingClientRect().height : 0;
+        const tabsHeight = tabsContainer ? tabsContainer.getBoundingClientRect().height : 0;
+        return topbarHeight + tabsHeight;
+      };
+
+      const updateActiveTab = () => {
+        if (!sections.length) return;
+        const probe = getStickyOffset() + 24;
+        let activeId = sections[0].id;
+        for (const section of sections) {
+          if (section.getBoundingClientRect().top <= probe) {
+            activeId = section.id;
+          } else {
+            break;
+          }
+        }
+        const doc = document.documentElement;
+        if ((window.scrollY + window.innerHeight) >= (doc.scrollHeight - 4)) {
+          activeId = sections[sections.length - 1].id;
+        }
+        setActiveTab(activeId);
+      };
+
+      if (tabs.length && sections.length) {
+        tabs.forEach((tab) => {
+          tab.addEventListener('click', () => {
+            const id = String(tab.getAttribute('href') || '').replace(/^#/, '');
+            if (id) setActiveTab(id);
+          });
+        });
+        updateActiveTab();
+        window.addEventListener('scroll', updateActiveTab, { passive: true });
+        window.addEventListener('resize', updateActiveTab);
+        window.addEventListener('hashchange', updateActiveTab);
+      }
+
+      const screenshotLightbox = document.getElementById('landingScreenshotLightbox');
+      const screenshotLightboxImage = document.getElementById('landingScreenshotLightboxImage');
+      const screenshotLightboxClose = document.getElementById('landingScreenshotLightboxClose');
+
+      const setScreenshotLightboxOpen = (open, image = null) => {
+        if (!screenshotLightbox || !screenshotLightboxImage) return;
+        if (open && image) {
+          screenshotLightboxImage.src = image.currentSrc || image.src;
+          screenshotLightboxImage.alt = image.alt || 'Screenshot preview';
+        }
+        screenshotLightbox.classList.toggle('hidden', !open);
+        document.body.classList.toggle('landing-lightbox-open', open);
+        if (!open) {
+          screenshotLightboxImage.removeAttribute('src');
+          screenshotLightboxImage.alt = '';
+        }
+      };
+
+      if (screenshotLightbox && screenshotLightboxImage && screenshotLightboxClose) {
+        document.querySelectorAll('.intro-screenshot-image').forEach((image) => {
+          image.addEventListener('click', () => {
+            if (isLandingMobile()) return;
+            setScreenshotLightboxOpen(true, image);
+          });
+        });
+        screenshotLightboxClose.addEventListener('click', () => setScreenshotLightboxOpen(false));
+        screenshotLightbox.addEventListener('click', (event) => {
+          if (event.target === screenshotLightbox) {
+            setScreenshotLightboxOpen(false);
+          }
+        });
+      }
+
+      const editorLink = document.getElementById('landingEditorLink');
+      const dialog = document.getElementById('landingEditorMobileDialog');
+      const closeBtn = document.getElementById('landingEditorMobileDialogClose');
+      if (!editorLink || !dialog || !closeBtn) return;
+
+      const isLandingMobile = () => {
+        const params = new URLSearchParams(window.location.search);
+        if (params.get('mobile')) return true;
+        const isTouch = (navigator.maxTouchPoints > 0) || ('ontouchstart' in window);
+        const ua = navigator.userAgent || '';
+        const isMobileUA = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini|Mobile|mobile/i.test(ua);
+        const isIPad = /Macintosh/i.test(ua) && isTouch;
+        return isMobileUA || isIPad || window.innerWidth <= 600;
+      };
+
+      const setDialogOpen = (open) => {
+        dialog.classList.toggle('hidden', !open);
+        document.body.classList.toggle('landing-dialog-open', open);
+      };
+
+      editorLink.addEventListener('click', (event) => {
+        if (!isLandingMobile()) return;
+        event.preventDefault();
+        setDialogOpen(true);
+      });
+
+      closeBtn.addEventListener('click', () => setDialogOpen(false));
+      dialog.addEventListener('click', (event) => {
+        if (event.target === dialog) {
+          setDialogOpen(false);
+        }
+      });
+      document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') {
+          if (screenshotLightbox && !screenshotLightbox.classList.contains('hidden')) {
+            setScreenshotLightboxOpen(false);
+            return;
+          }
+          if (!dialog.classList.contains('hidden')) {
+            setDialogOpen(false);
+          }
+        }
+      });
+    })();
+  </script>
 </body>
 
 </html>
