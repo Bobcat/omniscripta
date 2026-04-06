@@ -204,6 +204,7 @@ class RollingContextSession:
         result["live_engine"] = effective_engine
         final_segments = result.get("final_segments")
         has_segments = isinstance(final_segments, list) and any(isinstance(s, dict) for s in final_segments)
+        has_pc_replay = int(max(0, int(result.get("pc_events_count") or 0))) > 0
 
         has_recording_wav = False
         raw_recording_path = str(result.get("recording_path") or "").strip()
@@ -227,8 +228,10 @@ class RollingContextSession:
             "ready": finalization_state in ready_states,
             "can_export_srt": bool(has_segments),
             "can_export_wav": bool(has_recording_wav),
+            "can_export_pc": bool(has_pc_replay),
             "transcript_srt_url": self.rooted_path_cb(f"/demo/live/sessions/{self.session_id}/transcript.srt") if has_segments else None,
             "recording_wav_url": self.rooted_path_cb(f"/demo/live/sessions/{self.session_id}/recording.wav") if has_recording_wav else None,
+            "transcript_pc_url": self.rooted_path_cb(f"/demo/live/sessions/{self.session_id}/transcript.pc") if has_pc_replay else None,
         }
 
     def _append_log(self, kind: str, **fields: Any) -> None:

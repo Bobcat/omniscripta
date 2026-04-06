@@ -66,6 +66,7 @@ class LiveSession:
     live_transcript_revision: int = 0
     live_final_segments: list[dict[str, Any]] = field(default_factory=list)
     live_commit_results: list[dict[str, Any]] = field(default_factory=list)
+    live_pc_events: list[dict[str, str]] = field(default_factory=list)
     live_preview_text: str = ""
     live_preview_seq: int = -1
     live_preview_audio_end_ms: int = 0
@@ -99,6 +100,7 @@ class ClosedSessionArchive:
     live_transcript_revision: int = 0
     live_final_segments: list[dict[str, Any]] = field(default_factory=list)
     live_commit_results: list[dict[str, Any]] = field(default_factory=list)
+    live_pc_events: list[dict[str, str]] = field(default_factory=list)
     live_engine_runtime: dict[str, Any] = field(default_factory=dict)
     fixture_id: str = ""
     fixture_version: str = ""
@@ -132,6 +134,20 @@ class LiveSessionManager:
     @staticmethod
     def _copy_commit_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return [dict(row) for row in rows]
+
+    @staticmethod
+    def _copy_pc_events(events: list[dict[str, str]]) -> list[dict[str, str]]:
+        return [dict(event) for event in events]
+
+    @staticmethod
+    def _append_pc_event(sess: LiveSession, *, kind: str, text: str) -> None:
+        safe_kind = str(kind or "").strip().lower()
+        if safe_kind not in {"p", "c"}:
+            return
+        safe_text = str(text or "")
+        if safe_kind == "c" and not safe_text:
+            return
+        sess.live_pc_events.append({"kind": safe_kind, "text": safe_text})
 
     @staticmethod
     def _count_commit_results(rows: list[dict[str, Any]], *, state: str) -> int:
@@ -301,6 +317,7 @@ class LiveSessionManager:
         transcript_revision: int,
         final_segments: list[dict[str, Any]],
         commit_results: list[dict[str, Any]],
+        pc_events_count: int,
         preview_text: str,
         preview_seq: int,
         preview_audio_end_ms: int,
@@ -342,6 +359,7 @@ class LiveSessionManager:
             "final_covered_ms": int(max(0, final_covered_ms)),
             "chunk_results": chunks,
             "chunk_results_count": len(chunks),
+            "pc_events_count": int(max(0, pc_events_count)),
             "chunk_reason_counts": dict(chunk_debug.get("chunk_reason_counts") or {}),
             "chunk_results_rows_count": int(max(0, int(chunk_debug.get("chunk_results_rows_count") or 0))),
             "chunk_results_unique_count": int(max(0, int(chunk_debug.get("chunk_results_unique_count") or 0))),
@@ -623,6 +641,7 @@ class LiveSessionManager:
             sess.live_preview_seq = int(safe_seq)
             sess.live_preview_audio_end_ms = int(safe_audio_end_ms)
             sess.live_preview_updated_unix = now_unix
+            self._append_pc_event(sess, kind="p", text=sess.live_preview_text)
             return self._snapshot_locked(sess)
 
     def clear_live_preview(
@@ -639,10 +658,13 @@ class LiveSessionManager:
             sess.last_seen_unix = now_unix
             current_seq = int(getattr(sess, "live_preview_seq", -1) or -1)
             if max_seq is None or current_seq <= int(max_seq):
+                previous_preview_text = str(sess.live_preview_text or "")
                 sess.live_preview_text = ""
                 sess.live_preview_seq = -1
                 sess.live_preview_audio_end_ms = 0
                 sess.live_preview_updated_unix = 0.0
+                if previous_preview_text:
+                    self._append_pc_event(sess, kind="p", text="")
             return self._snapshot_locked(sess)
 
     def set_live_engine_runtime(
@@ -713,6 +735,8 @@ class LiveSessionManager:
             sess.chunks_total = max(int(sess.chunks_total), idx + 1)
             sess.chunk_index_next = max(int(sess.chunk_index_next), idx + 1)
             if safe_state == "ready":
+                had_preview_text = bool(str(sess.live_preview_text or ""))
+                self._append_pc_event(sess, kind="c", text=safe_text)
                 self._sync_live_commit_counts(sess)
                 # Keep preview-clear coupled to the ready-commit mutation.
                 # This makes commit + preview-clear an atomic snapshot update.
@@ -720,6 +744,8 @@ class LiveSessionManager:
                 sess.live_preview_seq = -1
                 sess.live_preview_audio_end_ms = 0
                 sess.live_preview_updated_unix = 0.0
+                if had_preview_text:
+                    self._append_pc_event(sess, kind="p", text="")
             elif safe_state == "error":
                 self._sync_live_commit_counts(sess)
 
@@ -738,6 +764,16 @@ class LiveSessionManager:
             arc = self._archives.get(session_id)
             if arc is not None:
                 return self._live_archive_result_snapshot_locked(arc)
+        raise KeyError("session_or_archive_not_found")
+
+    def live_pc_events(self, session_id: str) -> list[dict[str, str]]:
+        with self._lock:
+            sess = self._sessions.get(session_id)
+            if sess is not None:
+                return self._copy_pc_events(sess.live_pc_events)
+            arc = self._archives.get(session_id)
+            if arc is not None:
+                return self._copy_pc_events(arc.live_pc_events)
         raise KeyError("session_or_archive_not_found")
 
     def next_seq(self, session_id: str) -> int:
@@ -830,6 +866,7 @@ class LiveSessionManager:
                 arc.live_transcript_revision = int(max(0, src_sess.live_transcript_revision))
                 arc.live_final_segments = [dict(seg) for seg in src_sess.live_final_segments]
                 arc.live_commit_results = [dict(r) for r in src_sess.live_commit_results]
+                arc.live_pc_events = [dict(event) for event in src_sess.live_pc_events]
                 arc.live_engine_runtime = dict(src_sess.live_engine_runtime or {})
                 arc.fixture_id = str(src_sess.fixture_id or "")
                 arc.fixture_version = str(src_sess.fixture_version or "")
@@ -943,6 +980,7 @@ class LiveSessionManager:
             transcript_revision=int(max(0, sess.live_transcript_revision)),
             final_segments=sess.live_final_segments,
             commit_results=sess.live_commit_results,
+            pc_events_count=len(sess.live_pc_events),
             preview_text=str(sess.live_preview_text or "").strip(),
             preview_seq=int(max(-1, int(sess.live_preview_seq))),
             preview_audio_end_ms=int(max(0, int(sess.live_preview_audio_end_ms or 0))),
@@ -974,6 +1012,7 @@ class LiveSessionManager:
             transcript_revision=int(max(0, arc.live_transcript_revision or arc.transcript_revision)),
             final_segments=final_segments_src,
             commit_results=arc.live_commit_results,
+            pc_events_count=len(arc.live_pc_events),
             preview_text="",
             preview_seq=-1,
             preview_audio_end_ms=0,

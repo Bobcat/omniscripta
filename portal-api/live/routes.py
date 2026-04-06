@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Request, WebSocket
 from fastapi.responses import FileResponse, Response
 
 from live.output.artifacts import (
+    live_pc_events_to_text,
     live_recording_wav_path_from_result,
     live_result_to_plain_text,
     live_result_to_srt_text,
@@ -168,6 +169,7 @@ def get_live_session_result(session_id: str) -> Dict[str, Any]:
     final_segments = result.get("final_segments")
     has_segments = isinstance(final_segments, list) and any(isinstance(s, dict) for s in final_segments)
     has_recording_wav = live_recording_wav_path_from_result(result) is not None
+    has_pc_replay = int(max(0, int(result.get("pc_events_count") or 0))) > 0
     finalization_state = str(result.get("finalization_state") or "").strip().lower()
     ready_states = {"ready", "finalized", "recording_finalized"}
     if effective_engine == "rolling_context":
@@ -180,8 +182,10 @@ def get_live_session_result(session_id: str) -> Dict[str, Any]:
         "ready": finalization_state in ready_states,
         "can_export_srt": bool(has_segments),
         "can_export_wav": bool(has_recording_wav),
+        "can_export_pc": bool(has_pc_replay),
         "transcript_srt_url": rooted_path(f"/demo/live/sessions/{session_id}/transcript.srt") if has_segments else None,
         "recording_wav_url": rooted_path(f"/demo/live/sessions/{session_id}/recording.wav") if has_recording_wav else None,
+        "transcript_pc_url": rooted_path(f"/demo/live/sessions/{session_id}/transcript.pc") if has_pc_replay else None,
     }
 
 
@@ -288,6 +292,19 @@ def get_live_session_recording_wav(session_id: str) -> FileResponse:
         media_type="audio/wav",
         filename=f"{safe_filename(session_id)}.wav",
     )
+
+
+@router.get("/demo/live/sessions/{session_id}/transcript.pc")
+def get_live_session_transcript_pc(session_id: str) -> Response:
+    try:
+        pc_events = LIVE_SESSIONS.live_pc_events(session_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Live session replay transcript not found")
+    pc_text = live_pc_events_to_text(pc_events)
+    if not pc_text:
+        raise HTTPException(status_code=409, detail="Transcript replay events not ready")
+    headers = {"Content-Disposition": f'attachment; filename="{safe_filename(session_id)}.pc"'}
+    return Response(content=pc_text, media_type="text/plain", headers=headers)
 
 
 @router.get("/demo/live/metrics")

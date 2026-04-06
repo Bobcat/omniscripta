@@ -58,6 +58,26 @@ def live_result_to_plain_text(result: dict[str, Any]) -> str:
     return "\n".join(rows).strip()
 
 
+def _normalize_pc_text(value: Any) -> str:
+    text = str(value or "")
+    return text.replace("\r\n", "\n").replace("\r", "\n").replace("\n", " ")
+
+
+def live_pc_events_to_text(events: list[dict[str, Any]]) -> str:
+    rows: list[str] = []
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        kind = str(event.get("kind") or "").strip().lower()
+        if kind not in {"p", "c"}:
+            continue
+        text = _normalize_pc_text(event.get("text"))
+        if kind == "c" and not text:
+            continue
+        rows.append(f"{kind},{text}")
+    return "".join(f"{row}\n" for row in rows)
+
+
 def live_recording_wav_path_from_result(result: dict[str, Any]) -> Path | None:
     raw = str((result or {}).get("recording_path") or "").strip()
     if not raw:
