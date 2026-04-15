@@ -18,6 +18,20 @@ if str(_REPO_ROOT) not in sys.path:
 from shared.app_config import get_float, get_int, get_setting, get_str
 
 
+_DEFAULT_LLM_POOL_TIMEOUT_S = 600
+_DEFAULT_LLM_POOL_RETRIES = 2
+_DEFAULT_LLM_POOL_RETRY_SLEEP_S = 2.0
+_SUPPORTED_DECODING_KEYS = {
+  "beam_size",
+  "top_k",
+  "top_p",
+  "temperature",
+  "repetition_penalty",
+  "max_tokens",
+  "stop",
+}
+
+
 def _repo_root() -> Path:
   # llm-worker/llm_worker_daemon.py -> llm-worker -> repo root
   return Path(__file__).resolve().parents[1]
@@ -90,31 +104,18 @@ def _update_task_status(
   _write_json_atomic(task.status_path, data)
 
 
-def _default_generation() -> dict[str, Any]:
+def _default_decoding() -> dict[str, Any]:
   return {
     "max_tokens": 2048,
     "temperature": 0.01,
     "top_p": 1,
     "top_k": 1,
-    "typical": 1,
-    "min_p": 0,
-    "tfs": 1,
-    "top_a": 0,
-    "smoothing_factor": 0,
     "repetition_penalty": 1,
-    "penalty_range": 1024,
-    "frequency_penalty": 0,
-    "presence_penalty": 0,
-    "dry_multiplier": 0,
-    "mirostat_mode": 0,
-    "xtc_threshold": 0.1,
-    "xtc_probability": 0,
-    "stream": False,
   }
 
 
-def _tabby_url(base_url: str) -> str:
-  return f"{str(base_url or '').rstrip('/')}/v1/chat/completions"
+def _llm_pool_url(base_url: str) -> str:
+  return f"{str(base_url or '').rstrip('/')}/v1/responses"
 
 
 def _combined_prompt(*, prompt: str, src_name: str, src_text: str) -> str:
@@ -131,11 +132,10 @@ def _combined_prompt(*, prompt: str, src_name: str, src_text: str) -> str:
   )
 
 
-def _http_post_json(*, url: str, api_key: str, payload: dict[str, Any], timeout_s: int) -> dict[str, Any]:
+def _http_post_json(*, url: str, payload: dict[str, Any], timeout_s: int) -> dict[str, Any]:
   body = json.dumps(payload).encode("utf-8")
   req = request.Request(url, data=body, method="POST")
   req.add_header("Content-Type", "application/json")
-  req.add_header("Authorization", f"Bearer {api_key}")
   with request.urlopen(req, timeout=max(1, int(timeout_s))) as resp:
     raw = resp.read()
   parsed = json.loads(raw.decode("utf-8", errors="replace"))
@@ -146,7 +146,7 @@ def _http_post_json(*, url: str, api_key: str, payload: dict[str, Any], timeout_
 
 def _extract_text(resp_json: dict[str, Any]) -> str:
   try:
-    return str(resp_json["choices"][0]["message"]["content"])
+    return str(resp_json["output_text"])
   except Exception:
     return ""
 
@@ -192,15 +192,21 @@ def _resolve_output_dir(task: TaskPaths, spec: dict[str, Any]) -> Path:
   return p
 
 
-def _build_payload(*, model: str, combined: str, generation: dict[str, Any]) -> dict[str, Any]:
-  payload: dict[str, Any] = {
+def _merge_decoding(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+  for key, value in override.items():
+    if key in _SUPPORTED_DECODING_KEYS:
+      base[key] = value
+  return base
+
+
+def _build_payload(*, model: str, combined: str, decoding: dict[str, Any]) -> dict[str, Any]:
+  return {
     "model": model,
-    "messages": [{"role": "user", "content": combined}],
+    "input": combined,
+    "instructions": " ",
+    "stream": False,
+    "decoding": decoding,
   }
-  payload.update(generation)
-  if "stream" not in payload:
-    payload["stream"] = False
-  return payload
 
 
 def _run_prompt_task(*, task: TaskPaths, spec: dict[str, Any]) -> dict[str, Any]:
@@ -214,30 +220,26 @@ def _run_prompt_task(*, task: TaskPaths, spec: dict[str, Any]) -> dict[str, Any]
   input_path, input_text = _load_input_artifact(spec)
   combined = _combined_prompt(prompt=prompt_text, src_name=input_path.name, src_text=input_text)
 
-  generation = _default_generation()
+  decoding = _default_decoding()
   cfg_gen = get_setting("llm.generation", {})
   if isinstance(cfg_gen, dict):
-    generation.update(cfg_gen)
+    _merge_decoding(decoding, cfg_gen)
   spec_gen = spec.get("generation")
   if isinstance(spec_gen, dict):
-    generation.update(spec_gen)
+    _merge_decoding(decoding, spec_gen)
 
-  cfg_tabby = get_setting("llm.tabby", {})
-  if not isinstance(cfg_tabby, dict):
-    cfg_tabby = {}
-  base_url = str(spec.get("base_url") or cfg_tabby.get("base_url") or "http://127.0.0.1:5001").strip()
+  cfg_pool = get_setting("llm.pool", {})
+  if not isinstance(cfg_pool, dict):
+    cfg_pool = {}
+  base_url = str(cfg_pool.get("base_url") or "http://127.0.0.1:8011").strip()
   if not base_url:
-    raise RuntimeError("Missing llm.tabby.base_url")
-  api_key_env = str(spec.get("api_key_env") or cfg_tabby.get("api_key_env") or "TABBY_API_KEY").strip()
-  api_key = os.getenv(api_key_env, "").strip()
-  if not api_key:
-    raise RuntimeError(f"Missing API key env var: {api_key_env}")
+    raise RuntimeError("Missing llm.pool.base_url")
 
-  timeout_s = int(spec.get("timeout_s") or cfg_tabby.get("timeout_s") or 600)
-  retries = int(spec.get("retries") or cfg_tabby.get("retries") or 2)
-  retry_sleep_s = float(spec.get("retry_sleep_s") or cfg_tabby.get("retry_sleep_s") or 2.0)
-  url = _tabby_url(base_url)
-  payload = _build_payload(model=model, combined=combined, generation=generation)
+  timeout_s = _DEFAULT_LLM_POOL_TIMEOUT_S
+  retries = _DEFAULT_LLM_POOL_RETRIES
+  retry_sleep_s = _DEFAULT_LLM_POOL_RETRY_SLEEP_S
+  url = _llm_pool_url(base_url)
+  payload = _build_payload(model=model, combined=combined, decoding=decoding)
 
   out_dir = _resolve_output_dir(task, spec)
   base_name = str(spec.get("output_basename") or task.task_id).strip() or task.task_id
@@ -252,7 +254,7 @@ def _run_prompt_task(*, task: TaskPaths, spec: dict[str, Any]) -> dict[str, Any]
   response_json: dict[str, Any] | None = None
   for attempt in range(max(0, retries) + 1):
     try:
-      response_json = _http_post_json(url=url, api_key=api_key, payload=payload, timeout_s=timeout_s)
+      response_json = _http_post_json(url=url, payload=payload, timeout_s=timeout_s)
       break
     except Exception as e:
       last_err = f"{type(e).__name__}: {e}"

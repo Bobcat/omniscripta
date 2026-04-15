@@ -319,7 +319,6 @@ class TopicsFlow:
         prompt_id: str,
     ) -> dict[int, str]:
         topics_cfg = dict(self._service_cfg.get("topics") or {})
-        tabby_cfg = dict(self._service_cfg.get("tabby") or {})
         result_dir = (job.dir / "result").resolve()
         prompt_path = Path(str(topics_cfg.get("prompt_path") or "").strip())
         if not prompt_path.is_absolute():
@@ -350,11 +349,6 @@ class TopicsFlow:
                     "model": model,
                     "prompt_path": str(prompt_path),
                     "generation": generation,
-                    "base_url": str(tabby_cfg.get("base_url") or "").strip(),
-                    "api_key_env": str(tabby_cfg.get("api_key_env") or "TABBY_API_KEY"),
-                    "timeout_s": int(tabby_cfg.get("timeout_s") or 600),
-                    "retries": int(tabby_cfg.get("retries") or 2),
-                    "retry_sleep_s": float(tabby_cfg.get("retry_sleep_s") or 2.0),
                     "input_artifact": str(chunk_path),
                     "output_dir": str(result_dir),
                     "output_basename": out_base,

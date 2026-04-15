@@ -74,13 +74,6 @@ def _load_service_cfg() -> dict[str, Any]:
             "model": "",
             "generation": {},
         },
-        "tabby": {
-            "base_url": "http://127.0.0.1:5001",
-            "api_key_env": "TABBY_API_KEY",
-            "timeout_s": 600,
-            "retries": 2,
-            "retry_sleep_s": 2.0,
-        },
         "status_owners": {
             "api": "api",
             "asr_worker_batch": "asr-worker-batch",
@@ -103,11 +96,6 @@ def _load_service_cfg() -> dict[str, Any]:
             base_gen.update(raw_gen)
         merged["generation"] = base_gen
         cfg["topics"] = merged
-    raw_tabby = get_setting("tabby", {})
-    if isinstance(raw_tabby, dict):
-        merged_tabby = dict(cfg["tabby"])
-        merged_tabby.update(raw_tabby)
-        cfg["tabby"] = merged_tabby
     raw_status_owners = get_setting("upload.status_owners", {})
     if isinstance(raw_status_owners, dict):
         merged_status_owners = dict(cfg["status_owners"])

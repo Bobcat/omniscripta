@@ -59,6 +59,9 @@ print_status() {
   done
 }
 
+log "Stopping workers to release long-lived pool connections..."
+systemctl --user stop "$BATCH_WORKER_UNIT" "$LLM_WORKER_UNIT"
+
 log "Restarting API + ASR pool..."
 systemctl --user restart "$API_UNIT" "$ASR_UNIT"
 
@@ -68,8 +71,8 @@ wait_for_http "$API_HEALTH_URL" 60 "API health"
 log "Waiting for ASR pool readiness (warm startup may take time)..."
 wait_for_http "$ASR_POOL_URL" "$ASR_POOL_READY_TIMEOUT_S" "ASR pool readiness"
 
-log "Restarting workers..."
-systemctl --user restart "$BATCH_WORKER_UNIT" "$LLM_WORKER_UNIT"
+log "Starting workers..."
+systemctl --user start "$BATCH_WORKER_UNIT" "$LLM_WORKER_UNIT"
 
 log "Restarting frontend proxy..."
 systemctl --user restart "$FRONTEND_UNIT"
