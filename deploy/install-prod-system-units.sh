@@ -24,7 +24,6 @@ install_unit() {
 
 install_unit "$TRANSCRIBE_REPO_ROOT/deploy/systemd/transcribe-api.service"
 install_unit "$TRANSCRIBE_REPO_ROOT/deploy/systemd/llm-worker.service"
-install_unit "$TRANSCRIBE_REPO_ROOT/deploy/systemd/transcribe-tabby-tunnel.service"
 install_unit "$ASR_WORKER_REPO_ROOT/deploy/systemd/asr-worker-batch.service"
 
 $SUDO systemctl daemon-reload
