@@ -9,16 +9,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-_REPO_ROOT = Path(__file__).resolve().parents[1]
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
   sys.path.insert(0, str(_REPO_ROOT))
 
-from shared.app_config import get_str
+from app.config.settings import get_str
 
 
 def _repo_root() -> Path:
-  # llm-worker/llm_queue_fs.py -> llm-worker -> repo root
-  return Path(__file__).resolve().parents[1]
+  # workers/llm/queue_fs.py -> llm -> workers -> repo root
+  return Path(__file__).resolve().parents[2]
 
 
 def _tasks_base() -> Path:

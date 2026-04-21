@@ -8,7 +8,7 @@
   "asr_pool": {
     "base_url": "http://127.0.0.1:18090",
     "status_url": "http://127.0.0.1:18090/asr/v1/pool",
-    "work_root": "/home/gunnar/projects/transcribe-dev/data/asr_pool",
+    "work_root": "/home/gunnar/projects/omniscripta/data/asr_pool",
     
     "timeouts": {
       "interactive": 60
@@ -16,10 +16,19 @@
   },
   
   "live": {
+    "_comment": "Ownership split: live.asr.* stays host-owned. live.rolling.* and live.timing.emit_min_ms tune the package runner.",
     "timing": {
+      "_comment": "Package-owned pacing knob.",
       "emit_min_ms": 120
     },
+    "asr": {
+      "_comment": "Host-owned backend adapter knobs.",
+      "backend": "whisperx",
+      "beam_size": 5,
+      "chunk_size": 10
+    },
     "rolling": {
+      "_comment": "Package-owned runner tuning knobs.",
       "min_infer_audio_ms": 1000,
       "force_commit_repeats": 3
     }
@@ -33,7 +42,7 @@
   },
   
   "frontend_dev": {
-    "frontend_dir": "/home/gunnar/projects/transcribe-dev/static",
+    "frontend_dir": "/home/gunnar/projects/omniscripta/static",
     "api_base": "http://127.0.0.1:8001",
     "host": "127.0.0.1",
     "port": 8010,

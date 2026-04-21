@@ -4,6 +4,7 @@
   },
   
   "live": {
+    "_comment": "Ownership split: live.audio/live.asr/live.session*/live.max*/live.archive*/live.timing.{drain_wait_s,post_close_wait_s} are host-owned. live.rolling.* and live.timing.emit_min_ms drive package runner behavior.",
     "session_ttl_s": 900,
     "session_preconnect_ttl_s": 30,
     "max_sessions": 12,
@@ -16,9 +17,11 @@
     "timing": {
       "drain_wait_s": 20.0,
       "post_close_wait_s": 60.0,
+      "_comment": "emit_min_ms is package-owned pacing; the other timing keys are host-owned session/finalization timing.",
       "emit_min_ms": 120
     },
     "asr": {
+      "_comment": "Host-owned backend adapter settings.",
       "language": null,
       "beam_size": 5,
       "chunk_size": 10,
@@ -31,6 +34,7 @@
     },
     
     "rolling": {
+      "_comment": "Package-owned runner tuning: rolling windowing, pacing, VAD, speech gate, and transcript commit behavior.",
       "min_infer_audio_ms": 500,
       "single_segment_commit_min_ms": 12000,
       "force_commit_repeats": 3,
@@ -51,7 +55,7 @@
       },
       "vad": {
         "enabled": true,
-        "whisperx_venv": "/home/gunnar/whisperx/.venv",
+        "venv": "/home/gunnar/whisperx/.venv",
         "threshold": 0.35,
         "max_speech_duration_s": 12.0,
         "min_speech_ms": 120,
@@ -100,7 +104,7 @@
       "token_estimator": "chars_div4",
       "enabled": true,
       "prompt_id": "topics_v1",
-      "prompt_path": "portal-api/upload/prompts/simple_prompt5.txt",
+      "prompt_path": "app/upload/prompts/simple_prompt5.txt",
       "model": "google_gemma-4-E4B-it-Q8_0-gguf",
       "generation": {
         "max_tokens": 2048,

@@ -10,9 +10,9 @@ from urllib.request import Request, urlopen
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
-from shared.app_config import get_float, get_int, get_str
+from app.config.settings import get_float, get_int, get_str
 
-FRONTEND_DIR = get_str("frontend_dev.frontend_dir", "/home/gunnar/projects/transcribe-dev/static")
+FRONTEND_DIR = get_str("frontend_dev.frontend_dir", "/home/gunnar/projects/omniscripta/static")
 API_BASE = get_str("frontend_dev.api_base", "http://127.0.0.1:8001").rstrip("/")
 HOST = get_str("frontend_dev.host", "127.0.0.1")
 PORT = get_int("frontend_dev.port", 8010, min_value=1)

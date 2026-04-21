@@ -18,12 +18,12 @@ systemctl --user --no-pager status transcribe-api-dev.service transcribe-asr-poo
 
 3. If you changed backend code and want the full dev stack fresh:
 ```bash
-~/projects/transcribe-dev/deploy/dev_restart_all.sh
+~/projects/omniscripta/deploy/dev_restart_all.sh
 ```
 
 4. If you changed tracked unit files and want repo truth installed:
 ```bash
-~/projects/transcribe-dev/deploy/install-dev-user-units.sh
+~/projects/omniscripta/deploy/install-dev-user-units.sh
 ```
 
 5. On your other computer, use one of these URLs:
@@ -42,7 +42,7 @@ systemctl --user --no-pager status transcribe-api-dev.service transcribe-asr-poo
    - Prod ASR pool runtime is remote on `dc2`, not a local process on `dc1`.
    - Treat these as prod environment; avoid direct development changes there.
 
-3. **Backend dev worktree (persistent)**: `~/projects/transcribe-dev`
+3. **Backend dev worktree (persistent)**: `~/projects/omniscripta`
    - Safe API/LLM/backend development environment.
    - Separate data/config paths from prod.
 
@@ -77,7 +77,7 @@ systemctl --user --no-pager status transcribe-api-dev.service transcribe-asr-poo
 - Note: on `dc1`, prod consumers talk to the prod ASR pool through the configured dc1->dc2 access path; `dc1` does not run the pool process locally.
 
 ### Dev
-- API/LLM backend root: `~/projects/transcribe-dev`
+- API/LLM backend root: `~/projects/omniscripta`
 - ASR pool backend root: `~/projects/asr-pool-dev`
 - ASR worker backend root: `~/projects/asr-worker-dev`
 - ASR pool client root: `~/projects/asr-pool-api-dev`
@@ -90,8 +90,8 @@ systemctl --user --no-pager status transcribe-api-dev.service transcribe-asr-poo
 - API/LLM/frontend env file: `~/.config/transcribe/dev.env`
 - ASR pool env file: `~/.config/asr-pool/asr-pool.env`
 - ASR worker env file: `~/.config/asr-worker/asr-worker.dev.env`
-- Dev frontend static target: `~/projects/transcribe-dev/static`
-- Note: dev API currently runs `uvicorn` from `/srv/transcribe/portal-api/.venv`, and `llm-worker-dev@.service` currently runs from `/srv/transcribe/worker/.venv`.
+- Dev frontend static target: `~/projects/omniscripta/static`
+- Note: dev API code now lives under `~/projects/omniscripta/app`, and the LLM worker code now lives under `~/projects/omniscripta/workers/llm`. The dev API service still runs `uvicorn` from `/srv/transcribe/portal-api/.venv` until the prod-path phase. `llm-worker-dev@.service` still runs from `/srv/transcribe/worker/.venv`.
 - Dev API and worker services resolve `asr_pool_api` from `~/projects/asr-pool-api-dev/src` via service-level `PYTHONPATH`.
 
 ### Shared client library
@@ -116,36 +116,36 @@ systemctl --user --no-pager status transcribe-api-dev.service transcribe-asr-poo
 
 ## 4) Canonical Stack Control Scripts
 
-From `~/projects/transcribe-dev`:
+From `~/projects/omniscripta`:
 
 1. Dev full start:
 ```bash
-~/projects/transcribe-dev/deploy/dev_start_all.sh
+~/projects/omniscripta/deploy/dev_start_all.sh
 ```
 
 2. Dev full restart:
 ```bash
-~/projects/transcribe-dev/deploy/dev_restart_all.sh
+~/projects/omniscripta/deploy/dev_restart_all.sh
 ```
 
 3. Prod full start:
 ```bash
-~/projects/transcribe-dev/deploy/live_start_all.sh
+~/projects/omniscripta/deploy/live_start_all.sh
 ```
 
 4. Prod full restart:
 ```bash
-~/projects/transcribe-dev/deploy/live_restart_all.sh
+~/projects/omniscripta/deploy/live_restart_all.sh
 ```
 
 5. Install repo-backed dev user units:
 ```bash
-~/projects/transcribe-dev/deploy/install-dev-user-units.sh
+~/projects/omniscripta/deploy/install-dev-user-units.sh
 ```
 
 6. Install repo-backed prod system units on `dc1`:
 ```bash
-~/projects/transcribe-dev/deploy/install-prod-system-units.sh
+~/projects/omniscripta/deploy/install-prod-system-units.sh
 ```
 
 These scripts are the current canonical stack-control and unit-sync entry points.
@@ -166,7 +166,7 @@ From `/var/www/omniscripta-app`:
 ```bash
 /var/www/omniscripta-app/deploy-dev.sh
 ```
-- Builds frontend bundle and deploys to `~/projects/transcribe-dev/static`.
+- Builds frontend bundle and deploys to `~/projects/omniscripta/static`.
 
 ## 6) Required systemd Services
 
@@ -275,8 +275,8 @@ These are also user services on your other computer, never on `dc1`.
      - `28111` -> `dc1:28111` (worker batch `/ops`)
 
 3. Tracked unit files for these observability tunnels are in:
-   - `~/projects/transcribe-dev/deploy/systemd/transcribe-observability-tunnel.service`
-   - `~/projects/transcribe-dev/deploy/systemd/transcribe-observability-live-tunnel.service`
+   - `~/projects/omniscripta/deploy/systemd/transcribe-observability-tunnel.service`
+   - `~/projects/omniscripta/deploy/systemd/transcribe-observability-live-tunnel.service`
 
 ## 8) Environment Files and Secrets
 
@@ -311,12 +311,12 @@ mkdir -p ~/.config/transcribe && printf 'TABBY_API_KEY=VUL_HIER_DE_KEY_IN\n' > ~
 ## 9) Golden Rules
 
 1. Build frontend in `/var/www/omniscripta-app`, never in `/srv/transcribe/static`.
-2. Do API/LLM backend development in `~/projects/transcribe-dev`, not in `/srv/transcribe`.
+2. Do API/LLM backend development in `~/projects/omniscripta`, not in `/srv/transcribe`.
 3. Do ASR pool development in `~/projects/asr-pool-dev`, not on the prod runtime host/process.
 4. Do ASR worker development in `~/projects/asr-worker-dev`, not in `/srv/asr-worker`.
 5. Use `deploy.sh` only for prod release.
 6. Use `deploy-dev.sh` for dev-backend testing.
 7. Keep both frontend tunnel paths available (`8080` prod and `18010` dev) for fast A/B validation.
 8. Keep dev and prod observability tunnels separate; batch worker ops use `18111` and `28111` on purpose.
-9. In dev repos, do all development on `dev/*` branches (`dev/transcribe-dev`, `dev/asr-pool-dev`, `dev/asr-worker-dev`); use `main` only for controlled merge/release steps.
+9. In dev repos, do all development on `dev/*` branches (`dev/omniscripta`, `dev/asr-pool-dev`, `dev/asr-worker-dev`); use `main` only for controlled merge/release steps.
 10. If you temporarily check out `main` in a dev repo for merge/release work, switch back to the matching `dev/*` branch before continuing development.

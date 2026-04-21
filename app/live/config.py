@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from live.session.sessions import LiveSessionManager
-from shared.app_config import get_bool, get_float, get_int, get_setting, get_str
+from app.config.settings import get_bool, get_float, get_int, get_setting, get_str
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 LIVE_RECORDINGS_ROOT = (_REPO_ROOT / "data" / "live_recordings").resolve()
@@ -103,7 +103,7 @@ LIVE_ROLLING_PACING_STARTUP_MIN_NEW_AUDIO_MS = get_int(
     min_value=0,
 )
 LIVE_ROLLING_VAD_ENABLED = get_bool("live.rolling.vad.enabled", False)
-LIVE_ROLLING_VAD_WHISPERX_VENV = _get_optional_setting_str("live.rolling.vad.whisperx_venv")
+LIVE_ROLLING_VAD_VENV = _get_optional_setting_str("live.rolling.vad.venv")
 LIVE_ROLLING_VAD_THRESHOLD = get_float("live.rolling.vad.threshold", 0.35, min_value=0.0)
 LIVE_ROLLING_VAD_MAX_SPEECH_DURATION_S = get_float("live.rolling.vad.max_speech_duration_s", 12.0, min_value=0.1)
 LIVE_ROLLING_VAD_MIN_SPEECH_MS = get_int("live.rolling.vad.min_speech_ms", 120, min_value=0)
@@ -168,7 +168,7 @@ LIVE_ROLLING_CONTEXT_CONFIG_KEYS = (
     "LIVE_ROLLING_PACING_STARTUP_MIN_INFER_AUDIO_MS",
     "LIVE_ROLLING_PACING_STARTUP_MIN_NEW_AUDIO_MS",
     "LIVE_ROLLING_VAD_ENABLED",
-    "LIVE_ROLLING_VAD_WHISPERX_VENV",
+    "LIVE_ROLLING_VAD_VENV",
     "LIVE_ROLLING_VAD_THRESHOLD",
     "LIVE_ROLLING_VAD_MAX_SPEECH_DURATION_S",
     "LIVE_ROLLING_VAD_MIN_SPEECH_MS",

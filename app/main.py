@@ -9,9 +9,9 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from shared.app_config import get_str
+from app.config.settings import get_str
 from live.routes import router as live_router
-from system_routes import router as system_router
+from app.system.routes import router as system_router
 from upload.pipeline.coordinator import UPLOAD_BATCH_COORDINATOR
 from upload.routes import router as upload_router
 

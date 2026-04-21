@@ -3,12 +3,12 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-_REPO_ROOT = Path(__file__).resolve().parents[1]
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from jobs.queue_fs import QueueRoot
-from shared.app_config import get_str
+from app.config.settings import get_str
+from upload.jobs.queue_fs import QueueRoot
 
 
 def _resolve_base(path_value: str, *, default_rel: str) -> Path:

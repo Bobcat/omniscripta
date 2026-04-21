@@ -9,13 +9,12 @@ from pathlib import Path
 from typing import Any
 from urllib import request
 
-from llm_queue_fs import TaskPaths, claim_next_task, finish_task
-
-_REPO_ROOT = Path(__file__).resolve().parents[1]
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
   sys.path.insert(0, str(_REPO_ROOT))
 
-from shared.app_config import get_float, get_int, get_setting, get_str
+from app.config.settings import get_float, get_int, get_setting, get_str
+from workers.llm.queue_fs import TaskPaths, claim_next_task, finish_task
 
 
 _DEFAULT_LLM_POOL_TIMEOUT_S = 600
@@ -33,8 +32,8 @@ _SUPPORTED_DECODING_KEYS = {
 
 
 def _repo_root() -> Path:
-  # llm-worker/llm_worker_daemon.py -> llm-worker -> repo root
-  return Path(__file__).resolve().parents[1]
+  # workers/llm/daemon.py -> llm -> workers -> repo root
+  return Path(__file__).resolve().parents[2]
 
 
 def _utc_iso() -> str:

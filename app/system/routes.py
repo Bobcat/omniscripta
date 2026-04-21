@@ -14,7 +14,7 @@ from fastapi.responses import HTMLResponse
 
 router = APIRouter()
 
-_REPO_ROOT = Path(__file__).resolve().parents[1]
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 _API_STARTED_MONO = time.monotonic()
 
 
@@ -189,7 +189,7 @@ def _queue_snapshot(queue_root: Any) -> Dict[str, Any]:
 
 def _api_ops_metrics_snapshot() -> Dict[str, Any]:
     from live.config import LIVE_SESSIONS
-    from queue_roots import UPLOAD_PREP_QUEUE, UPLOAD_WORKER_QUEUE
+    from upload.queue_roots import UPLOAD_PREP_QUEUE, UPLOAD_WORKER_QUEUE
     from upload.pipeline.coordinator import UPLOAD_BATCH_COORDINATOR
 
     now_ts = datetime.now(timezone.utc).timestamp()

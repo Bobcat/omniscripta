@@ -7,8 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from jobs.queue_fs import JobPaths
-from llm_queue_fs import DONE as LLM_DONE, ERROR as LLM_ERROR, init_task_in_inbox
+from upload.jobs.queue_fs import JobPaths
 from upload._util import _normalize_speaker_mode, _read_json, _safe_float
 from upload.pipeline.progress_plan import DEFAULTS_SECONDS, build_prediction
 from upload.status_io import _write_status
@@ -17,6 +16,7 @@ from upload.topics.merge import merge_topics
 from upload.topics.parse import parse_topics_raw_file
 from upload.topics.speaker_lines import make_speaker_lines_from_srt
 from upload.topics.validate import validate_all_chunks
+from workers.llm.queue_fs import DONE as LLM_DONE, ERROR as LLM_ERROR, init_task_in_inbox
 
 
 def _append_log(path: Path, message: str) -> None:

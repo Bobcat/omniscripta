@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from shared.app_config import get_int, get_str
+from app.config.settings import get_int, get_str
 
 _BLOB_REF_PREFIX = "fs://"
 _SAFE_TOKEN_RE = re.compile(r"[^a-zA-Z0-9._-]+")

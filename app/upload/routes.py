@@ -17,9 +17,9 @@ from urllib.parse import parse_qs, urlparse
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, Response
 
-from jobs.queue_fs import JobPaths, find_job_dir, init_job_in_inbox
-from queue_roots import UPLOAD_PREP_QUEUE, UPLOAD_WORKER_QUEUE
-from shared.app_config import get_int, get_str
+from app.config.settings import get_int, get_str
+from upload.jobs.queue_fs import JobPaths, find_job_dir, init_job_in_inbox
+from upload.queue_roots import UPLOAD_PREP_QUEUE, UPLOAD_WORKER_QUEUE
 
 router = APIRouter()
 

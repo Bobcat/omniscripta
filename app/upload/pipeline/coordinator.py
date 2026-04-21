@@ -10,24 +10,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from jobs.queue_fs import (
+from app.config.settings import get_bool, get_float, get_setting, get_str
+from upload.jobs.queue_fs import (
     JobPaths,
     finish_job,
     job_paths_from_dir,
     move_job_to_queue_inbox,
     nudge_inbox,
 )
-from queue_roots import UPLOAD_PREP_QUEUE, UPLOAD_WORKER_QUEUE
+from upload.queue_roots import UPLOAD_PREP_QUEUE, UPLOAD_WORKER_QUEUE
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-_LLM_DIR = (_REPO_ROOT / "llm-worker").resolve()
-if str(_LLM_DIR) not in sys.path:
-    sys.path.insert(0, str(_LLM_DIR))
-
-from shared.app_config import get_bool, get_float, get_setting, get_str
 from upload._util import _normalize_speaker_mode, _read_json, _write_json_atomic
 from upload.pipeline.progress_plan import DEFAULTS_SECONDS, build_prediction
 from upload.pipeline.snipping import make_snippet
@@ -70,7 +66,7 @@ def _load_service_cfg() -> dict[str, Any]:
             "token_estimator": "chars_div4",
             "enabled": True,
             "prompt_id": "topics_v1",
-            "prompt_path": "portal-api/upload/prompts/simple_prompt5.txt",
+            "prompt_path": "app/upload/prompts/simple_prompt5.txt",
             "model": "",
             "generation": {},
         },

@@ -32,7 +32,7 @@ def _utc_iso(ts: float) -> str:
 
 
 def _repo_root() -> Path:
-    # portal-api/live/session/sessions.py -> session -> live -> portal-api -> repo root
+    # app/live/session/sessions.py -> session -> live -> app -> repo root
     return Path(__file__).resolve().parents[3]
 
 
@@ -71,11 +71,11 @@ class LiveSession:
     live_preview_seq: int = -1
     live_preview_audio_end_ms: int = 0
     live_preview_updated_unix: float = 0.0
-    live_engine_runtime: dict[str, Any] = field(default_factory=dict)
     fixture_id: str = ""
     fixture_version: str = ""
     fixture_test_mode: str = ""
     asr_language: str = ""
+    live_engine_runtime: dict[str, Any] = field(default_factory=dict)
     gpu_proxy_transcribe_s: float = 0.0
     gpu_proxy_pipeline_s: float = 0.0
 
@@ -101,11 +101,11 @@ class ClosedSessionArchive:
     live_final_segments: list[dict[str, Any]] = field(default_factory=list)
     live_commit_results: list[dict[str, Any]] = field(default_factory=list)
     live_pc_events: list[dict[str, str]] = field(default_factory=list)
-    live_engine_runtime: dict[str, Any] = field(default_factory=dict)
     fixture_id: str = ""
     fixture_version: str = ""
     fixture_test_mode: str = ""
     asr_language: str = ""
+    live_engine_runtime: dict[str, Any] = field(default_factory=dict)
     gpu_proxy_transcribe_s: float = 0.0
     gpu_proxy_pipeline_s: float = 0.0
 
@@ -184,14 +184,13 @@ class LiveSessionManager:
     @staticmethod
     def _build_engine_runtime(
         *,
-        preview_source: str,
         recording_duration_ms: int,
         final_covered_ms: int,
         live_engine_runtime: dict[str, Any],
     ) -> dict[str, Any]:
         engine_runtime = {
             "mode": "single_lane",
-            "preview_source": str(preview_source),
+            "preview_source": "uncommitted_preview",
             "uncommitted_audio_ms": int(max(0, int(recording_duration_ms) - int(final_covered_ms))),
         }
         extra_engine_runtime = dict(live_engine_runtime or {})
@@ -332,10 +331,8 @@ class LiveSessionManager:
     ) -> dict[str, Any]:
         chunks = self._copy_commit_rows(commit_results)
         chunk_debug = live_commit_rows_debug_metrics(chunks)
-        preview_source = self._preview_source_for_engine(live_engine)
         final_covered_ms = self._final_covered_ms(final_segments, chunks)
         engine_runtime = self._build_engine_runtime(
-            preview_source=preview_source,
             recording_duration_ms=recording_duration_ms,
             final_covered_ms=final_covered_ms,
             live_engine_runtime=live_engine_runtime,
@@ -369,7 +366,6 @@ class LiveSessionManager:
             "chunk_results_invalid_index_rows": int(max(0, int(chunk_debug.get("chunk_results_invalid_index_rows") or 0))),
             "preview": {
                 "text": str(preview_text or ""),
-                "source": str(preview_source),
                 "preview_seq": int(preview_seq),
                 "audio_end_ms": int(max(0, int(preview_audio_end_ms or 0))),
                 "updated_at_utc": (
@@ -401,7 +397,7 @@ class LiveSessionManager:
         dead = [
             sid
             for sid, sess in self._sessions.items()
-            if sess.closed or now_unix >= sess.expires_unix
+            if sess.closed or (not sess.ws_connected and now_unix >= sess.expires_unix)
         ]
         for sid in dead:
             self._sessions.pop(sid, None)
@@ -887,11 +883,6 @@ class LiveSessionManager:
             if not arc:
                 raise KeyError("archive_not_found")
             return self._archive_snapshot_locked(arc)
-
-    @staticmethod
-    def _preview_source_for_engine(live_engine: str) -> str:
-        _ = live_engine
-        return "uncommitted_preview"
 
     def _snapshot_locked(self, sess: LiveSession) -> dict[str, Any]:
         now_mono = time.monotonic()

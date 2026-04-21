@@ -20,7 +20,7 @@ from asr_pool_api import (
     ASRSubmitRequest,
 )
 from live._util import _normalize_optional_language
-from shared.app_config import get_setting
+from app.config.settings import get_setting
 
 
 DEFAULT_SAMPLE_RATE_HZ = 16000
@@ -33,7 +33,7 @@ _SPEAKER_PREFIX_RE = re.compile(
 
 
 def _repo_root() -> Path:
-    # portal-api/live/engine/chunk_transcribe.py -> engine -> live -> portal-api -> repo root
+    # app/live/engine/chunk_transcribe.py -> engine -> live -> app -> repo root
     return Path(__file__).resolve().parents[2]
 
 

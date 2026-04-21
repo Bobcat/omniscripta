@@ -8,7 +8,7 @@ from typing import Any
 
 
 def _repo_root() -> Path:
-    # portal-api/live/output/quality.py -> output -> live -> portal-api -> repo root
+    # app/live/output/quality.py -> output -> live -> app -> repo root
     return Path(__file__).resolve().parents[3]
 
 

@@ -19,7 +19,7 @@ T = TypeVar("T")
 
 def _repo_root() -> Path:
     """Find repository root (where this file lives)."""
-    return Path(__file__).resolve().parents[1]
+    return Path(__file__).resolve().parents[2]
 
 
 def _load_json_file(path: Path) -> dict[str, Any]:

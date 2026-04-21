@@ -6,8 +6,8 @@ Requires=transcribe-api-dev.service
 [Service]
 EnvironmentFile=-/home/gunnar/.config/transcribe/dev.env
 Type=simple
-WorkingDirectory=/home/gunnar/projects/transcribe-dev
-ExecStart=/usr/bin/python3 /home/gunnar/projects/transcribe-dev/deploy/dev_frontend_proxy.py
+WorkingDirectory=/home/gunnar/projects/omniscripta
+ExecStart=/usr/bin/python3 /home/gunnar/projects/omniscripta/deploy/dev_frontend_proxy.py
 Restart=always
 RestartSec=2
 
