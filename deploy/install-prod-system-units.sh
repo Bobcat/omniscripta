@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-TRANSCRIBE_REPO_ROOT="${TRANSCRIBE_REPO_ROOT:-/srv/transcribe}"
+TRANSCRIBE_REPO_ROOT="${TRANSCRIBE_REPO_ROOT:-/srv/omniscripta}"
 ASR_WORKER_REPO_ROOT="${ASR_WORKER_REPO_ROOT:-/srv/asr-worker}"
 UNIT_DIR="/etc/systemd/system"
 

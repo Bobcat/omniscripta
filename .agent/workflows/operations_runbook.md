@@ -37,7 +37,8 @@ systemctl --user --no-pager status transcribe-api-dev.service transcribe-asr-poo
    - Deploy scripts are in this repo: `deploy.sh` (prod), `deploy-dev.sh` (dev static target).
 
 2. **Prod repos on `dc1`**
-   - `/srv/transcribe` - production Omniscripta backend/API, LLM worker, deploy scripts, static files.
+   - `/srv/omniscripta` - production Omniscripta backend/API, LLM worker, deploy scripts, static files.
+   - `/srv/realtime-asr-engine` - production checkout of the shared live ASR engine package used by the current dev branch rollout.
    - `/srv/asr-worker` - production ASR worker repo checkout.
    - Prod ASR pool runtime is remote on `dc2`, not a local process on `dc1`.
    - Treat these as prod environment; avoid direct development changes there.
@@ -58,10 +59,15 @@ systemctl --user --no-pager status transcribe-api-dev.service transcribe-asr-poo
    - Source for the shared dev `asr_pool_api` client library used by backend consumers.
    - Keep shared client API and transport-wrapping changes here.
 
+7. **Shared live ASR engine package repo**: `~/projects/realtime-asr-engine`
+   - Source for the shared `realtime_asr_engine` package used by the current dev Omniscripta live engine.
+   - The matching prod rollout target is `/srv/realtime-asr-engine`.
+
 ## 2) Environments
 
 ### Prod
-- Omniscripta root: `/srv/transcribe`
+- Omniscripta root: `/srv/omniscripta`
+- Shared live ASR engine package root for the current dev rollout target: `/srv/realtime-asr-engine`
 - ASR pool runtime: remote on `dc2`
 - ASR worker root: `/srv/asr-worker`
 - API service: `transcribe-api.service`
@@ -71,10 +77,11 @@ systemctl --user --no-pager status transcribe-api-dev.service transcribe-asr-poo
 - ASR pool env file: `/etc/asr-pool/asr-pool.env`
 - ASR worker env file: `/etc/asr-worker/asr-worker.env`
 - Tabby tunnel service: `transcribe-tabby-tunnel.service`
-- Frontend static target: `/srv/transcribe/static` (served by nginx)
-- Worker queue root: `/srv/transcribe/data/jobs/upload_worker`
+- Frontend static target: `/srv/omniscripta/static` (served by nginx)
+- Worker queue root: `/srv/omniscripta/data/jobs/upload_worker`
 - API `/ops` on prod uses the local systemd drop-in `/etc/systemd/system/transcribe-api.service.d/ops-env.conf` so it points at the prod pool access path on `:8090` and worker ops `:28111`.
 - Note: on `dc1`, prod consumers talk to the prod ASR pool through the configured dc1->dc2 access path; `dc1` does not run the pool process locally.
+- Note: current prod `main` still runs the legacy internal layout. Installing the repo-backed prod units from the current dev branch only becomes valid after the prod Omniscripta checkout has been promoted to the `app/` + `workers/llm` layout and `/srv/realtime-asr-engine` exists as a sibling checkout.
 
 ### Dev
 - API/LLM backend root: `~/projects/omniscripta`
@@ -91,7 +98,7 @@ systemctl --user --no-pager status transcribe-api-dev.service transcribe-asr-poo
 - ASR pool env file: `~/.config/asr-pool/asr-pool.env`
 - ASR worker env file: `~/.config/asr-worker/asr-worker.dev.env`
 - Dev frontend static target: `~/projects/omniscripta/static`
-- Note: dev API code now lives under `~/projects/omniscripta/app`, and the LLM worker code now lives under `~/projects/omniscripta/workers/llm`. The dev API service still runs `uvicorn` from `/srv/transcribe/portal-api/.venv` until the prod-path phase. `llm-worker-dev@.service` still runs from `/srv/transcribe/worker/.venv`.
+- Note: dev API code now lives under `~/projects/omniscripta/app`, the LLM worker code now lives under `~/projects/omniscripta/workers/llm`, and the live engine resolves `realtime_asr_engine` from the sibling checkout at `~/projects/realtime-asr-engine/src`. The dev API service still uses the legacy venv at `/srv/omniscripta/portal-api/.venv`, and `llm-worker-dev@.service` still uses `/srv/omniscripta/worker/.venv`.
 - Dev API and worker services resolve `asr_pool_api` from `~/projects/asr-pool-api-dev/src` via service-level `PYTHONPATH`.
 
 ### Shared client library
@@ -160,7 +167,7 @@ From `/var/www/omniscripta-app`:
 ```bash
 /var/www/omniscripta-app/deploy.sh
 ```
-- Builds frontend bundle and deploys to `/srv/transcribe/static`.
+- Builds frontend bundle and deploys to `/srv/omniscripta/static`.
 
 2. Dev deploy:
 ```bash
@@ -310,8 +317,8 @@ mkdir -p ~/.config/transcribe && printf 'TABBY_API_KEY=VUL_HIER_DE_KEY_IN\n' > ~
 
 ## 9) Golden Rules
 
-1. Build frontend in `/var/www/omniscripta-app`, never in `/srv/transcribe/static`.
-2. Do API/LLM backend development in `~/projects/omniscripta`, not in `/srv/transcribe`.
+1. Build frontend in `/var/www/omniscripta-app`, never in `/srv/omniscripta/static`.
+2. Do API/LLM backend development in `~/projects/omniscripta`, not in `/srv/omniscripta`.
 3. Do ASR pool development in `~/projects/asr-pool-dev`, not on the prod runtime host/process.
 4. Do ASR worker development in `~/projects/asr-worker-dev`, not in `/srv/asr-worker`.
 5. Use `deploy.sh` only for prod release.

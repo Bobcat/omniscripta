@@ -5,7 +5,7 @@ Description=Transcribe Dev API (Uvicorn)
 Type=simple
 WorkingDirectory=/home/gunnar/projects/omniscripta/app
 Environment=PYTHONPATH=/home/gunnar/projects/asr-pool-api-dev/src
-ExecStart=/srv/transcribe/portal-api/.venv/bin/uvicorn main:app --host 127.0.0.1 --port 8001
+ExecStart=/srv/omniscripta/portal-api/.venv/bin/python -m uvicorn main:app --host 127.0.0.1 --port 8001
 Restart=always
 RestartSec=2
 Environment=TRANSCRIBE_JOBS_BASE=/home/gunnar/projects/omniscripta/data/demo_jobs
