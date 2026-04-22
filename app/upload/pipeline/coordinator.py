@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import socket
 import sys
@@ -10,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from app.config.settings import get_bool, get_float, get_setting, get_str
+from app.config.settings import get_float, get_setting, get_str
 from upload.jobs.queue_fs import (
     JobPaths,
     finish_job,
@@ -24,34 +23,20 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from upload._util import _normalize_speaker_mode, _read_json, _write_json_atomic
+from upload._util import (
+    _append_log,
+    _normalize_speaker_mode,
+    _normalize_upload_language,
+    _read_json,
+    _resolve_status_owner,
+    _topics_enabled_for_job,
+    _write_json_atomic,
+)
 from upload.pipeline.progress_plan import DEFAULTS_SECONDS, build_prediction
 from upload.pipeline.snipping import make_snippet
-from upload.status_io import _write_status
+from upload.status_io import _write_status, _write_status_safely
 from upload.topics.flow import TopicsFlow
-
-
-def _api_status_owner() -> str:
-    return str(get_str("upload.status_owners.api", "api") or "api").strip() or "api"
-
-
-def _asr_worker_batch_status_owner() -> str:
-    raw = str(get_str("upload.status_owners.asr_worker_batch", "asr-worker-batch") or "").strip()
-    return raw or "asr-worker-batch"
-
-
-def _append_log(path: Path, message: str) -> None:
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    with path.open("a", encoding="utf-8") as f:
-        f.write(f"[{ts}] COORD {message}\n")
-
-
-def _topics_enabled_for_job(*, opts: dict[str, Any], service_cfg: dict[str, Any]) -> bool:
-    if "topics_enabled" in opts:
-        return bool(opts.get("topics_enabled"))
-    topics_cfg = dict(service_cfg.get("topics") or {})
-    return bool(topics_cfg.get("enabled", False))
-
+from upload.upload_request_io import read_upload_request, upload_request_path
 
 def _load_service_cfg() -> dict[str, Any]:
     cfg: dict[str, Any] = {
@@ -171,7 +156,7 @@ class _SnippingProgressTracker:
             self._status_path,
             state="running",
             phase="snipping",
-            status_owner=_api_status_owner(),
+            status_owner=_resolve_status_owner(key="api", default="api"),
             progress=progress,
             started_at=self._started_at,
             message=self._message,
@@ -198,7 +183,7 @@ class _SnippingProgressTracker:
             state="queued",
             phase="awaiting_asr",
             subphase="handoff",
-            status_owner=_asr_worker_batch_status_owner(),
+            status_owner=_resolve_status_owner(key="asr_worker_batch", default="asr-worker-batch"),
             progress=min(0.99, self._snipping_band),
             started_at=self._started_at,
             message="Snippet ready; queued for ASR",
@@ -325,82 +310,27 @@ class UploadBatchCoordinator:
         except Exception:
             pass
 
-    def _maybe_process_job(self, job_dir: Path) -> bool:
-        job = job_paths_from_dir(job_dir, queue_root=UPLOAD_WORKER_QUEUE)
-        if not job.status_path.exists() or not job.job_path.exists():
-            return False
-
-        status = _read_json(job.status_path)
-        if str(status.get("state") or "").strip().lower() != "done":
-            return False
-        if str(status.get("phase") or "").strip().lower() != "done":
-            return False
-        if "topics_status" in status:
-            return False
-
-        lock_path = (job.dir / ".upload_coordinator.lock").resolve()
-        fd = self._acquire_lock(lock_path)
-        if fd is None:
-            return False
-        try:
-            self._process_job_locked(job=job, status=status)
-            return True
-        finally:
-            self._release_lock(lock_path, fd)
-
-    def _maybe_prepare_job(self, job_dir: Path) -> bool:
-        job = job_paths_from_dir(job_dir, queue_root=UPLOAD_PREP_QUEUE)
-        if not job.status_path.exists() or not job.job_path.exists():
-            return False
-
-        status = _read_json(job.status_path)
-        job_cfg = _read_json(job.job_path)
-        phase = str(status.get("phase") or "").strip().lower()
-        if phase not in {"upload", "snipping"}:
-            return False
-
-        lock_path = (job.dir / ".upload_coordinator.lock").resolve()
-        fd = self._acquire_lock(lock_path)
-        if fd is None:
-            return False
-        try:
-            self._prepare_job_locked(job=job, status=status, job_cfg=job_cfg)
-            return True
-        finally:
-            self._release_lock(lock_path, fd)
-
-    def _prepare_job_locked(self, *, job: JobPaths, status: dict[str, Any], job_cfg: dict[str, Any]) -> None:
-        service_cfg = _load_service_cfg()
-        opts = dict(job_cfg.get("options") or {})
-        orig_filename = str(job_cfg.get("orig_filename") or "").strip()
-        if not orig_filename:
-            raise RuntimeError("Missing orig_filename in upload job config")
-
-        upload_dir = (job.dir / "upload").resolve()
-        snippet_dir = (job.dir / "snippet").resolve()
-        input_path = (upload_dir / orig_filename).resolve()
-        if not input_path.exists():
-            raise RuntimeError(f"Upload missing: {input_path}")
-
-        snip_cfg = dict(service_cfg.get("snip") or {})
-        snippet_seconds = int(opts.get("snippet_seconds") or int(snip_cfg.get("minutes_default", 15)) * 60)
-        speaker_mode = _normalize_speaker_mode(opts.get("speaker_mode", "auto"))
-        topics_enabled = _topics_enabled_for_job(opts=opts, service_cfg=service_cfg)
-        prediction = build_prediction(
-            runs_path=_progress_runs_path(),
-            hardware_key=_hardware_key(_host_id()),
-            topics_enabled=topics_enabled,
-            speaker_mode=speaker_mode,
-            snippet_seconds=snippet_seconds,
-        )
+    def _run_snipping(
+        self,
+        *,
+        job: JobPaths,
+        status: dict[str, Any],
+        input_path: Path,
+        snippet_dir: Path,
+        snippet_seconds: int,
+        prediction_total_s: float,
+        snipping_expected_s: float,
+        eta_confidence: float,
+        eta_hints: list[str],
+    ) -> tuple[Path, str, float]:
         disp = f"{snippet_seconds//60} min" if snippet_seconds > 0 and (snippet_seconds % 60) == 0 else f"{snippet_seconds} s"
         started_at = str(status.get("started_at") or "").strip() or datetime.now(timezone.utc).isoformat()
         tracker = _SnippingProgressTracker(
             status_path=job.status_path,
-            prediction_total_s=prediction.total_expected_s,
-            snipping_expected_s=float(prediction.phase_expected_s.get("snipping", DEFAULTS_SECONDS.get("snipping", 5.0))),
-            eta_confidence=prediction.confidence,
-            eta_hints=list(prediction.hints),
+            prediction_total_s=prediction_total_s,
+            snipping_expected_s=snipping_expected_s,
+            eta_confidence=eta_confidence,
+            eta_hints=list(eta_hints),
             message=f"Creating snippet ({disp})…",
             started_at=started_at,
         )
@@ -424,11 +354,11 @@ class UploadBatchCoordinator:
         except Exception as e:
             hb_stop.set()
             hb_thread.join(timeout=1.0)
-            self._patch_status(
+            _write_status_safely(
                 job.status_path,
                 state="error",
                 phase="error",
-                status_owner=_api_status_owner(),
+                status_owner=_resolve_status_owner(key="api", default="api"),
                 progress=1.0,
                 finished_at=datetime.now(timezone.utc).isoformat(),
                 message=f"Snipping failed: {e!r}",
@@ -445,18 +375,26 @@ class UploadBatchCoordinator:
             asr_input_relpath=snippet_relpath,
             actual_elapsed_s=elapsed_s,
         )
-        worker_job = {
+        return snippet_path, snippet_relpath, elapsed_s
+
+    def _build_worker_job(
+        self,
+        *,
+        opts: dict[str, Any],
+        snippet_path: Path,
+        snippet_relpath: str,
+        snippet_seconds: int,
+        speaker_mode: str,
+        topics_enabled: bool,
+    ) -> dict[str, Any]:
+        return {
             "input": {
                 "audio_relpath": snippet_relpath,
                 "duration_ms": int(max(1, snippet_seconds) * 1000),
                 "format": str(snippet_path.suffix.lstrip(".") or "mp3"),
             },
             "request": {
-                "language": (
-                    ""
-                    if str(opts.get("language") or "").strip().lower() in {"", "auto", "detect", "detect_auto", "detect-automatic", "detect-automatically"}
-                    else str(opts.get("language") or "").strip().lower()
-                ),
+                "language": _normalize_upload_language(opts.get("language")),
                 "speaker_mode": speaker_mode,
                 "min_speakers": opts.get("min_speakers"),
                 "max_speakers": opts.get("max_speakers"),
@@ -484,6 +422,94 @@ class UploadBatchCoordinator:
                 "download_srt": True,
             },
         }
+
+    def _maybe_process_job(self, job_dir: Path) -> bool:
+        job = job_paths_from_dir(job_dir, queue_root=UPLOAD_WORKER_QUEUE)
+        if not job.status_path.exists() or not job.job_path.exists():
+            return False
+
+        status = _read_json(job.status_path)
+        if str(status.get("state") or "").strip().lower() != "done":
+            return False
+        if str(status.get("phase") or "").strip().lower() != "done":
+            return False
+        if "topics_status" in status:
+            return False
+
+        lock_path = (job.dir / ".upload_coordinator.lock").resolve()
+        fd = self._acquire_lock(lock_path)
+        if fd is None:
+            return False
+        try:
+            self._process_job_locked(job=job, status=status)
+            return True
+        finally:
+            self._release_lock(lock_path, fd)
+
+    def _maybe_prepare_job(self, job_dir: Path) -> bool:
+        job = job_paths_from_dir(job_dir, queue_root=UPLOAD_PREP_QUEUE)
+        if not job.status_path.exists() or not upload_request_path(job.dir).exists():
+            return False
+
+        status = _read_json(job.status_path)
+        upload_request = read_upload_request(job.dir)
+        phase = str(status.get("phase") or "").strip().lower()
+        if phase not in {"upload", "snipping"}:
+            return False
+
+        lock_path = (job.dir / ".upload_coordinator.lock").resolve()
+        fd = self._acquire_lock(lock_path)
+        if fd is None:
+            return False
+        try:
+            self._prepare_job_locked(job=job, status=status, upload_request=upload_request)
+            return True
+        finally:
+            self._release_lock(lock_path, fd)
+
+    def _prepare_job_locked(self, *, job: JobPaths, status: dict[str, Any], upload_request: dict[str, Any]) -> None:
+        service_cfg = _load_service_cfg()
+        opts = dict(upload_request.get("options") or {})
+        orig_filename = str(upload_request.get("orig_filename") or "").strip()
+        if not orig_filename:
+            raise RuntimeError("Missing orig_filename in upload request")
+
+        upload_dir = (job.dir / "upload").resolve()
+        snippet_dir = (job.dir / "snippet").resolve()
+        input_path = (upload_dir / orig_filename).resolve()
+        if not input_path.exists():
+            raise RuntimeError(f"Upload missing: {input_path}")
+
+        snip_cfg = dict(service_cfg.get("snip") or {})
+        snippet_seconds = int(opts.get("snippet_seconds") or int(snip_cfg.get("minutes_default", 15)) * 60)
+        speaker_mode = _normalize_speaker_mode(opts.get("speaker_mode", "auto"))
+        topics_enabled = _topics_enabled_for_job(opts=opts, service_cfg=service_cfg)
+        prediction = build_prediction(
+            runs_path=_progress_runs_path(),
+            hardware_key=_hardware_key(_host_id()),
+            topics_enabled=topics_enabled,
+            speaker_mode=speaker_mode,
+            snippet_seconds=snippet_seconds,
+        )
+        snippet_path, snippet_relpath, elapsed_s = self._run_snipping(
+            job=job,
+            status=status,
+            input_path=input_path,
+            snippet_dir=snippet_dir,
+            snippet_seconds=snippet_seconds,
+            prediction_total_s=prediction.total_expected_s,
+            snipping_expected_s=float(prediction.phase_expected_s.get("snipping", DEFAULTS_SECONDS.get("snipping", 5.0))),
+            eta_confidence=prediction.confidence,
+            eta_hints=list(prediction.hints),
+        )
+        worker_job = self._build_worker_job(
+            opts=opts,
+            snippet_path=snippet_path,
+            snippet_relpath=snippet_relpath,
+            snippet_seconds=snippet_seconds,
+            speaker_mode=speaker_mode,
+            topics_enabled=topics_enabled,
+        )
         _write_json_atomic(job.job_path, worker_job)
         moved_job = move_job_to_queue_inbox(job, dst_queue_root=UPLOAD_WORKER_QUEUE)
         try:
@@ -493,12 +519,6 @@ class UploadBatchCoordinator:
         _append_log(moved_job.log_path, f"snipping_done snippet={snippet_path.name} seconds={elapsed_s:.3f}")
         _append_log(moved_job.log_path, "upload_handoff queued_for_upload_worker")
         nudge_inbox(UPLOAD_WORKER_QUEUE)
-
-    def _patch_status(self, status_path: Path, **patch: Any) -> None:
-        try:
-            _write_status(status_path, **patch)
-        except Exception:
-            pass
 
     def _process_job_locked(self, *, job: JobPaths, status: dict[str, Any]) -> None:
         TopicsFlow(

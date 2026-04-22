@@ -8,23 +8,24 @@ from pathlib import Path
 from typing import Any
 
 from upload.jobs.queue_fs import JobPaths
-from upload._util import _normalize_speaker_mode, _read_json, _safe_float
-from upload.pipeline.progress_plan import DEFAULTS_SECONDS, build_prediction
-from upload.status_io import _write_status
+from upload._util import (
+    _append_log,
+    _normalize_speaker_mode,
+    _read_json,
+    _resolve_status_owner,
+    _safe_float,
+    _topics_enabled_for_job,
+    _topics_merged_filename,
+    _topics_prompt_id,
+)
+from upload.pipeline.progress_plan import DEFAULTS_SECONDS, build_prediction, phase_order_for_job
+from upload.status_io import _write_status, _write_status_safely
 from upload.topics.chunk_speaker_lines import chunk_speaker_lines
 from upload.topics.merge import merge_topics
 from upload.topics.parse import parse_topics_raw_file
 from upload.topics.speaker_lines import make_speaker_lines_from_srt
 from upload.topics.validate import validate_all_chunks
 from workers.llm.queue_fs import DONE as LLM_DONE, ERROR as LLM_ERROR, init_task_in_inbox
-
-
-def _append_log(path: Path, message: str) -> None:
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    with path.open("a", encoding="utf-8") as f:
-        f.write(f"[{ts}] COORD {message}\n")
-
-
 def _pick_srt_path(*, job: JobPaths, status: dict[str, Any]) -> Path | None:
     whisperx_dir = (job.dir / "whisperx").resolve()
     srt_name = str(status.get("srt_filename") or "").strip()
@@ -56,21 +57,6 @@ def _safe_int(value: Any) -> int | None:
         return int(value)
     except Exception:
         return None
-
-
-def _topics_enabled_for_job(
-    *,
-    status: dict[str, Any],
-    job_cfg: dict[str, Any],
-    service_cfg: dict[str, Any],
-) -> bool:
-    if "topics_enabled" in status:
-        return bool(status.get("topics_enabled"))
-    upload_cfg = job_cfg.get("upload") or {}
-    if isinstance(upload_cfg, dict) and "topics_enabled" in upload_cfg:
-        return bool(upload_cfg.get("topics_enabled"))
-    topics_cfg = dict(service_cfg.get("topics") or {})
-    return bool(topics_cfg.get("enabled", False))
 
 
 def _append_progress_run_record(
@@ -296,19 +282,8 @@ class TopicsFlow:
         self._llm_wait_timeout_s = max(30.0, float(llm_wait_timeout_s))
         self._stop = stop_event
 
-    def _patch_status(self, status_path: Path, **patch: Any) -> None:
-        try:
-            _write_status(status_path, **patch)
-        except Exception:
-            pass
-
     def _status_owner(self, key: str, default: str) -> str:
-        status_owners = self._service_cfg.get("status_owners") or {}
-        if isinstance(status_owners, dict):
-            raw = str(status_owners.get(key) or "").strip()
-            if raw:
-                return raw
-        return default
+        return _resolve_status_owner(service_cfg=self._service_cfg, key=key, default=default)
 
     def _enqueue_topics_tasks(
         self,
@@ -404,6 +379,290 @@ class TopicsFlow:
             raise RuntimeError("Coordinator stopping while waiting for llm tasks")
         return outputs
 
+    def _build_progress_tracker(
+        self,
+        *,
+        status_path: Path,
+        status: dict[str, Any],
+        topics_enabled: bool,
+        speaker_mode: str,
+        snippet_seconds: int,
+        base_elapsed_s: float,
+    ) -> _TopicsProgressTracker | None:
+        if not topics_enabled:
+            return None
+        progress_tracker = _TopicsProgressTracker(status_path=status_path)
+        prediction = build_prediction(
+            runs_path=self._progress_runs_path,
+            hardware_key=self._hardware_key,
+            topics_enabled=topics_enabled,
+            speaker_mode=speaker_mode,
+            snippet_seconds=snippet_seconds,
+        )
+        phase_order = phase_order_for_job(topics_enabled=topics_enabled, speaker_mode=speaker_mode)
+        topics_phase = phase_order[-1]
+        completed_expected = sum(max(0.0, float(prediction.phase_expected_s.get(phase, 0.0))) for phase in phase_order[:-1])
+        total_expected = max(1.0, float(prediction.total_expected_s))
+        progress_tracker.seed_from_upload_prediction(
+            base_progress=min(0.99, completed_expected / total_expected),
+            base_elapsed_s=base_elapsed_s,
+            topics_expected_s=float(prediction.phase_expected_s.get(topics_phase, DEFAULTS_SECONDS.get(topics_phase, 8.5))),
+            eta_confidence=prediction.confidence,
+            eta_hints=list(prediction.hints),
+            message=str(status.get("message") or "Running..."),
+        )
+        return progress_tracker
+
+    def _prepare_topics_inputs(
+        self,
+        *,
+        job: JobPaths,
+        srt_path: Path,
+        orig_stem: str,
+    ) -> tuple[Path, Path, float]:
+        _write_status_safely(
+            job.status_path,
+            state="running",
+            phase="topics",
+            subphase="speaker_lines",
+            message="Topics: generating speaker_lines",
+            topics_enabled=True,
+        )
+        topics_prep_started_mono = time.monotonic()
+        speaker_lines_path, transcript_end_hms = make_speaker_lines_from_srt(
+            job=job,
+            srt_path=srt_path,
+            orig_stem=orig_stem,
+        )
+        manifest_path = chunk_speaker_lines(
+            job=job,
+            speaker_lines_path=speaker_lines_path,
+            orig_stem=orig_stem,
+            service_cfg=self._service_cfg,
+            transcript_end_hms=transcript_end_hms,
+        )
+        topics_prep_elapsed_s = max(0.0, time.monotonic() - topics_prep_started_mono)
+        return speaker_lines_path, manifest_path, topics_prep_elapsed_s
+
+    def _run_topics_llm(
+        self,
+        *,
+        job: JobPaths,
+        result_dir: Path,
+        manifest_path: Path,
+        orig_stem: str,
+        prompt_id: str,
+        progress_tracker: _TopicsProgressTracker,
+    ) -> tuple[str, str, float]:
+        topics_llm_started_mono = time.monotonic()
+        topics_status = "ok"
+        topics_warning = ""
+        try:
+            chunk_outputs = self._run_topics_queue_wait(
+                job=job,
+                manifest_path=manifest_path,
+                orig_stem=orig_stem,
+                prompt_id=prompt_id,
+                progress_tracker=progress_tracker,
+            )
+            self._parse_topics_outputs(
+                chunk_outputs=chunk_outputs,
+                result_dir=result_dir,
+                orig_stem=orig_stem,
+                prompt_id=prompt_id,
+            )
+            topics_status, topics_warning = self._validate_and_merge_topics(
+                job=job,
+                manifest_path=manifest_path,
+                result_dir=result_dir,
+                orig_stem=orig_stem,
+                prompt_id=prompt_id,
+            )
+        except Exception as e:
+            progress_tracker.set_message(
+                f"Topics failed: {e}",
+                status_owner=self._status_owner("api_topics", "api-topics"),
+            )
+            topics_status = "failed"
+            topics_warning = str(e)
+            _append_log(job.log_path, f"topics_nonfatal error={e!r}")
+        topics_llm_elapsed_s = max(0.0, time.monotonic() - topics_llm_started_mono)
+        return topics_status, topics_warning, topics_llm_elapsed_s
+
+    def _run_topics_queue_wait(
+        self,
+        *,
+        job: JobPaths,
+        manifest_path: Path,
+        orig_stem: str,
+        prompt_id: str,
+        progress_tracker: _TopicsProgressTracker,
+    ) -> dict[int, Path]:
+        llm_status_owner = self._status_owner("llm_worker", "llm-worker")
+        progress_tracker.start(
+            message="Topics: enqueueing llm tasks",
+            status_owner=llm_status_owner,
+        )
+        _write_status_safely(
+            job.status_path,
+            phase="topics",
+            subphase="queue",
+            status_owner=llm_status_owner,
+            message="Topics: enqueueing llm tasks",
+        )
+        task_ids = self._enqueue_topics_tasks(
+            job=job,
+            manifest_path=manifest_path,
+            orig_stem=orig_stem,
+            prompt_id=prompt_id,
+        )
+        wait_message = f"Topics: waiting for 0/{len(task_ids)} llm tasks"
+        _write_status_safely(
+            job.status_path,
+            phase="topics",
+            subphase="wait",
+            status_owner=llm_status_owner,
+            message=wait_message,
+        )
+        progress_tracker.update(
+            done_count=0,
+            total_count=len(task_ids),
+            message=wait_message,
+            status_owner=llm_status_owner,
+        )
+        return self._wait_topics_tasks(task_ids, progress_tracker=progress_tracker)
+
+    def _parse_topics_outputs(
+        self,
+        *,
+        chunk_outputs: dict[int, Path],
+        result_dir: Path,
+        orig_stem: str,
+        prompt_id: str,
+    ) -> None:
+        for idx, text_path in sorted(chunk_outputs.items()):
+            raw_path = (result_dir / f"{orig_stem}_{prompt_id}_chunk_{int(idx):04d}_raw.txt").resolve()
+            raw_text = text_path.read_text(encoding="utf-8", errors="replace")
+            raw_path.write_text(raw_text, encoding="utf-8")
+            parsed_path = (result_dir / f"{orig_stem}_{prompt_id}_chunk_{int(idx):04d}.json").resolve()
+            parse_topics_raw_file(raw_txt_path=raw_path, out_json_path=parsed_path)
+
+    def _validate_and_merge_topics(
+        self,
+        *,
+        job: JobPaths,
+        manifest_path: Path,
+        result_dir: Path,
+        orig_stem: str,
+        prompt_id: str,
+    ) -> tuple[str, str]:
+        report_path = (result_dir / f"{orig_stem}_{prompt_id}_validation.json").resolve()
+        validate_all_chunks(
+            manifest_path=manifest_path,
+            parsed_dir=result_dir,
+            orig_stem=orig_stem,
+            prompt_id=prompt_id,
+            out_report_path=report_path,
+        )
+        report = _read_json(report_path)
+        if not bool(report.get("is_valid", False)):
+            _append_log(job.log_path, f"topics_nonfatal validation_failed report={report_path.name}")
+            return "validation_failed", f"Topics validation failed: {report_path.name}"
+
+        salvaged_chunks = int(report.get("salvaged_chunks") or 0)
+        if salvaged_chunks > 0:
+            _append_log(
+                job.log_path,
+                f"topics_validation_salvaged chunks={salvaged_chunks} report={report_path.name}",
+            )
+        merged_path = (result_dir / _topics_merged_filename(orig_stem=orig_stem, prompt_id=prompt_id)).resolve()
+        merge_topics(
+            manifest_path=manifest_path,
+            parsed_dir=result_dir,
+            orig_stem=orig_stem,
+            prompt_id=prompt_id,
+            out_merged_path=merged_path,
+        )
+        return "ok", ""
+
+    def _finalize_run(
+        self,
+        *,
+        job: JobPaths,
+        status: dict[str, Any],
+        srt_path: Path,
+        speaker_lines_path: Path | None,
+        manifest_path: Path | None,
+        topics_status: str,
+        topics_warning: str,
+        topics_enabled: bool,
+        speaker_mode: str,
+        snippet_seconds: int,
+        base_elapsed_s: float,
+        topics_prep_elapsed_s: float,
+        topics_llm_elapsed_s: float,
+        coord_started_mono: float,
+        progress_tracker: _TopicsProgressTracker | None,
+    ) -> None:
+        final_elapsed_s = (
+            progress_tracker.elapsed_total_s()
+            if progress_tracker is not None
+            else (base_elapsed_s + max(0.0, time.monotonic() - coord_started_mono))
+        )
+        final_eta_confidence = (
+            progress_tracker.eta_confidence
+            if progress_tracker is not None
+            else max(0.0, float(_safe_float(status.get("eta_confidence")) or 0.0))
+        )
+        final_eta_hints = (
+            progress_tracker.eta_hints
+            if progress_tracker is not None
+            else _unique_hints(status.get("eta_hints"))
+        )
+        patch: dict[str, Any] = {
+            "state": "done",
+            "phase": "done",
+            "subphase": "",
+            "status_owner": self._status_owner("api_topics", "api-topics"),
+            "progress": 1.0,
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+            "message": "Done",
+            "progress_mode": "predictive_v1",
+            "elapsed_s": round(final_elapsed_s, 3),
+            "eta_total_s": round(final_elapsed_s, 3),
+            "eta_remaining_s": 0.0,
+            "eta_confidence": round(float(final_eta_confidence), 3),
+            "eta_hints": list(final_eta_hints),
+            "srt_filename": srt_path.name,
+            "topics_status": topics_status,
+            "topics_warning": topics_warning,
+            "topics_enabled": topics_enabled,
+        }
+        if speaker_lines_path is not None:
+            patch["speaker_lines_filename"] = speaker_lines_path.name
+        if manifest_path is not None:
+            patch["speaker_lines_manifest_filename"] = manifest_path.name
+        _write_status_safely(job.status_path, **patch)
+        try:
+            _append_progress_run_record(
+                runs_path=self._progress_runs_path,
+                job_id=job.job_id,
+                status=_read_json(job.status_path),
+                hardware_key=self._hardware_key,
+                speaker_mode=speaker_mode,
+                topics_enabled=topics_enabled,
+                snippet_seconds=snippet_seconds,
+                base_elapsed_s=base_elapsed_s,
+                final_elapsed_s=final_elapsed_s,
+                topics_prep_elapsed_s=topics_prep_elapsed_s,
+                topics_llm_elapsed_s=topics_llm_elapsed_s,
+            )
+        except Exception as e:
+            _append_log(job.log_path, f"progress_runs_nonfatal error={e!r}")
+        if not topics_enabled:
+            _append_log(job.log_path, "topics_skipped disabled")
+        _append_log(job.log_path, "topics_done")
+
     def run(self, *, job: JobPaths, status: dict[str, Any]) -> None:
         _append_log(job.log_path, "topics_claimed phase=done")
         service_cfg = self._service_cfg
@@ -423,33 +682,17 @@ class TopicsFlow:
                 snippet_seconds = int((int(duration_ms) + 999) // 1000)
             else:
                 snippet_seconds = int(snip_cfg.get("minutes_default", 15)) * 60
-        prompt_id = str(topics_cfg.get("prompt_id") or "topics_v1")
+        prompt_id = _topics_prompt_id(topics_cfg.get("prompt_id"))
         coord_started_mono = time.monotonic()
         base_elapsed_s = max(0.0, float(_safe_float(status.get("elapsed_s")) or 0.0))
-        progress_tracker = _TopicsProgressTracker(status_path=job.status_path) if topics_enabled else None
-        if progress_tracker is not None:
-            prediction = build_prediction(
-                runs_path=self._progress_runs_path,
-                hardware_key=self._hardware_key,
-                topics_enabled=topics_enabled,
-                speaker_mode=speaker_mode,
-                snippet_seconds=snippet_seconds,
-            )
-            phase_order = ["snipping", "whisperx_prepare", "whisperx_transcribe", "whisperx_align"]
-            if speaker_mode != "none":
-                phase_order.append("whisperx_diarize")
-            topics_phase = "llm_topics" if topics_enabled else "llm_topics_skipped"
-            phase_order.append(topics_phase)
-            completed_expected = sum(max(0.0, float(prediction.phase_expected_s.get(phase, 0.0))) for phase in phase_order[:-1])
-            total_expected = max(1.0, float(prediction.total_expected_s))
-            progress_tracker.seed_from_upload_prediction(
-                base_progress=min(0.99, completed_expected / total_expected),
-                base_elapsed_s=base_elapsed_s,
-                topics_expected_s=float(prediction.phase_expected_s.get(topics_phase, DEFAULTS_SECONDS.get(topics_phase, 8.5))),
-                eta_confidence=prediction.confidence,
-                eta_hints=list(prediction.hints),
-                message=str(status.get("message") or "Running..."),
-            )
+        progress_tracker = self._build_progress_tracker(
+            status_path=job.status_path,
+            status=status,
+            topics_enabled=topics_enabled,
+            speaker_mode=speaker_mode,
+            snippet_seconds=snippet_seconds,
+            base_elapsed_s=base_elapsed_s,
+        )
         orig_filename = str(status.get("orig_filename") or "").strip()
         orig_stem = Path(orig_filename).stem if orig_filename else "transcript"
         srt_path = _pick_srt_path(job=job, status=status)
@@ -457,206 +700,52 @@ class TopicsFlow:
             raise RuntimeError("No SRT found for topics handoff")
 
         if not topics_enabled:
-            final_elapsed_s = base_elapsed_s
-            final_eta_confidence = max(0.0, float(_safe_float(status.get("eta_confidence")) or 0.0))
-            final_eta_hints = _unique_hints(status.get("eta_hints"))
-            self._patch_status(
-                job.status_path,
-                state="done",
-                phase="done",
-                subphase="",
-                status_owner=self._status_owner("api_topics", "api-topics"),
-                progress=1.0,
-                finished_at=datetime.now(timezone.utc).isoformat(),
-                message="Done",
-                progress_mode="predictive_v1",
-                elapsed_s=round(final_elapsed_s, 3),
-                eta_total_s=round(final_elapsed_s, 3),
-                eta_remaining_s=0.0,
-                eta_confidence=round(float(final_eta_confidence), 3),
-                eta_hints=list(final_eta_hints),
-                srt_filename=srt_path.name,
-                topics_enabled=topics_enabled,
+            self._finalize_run(
+                job=job,
+                status=status,
+                srt_path=srt_path,
+                speaker_lines_path=None,
+                manifest_path=None,
                 topics_status="disabled",
                 topics_warning="",
+                topics_enabled=topics_enabled,
+                speaker_mode=speaker_mode,
+                snippet_seconds=snippet_seconds,
+                base_elapsed_s=base_elapsed_s,
+                topics_prep_elapsed_s=0.0,
+                topics_llm_elapsed_s=0.0,
+                coord_started_mono=coord_started_mono,
+                progress_tracker=progress_tracker,
             )
-            try:
-                _append_progress_run_record(
-                    runs_path=self._progress_runs_path,
-                    job_id=job.job_id,
-                    status=_read_json(job.status_path),
-                    hardware_key=self._hardware_key,
-                    speaker_mode=speaker_mode,
-                    topics_enabled=topics_enabled,
-                    snippet_seconds=snippet_seconds,
-                    base_elapsed_s=base_elapsed_s,
-                    final_elapsed_s=final_elapsed_s,
-                    topics_prep_elapsed_s=0.0,
-                    topics_llm_elapsed_s=0.0,
-                )
-            except Exception as e:
-                _append_log(job.log_path, f"progress_runs_nonfatal error={e!r}")
-            _append_log(job.log_path, "topics_skipped disabled")
-            _append_log(job.log_path, "topics_done")
             return
 
-        self._patch_status(
-            job.status_path,
-            state="running",
-            phase="topics",
-            subphase="speaker_lines",
-            message="Topics: generating speaker_lines",
-            topics_enabled=topics_enabled,
-        )
-
-        topics_prep_started_mono = time.monotonic()
-        speaker_lines_path, transcript_end_hms = make_speaker_lines_from_srt(
+        speaker_lines_path, manifest_path, topics_prep_elapsed_s = self._prepare_topics_inputs(
             job=job,
             srt_path=srt_path,
             orig_stem=orig_stem,
         )
-        manifest_path = chunk_speaker_lines(
+        topics_status, topics_warning, topics_llm_elapsed_s = self._run_topics_llm(
             job=job,
-            speaker_lines_path=speaker_lines_path,
+            result_dir=result_dir,
+            manifest_path=manifest_path,
             orig_stem=orig_stem,
-            service_cfg=service_cfg,
-            transcript_end_hms=transcript_end_hms,
+            prompt_id=prompt_id,
+            progress_tracker=progress_tracker,
         )
-        topics_prep_elapsed_s = max(0.0, time.monotonic() - topics_prep_started_mono)
-        topics_llm_started_mono = time.monotonic()
-
-        topics_status = "disabled"
-        topics_warning = ""
-        if topics_enabled:
-            topics_status = "ok"
-            try:
-                progress_tracker.start(
-                    message="Topics: enqueueing llm tasks",
-                    status_owner=self._status_owner("llm_worker", "llm-worker"),
-                )
-                self._patch_status(
-                    job.status_path,
-                    phase="topics",
-                    subphase="queue",
-                    status_owner=self._status_owner("llm_worker", "llm-worker"),
-                    message="Topics: enqueueing llm tasks",
-                )
-                task_ids = self._enqueue_topics_tasks(
-                    job=job,
-                    manifest_path=manifest_path,
-                    orig_stem=orig_stem,
-                    prompt_id=prompt_id,
-                )
-                self._patch_status(
-                    job.status_path,
-                    phase="topics",
-                    subphase="wait",
-                    status_owner=self._status_owner("llm_worker", "llm-worker"),
-                    message=f"Topics: waiting for 0/{len(task_ids)} llm tasks",
-                )
-                progress_tracker.update(
-                    done_count=0,
-                    total_count=len(task_ids),
-                    message=f"Topics: waiting for 0/{len(task_ids)} llm tasks",
-                    status_owner=self._status_owner("llm_worker", "llm-worker"),
-                )
-                chunk_outputs = self._wait_topics_tasks(task_ids, progress_tracker=progress_tracker)
-                for idx, text_path in sorted(chunk_outputs.items()):
-                    raw_path = (result_dir / f"{orig_stem}_{prompt_id}_chunk_{int(idx):04d}_raw.txt").resolve()
-                    raw_text = text_path.read_text(encoding="utf-8", errors="replace")
-                    raw_path.write_text(raw_text, encoding="utf-8")
-                    parsed_path = (result_dir / f"{orig_stem}_{prompt_id}_chunk_{int(idx):04d}.json").resolve()
-                    parse_topics_raw_file(raw_txt_path=raw_path, out_json_path=parsed_path)
-
-                report_path = (result_dir / f"{orig_stem}_{prompt_id}_validation.json").resolve()
-                validate_all_chunks(
-                    manifest_path=manifest_path,
-                    parsed_dir=result_dir,
-                    orig_stem=orig_stem,
-                    prompt_id=prompt_id,
-                    out_report_path=report_path,
-                )
-                report = _read_json(report_path)
-                if not bool(report.get("is_valid", False)):
-                    topics_status = "validation_failed"
-                    topics_warning = f"Topics validation failed: {report_path.name}"
-                    _append_log(job.log_path, f"topics_nonfatal validation_failed report={report_path.name}")
-                else:
-                    salvaged_chunks = int(report.get("salvaged_chunks") or 0)
-                    if salvaged_chunks > 0:
-                        _append_log(
-                            job.log_path,
-                            f"topics_validation_salvaged chunks={salvaged_chunks} report={report_path.name}",
-                        )
-                    merged_path = (result_dir / f"{orig_stem}_{prompt_id}_merged.json").resolve()
-                    merge_topics(
-                        manifest_path=manifest_path,
-                        parsed_dir=result_dir,
-                        orig_stem=orig_stem,
-                        prompt_id=prompt_id,
-                        out_merged_path=merged_path,
-                    )
-            except Exception as e:
-                progress_tracker.set_message(
-                    f"Topics failed: {e}",
-                    status_owner=self._status_owner("api_topics", "api-topics"),
-                )
-                topics_status = "failed"
-                topics_warning = str(e)
-                _append_log(job.log_path, f"topics_nonfatal error={e!r}")
-        topics_llm_elapsed_s = max(0.0, time.monotonic() - topics_llm_started_mono)
-
-        final_elapsed_s = (
-            progress_tracker.elapsed_total_s()
-            if progress_tracker is not None
-            else (base_elapsed_s + max(0.0, time.monotonic() - coord_started_mono))
-        )
-        final_eta_confidence = (
-            progress_tracker.eta_confidence
-            if progress_tracker is not None
-            else max(0.0, float(_safe_float(status.get("eta_confidence")) or 0.0))
-        )
-        final_eta_hints = (
-            progress_tracker.eta_hints
-            if progress_tracker is not None
-            else _unique_hints(status.get("eta_hints"))
-        )
-        self._patch_status(
-            job.status_path,
-            state="done",
-            phase="done",
-            subphase="",
-            status_owner=self._status_owner("api_topics", "api-topics"),
-            progress=1.0,
-            finished_at=datetime.now(timezone.utc).isoformat(),
-            message="Done",
-            progress_mode="predictive_v1",
-            elapsed_s=round(final_elapsed_s, 3),
-            eta_total_s=round(final_elapsed_s, 3),
-            eta_remaining_s=0.0,
-            eta_confidence=round(float(final_eta_confidence), 3),
-            eta_hints=list(final_eta_hints),
-            srt_filename=srt_path.name,
-            speaker_lines_filename=speaker_lines_path.name,
-            speaker_lines_manifest_filename=manifest_path.name,
+        self._finalize_run(
+            job=job,
+            status=status,
+            srt_path=srt_path,
+            speaker_lines_path=speaker_lines_path,
+            manifest_path=manifest_path,
             topics_status=topics_status,
             topics_warning=topics_warning,
             topics_enabled=topics_enabled,
+            speaker_mode=speaker_mode,
+            snippet_seconds=snippet_seconds,
+            base_elapsed_s=base_elapsed_s,
+            topics_prep_elapsed_s=topics_prep_elapsed_s,
+            topics_llm_elapsed_s=topics_llm_elapsed_s,
+            coord_started_mono=coord_started_mono,
+            progress_tracker=progress_tracker,
         )
-        try:
-            _append_progress_run_record(
-                runs_path=self._progress_runs_path,
-                job_id=job.job_id,
-                status=_read_json(job.status_path),
-                hardware_key=self._hardware_key,
-                speaker_mode=speaker_mode,
-                topics_enabled=topics_enabled,
-                snippet_seconds=snippet_seconds,
-                base_elapsed_s=base_elapsed_s,
-                final_elapsed_s=final_elapsed_s,
-                topics_prep_elapsed_s=topics_prep_elapsed_s,
-                topics_llm_elapsed_s=topics_llm_elapsed_s,
-            )
-        except Exception as e:
-            _append_log(job.log_path, f"progress_runs_nonfatal error={e!r}")
-        _append_log(job.log_path, "topics_done")

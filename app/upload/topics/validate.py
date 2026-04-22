@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from upload._util import _hms_to_seconds, _seconds_to_hms
+
 
 BOUNDARY_SALVAGE_TOLERANCE_S = 10
 
@@ -12,20 +14,6 @@ BOUNDARY_SALVAGE_TOLERANCE_S = 10
 @dataclass
 class TopicsValidationError(Exception):
   message: str
-
-
-def _hms_to_seconds(hms: str) -> int:
-  hh, mm, ss = hms.split(":")
-  return int(hh) * 3600 + int(mm) * 60 + int(ss)
-
-
-def _seconds_to_hms(total_s: int) -> str:
-  hh = total_s // 3600
-  mm = (total_s % 3600) // 60
-  ss = total_s % 60
-  return f"{hh:02d}:{mm:02d}:{ss:02d}"
-
-
 def _row_to_raw_line(row: dict[str, Any]) -> str:
   return (
     f"{int(row.get('n') or 0)} | "

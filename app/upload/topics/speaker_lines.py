@@ -4,18 +4,12 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from upload.status_io import _write_status
+from upload._util import _hms_to_seconds
+from upload.status_io import _write_topics_status
 
 
 _SPK_RE = re.compile(r"^\s*\[?(SPEAKER_\d+)\]?\s*:?\s*(.*)\s*$", re.IGNORECASE)
 _TS_RE = re.compile(r"^\s*(\d{2}:\d{2}:\d{2}),\d{3}\s*-->\s*(\d{2}:\d{2}:\d{2}),\d{3}\s*$")
-
-
-def _hms_to_seconds(hms: str) -> int:
-  hh, mm, ss = hms.split(":")
-  return int(hh) * 3600 + int(mm) * 60 + int(ss)
-
-
 def _derive_speaker_and_text(joined: str) -> tuple[str, str]:
   m = _SPK_RE.match(joined)
   if not m:
@@ -36,7 +30,7 @@ class _Cue:
 def make_speaker_lines_from_srt(*, job, srt_path: Path, orig_stem: str) -> tuple[Path, str]:
   result_dir = (job.dir / "result").resolve()
   out_path = result_dir / f"{orig_stem}_speaker_lines.txt"
-  _write_status(job.status_path, phase="topics", subphase="speaker_lines", status_owner=_STATUS_OWNER, message="Generating speaker_lines…")
+  _write_topics_status(job.status_path, subphase="speaker_lines", message="Generating speaker_lines…")
 
   lines = srt_path.read_text(encoding="utf-8", errors="replace").splitlines()
 
@@ -90,14 +84,11 @@ def make_speaker_lines_from_srt(*, job, srt_path: Path, orig_stem: str) -> tuple
   out_path.write_text("\n".join(out_lines) + ("\n" if out_lines else ""), encoding="utf-8")
 
   transcript_end_hms = last_end_hms or "00:00:00"
-  _write_status(
+  _write_topics_status(
     job.status_path,
-    phase="topics",
     subphase="speaker_lines",
-    status_owner=_STATUS_OWNER,
     message=f"speaker_lines written: {out_path.name}",
     speaker_lines_filename=out_path.name,
     transcript_end=transcript_end_hms,
   )
   return out_path, transcript_end_hms
-_STATUS_OWNER = "api-topics"

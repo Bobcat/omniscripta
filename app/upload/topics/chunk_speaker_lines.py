@@ -5,28 +5,12 @@ import re
 from pathlib import Path
 from typing import Any
 
-from upload.status_io import _write_status
+from upload._util import _hms_to_seconds, _seconds_to_hms
+from upload.status_io import _write_topics_status
 
 
 _LINE_RE = re.compile(r"^\(\s*[^,]+,\s*(\d{2}:\d{2}:\d{2})(?:\s*-\s*\d{2}:\d{2}:\d{2})?\s*\)\s*(.*)$")
-
-
-def _hms_to_seconds(hms: str) -> int:
-  hh, mm, ss = hms.split(":")
-  return int(hh) * 3600 + int(mm) * 60 + int(ss)
-
-
-def _seconds_to_hms(sec: int) -> str:
-  sec = max(0, int(sec))
-  hh = sec // 3600
-  mm = (sec % 3600) // 60
-  ss = sec % 60
-  return f"{hh:02d}:{mm:02d}:{ss:02d}"
-
-
-def _estimate_tokens(chars: int, *, method: str) -> int:
-  if method == "chars_div4":
-    return max(1, chars // 4)
+def _estimate_tokens(chars: int) -> int:
   return max(1, chars // 4)
 
 
@@ -38,7 +22,7 @@ def chunk_speaker_lines(
   service_cfg: dict[str, Any],
   transcript_end_hms: str,
 ) -> Path:
-  _write_status(job.status_path, phase="topics", subphase="chunk_speaker_lines", status_owner=_STATUS_OWNER, message="Chunking speaker_lines…")
+  _write_topics_status(job.status_path, subphase="chunk_speaker_lines", message="Chunking speaker_lines…")
   result_dir = (job.dir / "result").resolve()
 
   topics_cfg = service_cfg.get("topics", {}) if isinstance(service_cfg, dict) else {}
@@ -73,7 +57,7 @@ def chunk_speaker_lines(
     fname = f"{orig_stem}_speaker_lines_chunk_{chunk_index:04d}.txt"
     out_path = result_dir / fname
     out_path.write_text("\n".join(chunk_lines) + "\n", encoding="utf-8")
-    token_est = _estimate_tokens(chars_sum, method=token_method) + overhead
+    token_est = _estimate_tokens(chars_sum) + overhead
     chunks.append(
       {
         "index": chunk_index,
@@ -98,7 +82,7 @@ def chunk_speaker_lines(
       continue
     span_if_added = sec - chunk_start_sec
     chars_if_added = chars_sum + len(raw) + 1
-    token_if_added = _estimate_tokens(chars_if_added, method=token_method) + overhead
+    token_if_added = _estimate_tokens(chars_if_added) + overhead
     if token_if_added > limit_tokens or span_if_added >= target_span:
       flush_chunk(chunk_index, end_sec=sec)
       chunk_index += 1
@@ -130,14 +114,11 @@ def chunk_speaker_lines(
   }
   manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
-  _write_status(
+  _write_topics_status(
     job.status_path,
-    phase="topics",
     subphase="chunk_speaker_lines",
-    status_owner=_STATUS_OWNER,
     message=f"Chunking done: {len(chunks)} chunks",
     speaker_lines_manifest_filename=manifest_path.name,
     speaker_lines_chunk_count=len(chunks),
   )
   return manifest_path
-_STATUS_OWNER = "api-topics"
