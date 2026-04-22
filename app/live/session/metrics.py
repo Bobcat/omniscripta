@@ -17,7 +17,7 @@ def live_commit_rows_debug_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]
         except Exception:
             invalid_index_rows += 1
             continue
-        # Snapshot contract is one row per chunk_index. If duplicates exist, keep the last one.
+        # Payload contract is one row per chunk_index. If duplicates exist, keep the last one.
         by_index[idx] = row
     for row in by_index.values():
         reason = str(row.get("reason") or "").strip()
@@ -35,7 +35,7 @@ def live_commit_rows_debug_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]
     }
 
 
-def build_live_session_manager_metrics_snapshot(
+def build_live_session_manager_metrics_payload(
     *,
     active_sessions: list[Any],
     archived_sessions_count: int,

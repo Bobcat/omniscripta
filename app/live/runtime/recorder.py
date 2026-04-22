@@ -13,7 +13,7 @@ DEFAULT_SAMPLE_WIDTH_BYTES = 2
 
 
 def _repo_root() -> Path:
-    # app/live/engine/recordings.py -> engine -> live -> app -> repo root
+    # app/live/runtime/recorder.py -> runtime -> live -> app -> repo root
     return Path(__file__).resolve().parents[3]
 
 

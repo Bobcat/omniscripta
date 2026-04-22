@@ -19,7 +19,7 @@ from asr_pool_api import (
     ASRRequestRouting,
     ASRSubmitRequest,
 )
-from live._util import _normalize_optional_language
+from live.runtime.util import _normalize_optional_language, _safe_float
 from app.config.settings import get_setting
 
 
@@ -33,7 +33,7 @@ _SPEAKER_PREFIX_RE = re.compile(
 
 
 def _repo_root() -> Path:
-    # app/live/engine/chunk_transcribe.py -> engine -> live -> app -> repo root
+    # app/live/runtime/asr_bridge.py -> runtime -> live -> app -> repo root
     return Path(__file__).resolve().parents[2]
 
 
@@ -99,13 +99,6 @@ def _parse_srt_segments(srt_text: str, *, t0_offset_ms: int = 0) -> list[dict[st
 def _srt_to_plain_text(srt_text: str) -> str:
     segs = _parse_srt_segments(srt_text)
     return "\n".join(seg["text"] for seg in segs if str(seg.get("text") or "").strip())
-
-
-def _safe_float(value: Any) -> float | None:
-    try:
-        return max(0.0, float(value))
-    except Exception:
-        return None
 
 
 @dataclass(frozen=True)
@@ -356,9 +349,6 @@ class LiveChunkBatchBridge:
         asr_chunk_size: int | None = None,
         asr_backend: str | None = None,
         initial_prompt: str | None = None,
-        live_lane: str | None = None,
-        preview_seq: int | None = None,
-        preview_audio_end_ms: int | None = None,
     ) -> EnqueuedChunkJob:
         safe_id = _safe_session_id(session_id)
         idx = int(max(0, chunk_index))

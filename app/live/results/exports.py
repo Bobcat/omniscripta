@@ -5,7 +5,7 @@ import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Callable, Dict
 
 from live.config import LIVE_BENCHMARK_EXPORT_ROOT, LIVE_RECORDINGS_ROOT
 
@@ -95,6 +95,37 @@ def live_recording_wav_path_from_result(result: dict[str, Any]) -> Path | None:
     if not candidate.is_file():
         return None
     return candidate
+
+
+def build_live_result_envelope(
+    *,
+    session_id: str,
+    result_payload: dict[str, Any],
+    rooted_path_cb: Callable[[str], str],
+) -> dict[str, Any]:
+    result = dict(result_payload or {})
+    effective_engine = str(result.get("live_engine") or LIVE_ENGINE)
+    result["live_engine"] = effective_engine
+
+    final_segments = result.get("final_segments")
+    has_segments = isinstance(final_segments, list) and any(isinstance(seg, dict) for seg in final_segments)
+    has_recording_wav = live_recording_wav_path_from_result(result) is not None
+    has_pc_replay = int(max(0, int(result.get("pc_events_count") or 0))) > 0
+
+    finalization_state = str(result.get("finalization_state") or "").strip().lower()
+
+    return {
+        "session_id": str(session_id),
+        "live_engine": effective_engine,
+        "result": result,
+        "ready": finalization_state in {"ready", "finalized"},
+        "can_export_srt": bool(has_segments),
+        "can_export_wav": bool(has_recording_wav),
+        "can_export_pc": bool(has_pc_replay),
+        "transcript_srt_url": rooted_path_cb(f"/demo/live/sessions/{session_id}/transcript.srt") if has_segments else None,
+        "recording_wav_url": rooted_path_cb(f"/demo/live/sessions/{session_id}/recording.wav") if has_recording_wav else None,
+        "transcript_pc_url": rooted_path_cb(f"/demo/live/sessions/{session_id}/transcript.pc") if has_pc_replay else None,
+    }
 
 
 def _iso_utc(ts: float) -> str:

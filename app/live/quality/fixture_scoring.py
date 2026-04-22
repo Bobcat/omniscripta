@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 
 def _repo_root() -> Path:
-    # app/live/output/quality.py -> output -> live -> app -> repo root
+    # app/live/quality/fixture_scoring.py -> quality -> live -> app -> repo root
     return Path(__file__).resolve().parents[3]
 
 
@@ -62,73 +61,6 @@ def _word_levenshtein(a_words: list[str], b_words: list[str]) -> int:
     return int(prev[-1])
 
 
-def _parse_iso_utc(value: str) -> datetime | None:
-    raw = str(value or "").strip()
-    if not raw:
-        return None
-    try:
-        return datetime.fromisoformat(raw)
-    except Exception:
-        return None
-
-
-def _stats_log_metrics(stats_log_path: str | Path) -> dict[str, Any]:
-    path = Path(stats_log_path)
-    out: dict[str, Any] = {
-        "stop_to_ready_ms": None,
-        "poll_error_count": 0,
-        "chunk_error_count": 0,
-    }
-    if not path.exists():
-        return out
-
-    finalized_ts: datetime | None = None
-    session_closed_ts: datetime | None = None
-    poll_error_count = 0
-    chunk_error_count = 0
-
-    try:
-        with path.open("r", encoding="utf-8") as fh:
-            for line in fh:
-                raw = line.strip()
-                if not raw:
-                    continue
-                try:
-                    row = json.loads(raw)
-                except Exception:
-                    continue
-                kind = str(row.get("kind") or row.get("type") or "").strip()
-                if kind == "rolling_recording_finalized" and finalized_ts is None:
-                    finalized_ts = _parse_iso_utc(str(row.get("ts_utc") or ""))
-                elif kind == "session_closed":
-                    session_closed_ts = _parse_iso_utc(str(row.get("ts_utc") or ""))
-                elif kind == "rolling_inference_poll_error":
-                    poll_error_count += 1
-                elif kind in {
-                    "rolling_inference_error",
-                    "rolling_inference_enqueue_error",
-                    "rolling_commit_store_error",
-                    "rolling_context_init_error",
-                    "rolling_recording_append_error",
-                }:
-                    chunk_error_count += 1
-    except Exception:
-        return out
-
-    stop_to_ready_ms: int | None = None
-    if finalized_ts is not None and session_closed_ts is not None:
-        try:
-            delta_ms = int(round((session_closed_ts - finalized_ts).total_seconds() * 1000.0))
-            stop_to_ready_ms = max(0, delta_ms)
-        except Exception:
-            stop_to_ready_ms = None
-
-    out["stop_to_ready_ms"] = stop_to_ready_ms
-    out["poll_error_count"] = int(max(0, poll_error_count))
-    out["chunk_error_count"] = int(max(0, chunk_error_count))
-    return out
-
-
 def _fixture_dir(fixture_id: str) -> Path:
     safe = str(fixture_id or "").strip()
     if not safe:
@@ -178,7 +110,6 @@ def score_live_text_against_fixture(
     fixture_id: str,
     live_text: str,
     live_result: dict[str, Any] | None = None,
-    stats_log_path: str | Path | None = None,
 ) -> dict[str, Any]:
     fixture = load_fixture_reference(fixture_id)
     ref_text = str(fixture.get("reference_text") or "")
@@ -232,8 +163,6 @@ def score_live_text_against_fixture(
         "gpu_proxy_transcribe_pct_of_recording": gpu_proxy_transcribe_pct_of_recording,
         "gpu_proxy_pipeline_pct_of_recording": gpu_proxy_pipeline_pct_of_recording,
     }
-    if stats_log_path:
-        run_metrics.update(_stats_log_metrics(stats_log_path))
 
     return {
         "metric_version": "live_quality_v1",

@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-import re
 from typing import Any, Dict
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException, Request, WebSocket
 from fastapi.responses import FileResponse, Response
 
-from live.output.artifacts import (
+from live.results.exports import (
+    build_live_result_envelope,
     live_pc_events_to_text,
     live_recording_wav_path_from_result,
     live_result_to_plain_text,
@@ -24,30 +24,19 @@ from live.config import (
     live_engine_rolling_context_config,
     rooted_path,
 )
-from live.protocol import PROTOCOL_VERSION
-from live.output.quality import score_live_text_against_fixture
-from live.engine.rolling_context import run_live_session_ws_rolling_context
+from live.quality.fixture_scoring import score_live_text_against_fixture
+from live.runtime.protocol import PROTOCOL_VERSION
+from live.runtime.util import LIVE_ASR_LANGUAGE_ERROR, parse_live_asr_language
+from live.runtime.ws_session import run_live_session_ws
 
 router = APIRouter()
 
-_LIVE_SESSION_LANGUAGE_RE = re.compile(r"^[a-z]{2,3}(?:[-_][a-z0-9]{2,8})?$")
-
 
 def parse_live_session_asr_language(request: Request) -> str | None:
-    raw = request.query_params.get("language")
-    if raw is None:
-        return None
-    text = str(raw).strip().lower()
-    if not text:
-        return None
-    if text in {"auto", "default", "server-default", "server_default"}:
-        return None
-    if not _LIVE_SESSION_LANGUAGE_RE.match(text):
-        raise HTTPException(
-            status_code=400,
-            detail="language must be empty/auto or a short BCP-47 style code (e.g. 'en', 'nl', 'pt-br')",
-        )
-    return text
+    try:
+        return parse_live_asr_language(request.query_params.get("language"))
+    except ValueError:
+        raise HTTPException(status_code=400, detail=LIVE_ASR_LANGUAGE_ERROR)
 
 
 def parse_live_session_ttl_override(request: Request) -> int | None:
@@ -95,7 +84,6 @@ def create_live_session(request: Request) -> Dict[str, Any]:
     try:
         session = LIVE_SESSIONS.create_session(
             ttl_seconds=ttl_override,
-            live_engine=LIVE_ENGINE,
             asr_language=session_asr_language,
         )
     except RuntimeError as e:
@@ -134,7 +122,7 @@ def create_live_session(request: Request) -> Dict[str, Any]:
 @router.get("/demo/live/sessions/{session_id}")
 def get_live_session(session_id: str) -> Dict[str, Any]:
     try:
-        session = LIVE_SESSIONS.snapshot(session_id)
+        session = LIVE_SESSIONS.session_payload(session_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Live session not found")
     return {
@@ -147,7 +135,7 @@ def get_live_session(session_id: str) -> Dict[str, Any]:
 @router.get("/demo/live/sessions/{session_id}/final")
 def get_live_session_final(session_id: str) -> Dict[str, Any]:
     try:
-        archive = LIVE_SESSIONS.archived_transcript(session_id)
+        archive = LIVE_SESSIONS.archive_payload(session_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Live session final transcript not found")
     return {
@@ -160,33 +148,16 @@ def get_live_session_final(session_id: str) -> Dict[str, Any]:
 @router.get("/demo/live/sessions/{session_id}/result")
 def get_live_session_result(session_id: str) -> Dict[str, Any]:
     try:
-        result = LIVE_SESSIONS.live_result_snapshot(session_id)
+        result = LIVE_SESSIONS.live_result_payload(session_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Live session result not found")
-    result = dict(result)
-    effective_engine = str(result.get("live_engine") or LIVE_ENGINE)
-    result["live_engine"] = effective_engine
-    final_segments = result.get("final_segments")
-    has_segments = isinstance(final_segments, list) and any(isinstance(s, dict) for s in final_segments)
-    has_recording_wav = live_recording_wav_path_from_result(result) is not None
-    has_pc_replay = int(max(0, int(result.get("pc_events_count") or 0))) > 0
-    finalization_state = str(result.get("finalization_state") or "").strip().lower()
-    ready_states = {"ready", "finalized", "recording_finalized"}
-    if effective_engine == "rolling_context":
-        ready_states = {"ready", "finalized"}
-    return {
-        "protocol_version": PROTOCOL_VERSION,
-        "session_id": str(session_id),
-        "live_engine": effective_engine,
-        "result": result,
-        "ready": finalization_state in ready_states,
-        "can_export_srt": bool(has_segments),
-        "can_export_wav": bool(has_recording_wav),
-        "can_export_pc": bool(has_pc_replay),
-        "transcript_srt_url": rooted_path(f"/demo/live/sessions/{session_id}/transcript.srt") if has_segments else None,
-        "recording_wav_url": rooted_path(f"/demo/live/sessions/{session_id}/recording.wav") if has_recording_wav else None,
-        "transcript_pc_url": rooted_path(f"/demo/live/sessions/{session_id}/transcript.pc") if has_pc_replay else None,
-    }
+    envelope = build_live_result_envelope(
+        session_id=str(session_id),
+        result_payload=result,
+        rooted_path_cb=rooted_path,
+    )
+    envelope["protocol_version"] = PROTOCOL_VERSION
+    return envelope
 
 
 @router.post("/demo/live/sessions/{session_id}/fixture")
@@ -222,7 +193,7 @@ async def set_live_session_fixture(session_id: str, request: Request) -> Dict[st
 @router.get("/demo/live/sessions/{session_id}/quality")
 def get_live_session_quality(session_id: str, fixture_id: str | None = None) -> Dict[str, Any]:
     try:
-        result = LIVE_SESSIONS.live_result_snapshot(session_id)
+        result = LIVE_SESSIONS.live_result_payload(session_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Live session result not found")
 
@@ -243,7 +214,6 @@ def get_live_session_quality(session_id: str, fixture_id: str | None = None) -> 
             fixture_id=resolved_fixture_id,
             live_text=final_text,
             live_result=result,
-            stats_log_path=LIVE_SESSIONS.stats_log_path(session_id),
         )
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -268,7 +238,7 @@ def get_live_session_quality(session_id: str, fixture_id: str | None = None) -> 
 @router.get("/demo/live/sessions/{session_id}/transcript.srt")
 def get_live_session_transcript_srt(session_id: str) -> Response:
     try:
-        result = LIVE_SESSIONS.live_result_snapshot(session_id)
+        result = LIVE_SESSIONS.live_result_payload(session_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Live session result not found")
     srt_text = live_result_to_srt_text(result)
@@ -281,7 +251,7 @@ def get_live_session_transcript_srt(session_id: str) -> Response:
 @router.get("/demo/live/sessions/{session_id}/recording.wav")
 def get_live_session_recording_wav(session_id: str) -> FileResponse:
     try:
-        result = LIVE_SESSIONS.live_result_snapshot(session_id)
+        result = LIVE_SESSIONS.live_result_payload(session_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Live session result not found")
     wav_path = live_recording_wav_path_from_result(result)
@@ -312,13 +282,13 @@ def get_live_metrics() -> Dict[str, Any]:
     return {
         "protocol_version": PROTOCOL_VERSION,
         "live_engine": LIVE_ENGINE,
-        "metrics": LIVE_SESSIONS.metrics_snapshot(),
+        "metrics": LIVE_SESSIONS.metrics_payload(),
     }
 
 
 @router.websocket("/demo/live/sessions/{session_id}/ws")
 async def live_session_ws(session_id: str, websocket: WebSocket) -> None:
-    await run_live_session_ws_rolling_context(
+    await run_live_session_ws(
         session_id=session_id,
         websocket=websocket,
         live_sessions=LIVE_SESSIONS,

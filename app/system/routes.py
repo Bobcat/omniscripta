@@ -193,7 +193,7 @@ def _api_ops_metrics_snapshot() -> Dict[str, Any]:
     from upload.pipeline.coordinator import UPLOAD_BATCH_COORDINATOR
 
     now_ts = datetime.now(timezone.utc).timestamp()
-    live_metrics = dict(LIVE_SESSIONS.metrics_snapshot() or {})
+    live_metrics = dict(LIVE_SESSIONS.metrics_payload() or {})
     live_limits = dict(live_metrics.get("limits") or {})
     live_active_sessions = int(max(0, int(live_metrics.get("active_sessions") or 0)))
     live_ws_connected = int(max(0, int(live_metrics.get("active_ws_connected") or 0)))
