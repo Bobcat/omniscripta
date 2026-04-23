@@ -32,10 +32,10 @@ def _queue_root(name: str, *, setting_path: str, default_rel: str) -> QueueRoot:
 UPLOAD_PREP_QUEUE = _queue_root(
     "upload_prep",
     setting_path="upload.queue.prep_base",
-    default_rel="data/jobs/upload_prep",
+    default_rel="data/upload/jobs/prep",
 )
 UPLOAD_WORKER_QUEUE = _queue_root(
     "upload_worker",
     setting_path="upload.queue.worker_base",
-    default_rel="data/jobs/upload_worker",
+    default_rel="data/upload/jobs/worker",
 )

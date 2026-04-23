@@ -22,7 +22,7 @@ def _repo_root() -> Path:
 
 
 def _tasks_base() -> Path:
-  raw = get_str("llm.queue_dir", "data/llm_tasks").strip()
+  raw = get_str("llm.queue_dir", "data/upload/llm/tasks").strip()
   p = Path(raw)
   return p if p.is_absolute() else (_repo_root() / p)
 

@@ -8,8 +8,6 @@
   "asr_pool": {
     "base_url": "http://127.0.0.1:18090",
     "status_url": "http://127.0.0.1:18090/asr/v1/pool",
-    "work_root": "/home/gunnar/projects/omniscripta/data/asr_pool",
-    
     "timeouts": {
       "interactive": 60
     }
@@ -36,8 +34,8 @@
   
   "upload": {
     "queue": {
-      "prep_base": "data/jobs/upload_prep",
-      "worker_base": "data/jobs/upload_worker"
+      "prep_base": "data/upload/jobs/prep",
+      "worker_base": "data/upload/jobs/worker"
     }
   },
   

@@ -26,9 +26,6 @@ data/
 *.code-workspace
 
 # Local agent/worktree artifacts
+.agent/
 AGENTS.md
 docs/
-tests/
-!portal-api/tests/
-!portal-api/tests/__init__.py
-!portal-api/tests/test_topics_validate.py

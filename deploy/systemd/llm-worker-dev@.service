@@ -5,7 +5,7 @@ Description=LLM Worker Dev (%i)
 [Service]
 Type=simple
 WorkingDirectory=%h/projects/omniscripta/workers/llm
-ExecStartPre=/usr/bin/mkdir -p %h/projects/omniscripta/data/llm_tasks/inbox %h/projects/omniscripta/data/llm_tasks/running %h/projects/omniscripta/data/llm_tasks/done %h/projects/omniscripta/data/llm_tasks/error
+ExecStartPre=/usr/bin/mkdir -p %h/projects/omniscripta/data/upload/llm/tasks/inbox %h/projects/omniscripta/data/upload/llm/tasks/running %h/projects/omniscripta/data/upload/llm/tasks/done %h/projects/omniscripta/data/upload/llm/tasks/error
 ExecStart=/srv/omniscripta/worker/.venv/bin/python %h/projects/omniscripta/workers/llm/daemon.py
 Restart=always
 RestartSec=2

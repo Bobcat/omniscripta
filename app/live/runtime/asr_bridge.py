@@ -34,7 +34,7 @@ _SPEAKER_PREFIX_RE = re.compile(
 
 def _repo_root() -> Path:
     # app/live/runtime/asr_bridge.py -> runtime -> live -> app -> repo root
-    return Path(__file__).resolve().parents[2]
+    return Path(__file__).resolve().parents[3]
 
 
 def _safe_session_id(session_id: str) -> str:
@@ -164,7 +164,7 @@ class LiveChunkBatchBridge:
         diarize_max_speakers: int | None = 4,
     ) -> None:
         self.chunks_root = (
-            chunks_root if chunks_root is not None else (_repo_root() / "data" / "live_chunk_jobs")
+            chunks_root if chunks_root is not None else (_repo_root() / "data" / "live" / "chunk_jobs")
         ).resolve()
         self.sample_rate_hz = int(max(1, sample_rate_hz))
         self.channels = int(max(1, channels))

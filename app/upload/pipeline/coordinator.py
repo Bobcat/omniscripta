@@ -94,10 +94,10 @@ def _resolve_cfg_path(path_value: str, *, fallback_rel: str) -> Path:
 def _progress_runs_path() -> Path:
     raw = get_str("upload.worker.progress_runs_path", "").strip()
     if raw:
-        return _resolve_cfg_path(raw, fallback_rel="data/progress_db/runs_v1.jsonl")
+        return _resolve_cfg_path(raw, fallback_rel="data/upload/progress_db/runs_v1.jsonl")
     base = _resolve_cfg_path(
-        get_str("upload.worker.progress_db_dir", "data/progress_db"),
-        fallback_rel="data/progress_db",
+        get_str("upload.worker.progress_db_dir", "data/upload/progress_db"),
+        fallback_rel="data/upload/progress_db",
     )
     return (base / "runs_v1.jsonl").resolve()
 

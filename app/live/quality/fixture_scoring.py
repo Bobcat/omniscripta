@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
 from typing import Any
@@ -11,7 +10,7 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
-FIXTURES_ROOT = (_repo_root() / "data" / "test_fixtures").resolve()
+FIXTURES_ROOT = (_repo_root() / "data" / "live" / "fixtures").resolve()
 
 _SPEAKER_LABEL_RE = re.compile(r"\bspeaker[_ ]?\d+\s*:\s*", re.IGNORECASE)
 _NON_WORD_RE = re.compile(r"[^a-z0-9\s]+", re.IGNORECASE)
@@ -84,24 +83,12 @@ def load_fixture_reference(fixture_id: str) -> dict[str, Any]:
     if not ref_txt_path.exists():
         raise FileNotFoundError(f"fixture_reference_missing:{fixture_id}")
 
-    ref_meta_path = fixture_dir / "reference_meta.json"
-    meta: dict[str, Any] = {}
-    if ref_meta_path.exists():
-        try:
-            meta_obj = json.loads(ref_meta_path.read_text(encoding="utf-8"))
-            if isinstance(meta_obj, dict):
-                meta = meta_obj
-        except Exception:
-            meta = {}
-
     ref_text = ref_txt_path.read_text(encoding="utf-8")
     return {
         "fixture_id": str(fixture_id),
         "fixture_dir": str(fixture_dir),
         "reference_txt_path": str(ref_txt_path),
-        "reference_meta_path": str(ref_meta_path) if ref_meta_path.exists() else "",
         "reference_text": ref_text,
-        "reference_meta": meta,
     }
 
 
@@ -169,7 +156,6 @@ def score_live_text_against_fixture(
         "fixture": {
             "fixture_id": str(fixture_id),
             "reference_txt_path": str(fixture.get("reference_txt_path") or ""),
-            "reference_meta": fixture.get("reference_meta") if isinstance(fixture.get("reference_meta"), dict) else {},
         },
         "score": {
             "upload_similarity_score": int(score_100),

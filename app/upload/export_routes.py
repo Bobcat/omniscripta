@@ -30,7 +30,7 @@ def _rooted_api_path(path: str) -> str:
 
 
 def _export_root_dir() -> Path:
-    raw = str(get_str("upload.export.root", "data/exports") or "").strip() or "data/exports"
+    raw = str(get_str("upload.export.root", "data/upload/exports") or "").strip() or "data/upload/exports"
     root = Path(raw)
     if not root.is_absolute():
         root = (_REPO_ROOT / root).resolve()

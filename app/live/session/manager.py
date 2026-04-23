@@ -51,7 +51,7 @@ class LiveSessionManager:
         self._sessions: dict[str, LiveSession] = {}
         self._archives: dict[str, ClosedSessionArchive] = {}
         self._lock = threading.Lock()
-        self._stats_log_dir = (_repo_root() / "data" / "live_stats").resolve()
+        self._stats_log_dir = (_repo_root() / "data" / "live" / "stats").resolve()
 
     @staticmethod
     def _append_pc_event(sess: LiveSession, *, kind: str, text: str) -> None:

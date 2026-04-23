@@ -78,12 +78,12 @@
 
   "upload": {
     "queue": {
-      "prep_base": "data/jobs/upload_prep",
-      "worker_base": "data/jobs/upload_worker"
+      "prep_base": "data/upload/jobs/prep",
+      "worker_base": "data/upload/jobs/worker"
     },
     "worker": {
-      "progress_db_dir": "data/progress_db",
-      "progress_runs_path": "data/progress_db/runs_v1.jsonl",
+      "progress_db_dir": "data/upload/progress_db",
+      "progress_runs_path": "data/upload/progress_db/runs_v1.jsonl",
       "host_id": "",
       "hardware_key": ""
     },
@@ -114,12 +114,5 @@
         "repetition_penalty": 1
       }
     }
-  },
-  
-  "asr_blob": {
-    "root": "data/asr_blobs",
-    "ttl_s": 3600,
-    "cleanup_interval_s": 120,
-    "cleanup_max_scan_files": 5000
   }
 }

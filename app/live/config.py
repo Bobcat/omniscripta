@@ -7,8 +7,9 @@ from live.session.manager import LiveSessionManager
 from app.config.settings import get_bool, get_float, get_int, get_setting, get_str
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-LIVE_RECORDINGS_ROOT = (_REPO_ROOT / "data" / "live_recordings").resolve()
-LIVE_BENCHMARK_EXPORT_ROOT = (_REPO_ROOT / "data" / "live_benchmark_exports").resolve()
+LIVE_ROOT = (_REPO_ROOT / "data" / "live").resolve()
+LIVE_RECORDINGS_ROOT = (LIVE_ROOT / "recordings").resolve()
+LIVE_BENCHMARK_EXPORT_ROOT = (LIVE_ROOT / "benchmark_exports").resolve()
 
 
 def _get_optional_setting_str(path: str) -> str | None:

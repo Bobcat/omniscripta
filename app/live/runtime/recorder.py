@@ -74,7 +74,7 @@ class LiveWavRecorder:
         self.sample_rate_hz = int(max(1, sample_rate_hz))
         self.channels = int(max(1, channels))
         self.recordings_root = (
-            recordings_root if recordings_root is not None else (_repo_root() / "data" / "live_recordings")
+            recordings_root if recordings_root is not None else (_repo_root() / "data" / "live" / "recordings")
         ).resolve()
 
         safe_id = _safe_session_id(self.session_id)
