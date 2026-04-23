@@ -4,9 +4,8 @@ set -euo pipefail
 # Restart the full prod backend stack in a stable order and wait for key HTTP endpoints.
 # If not run as root, this script uses sudo for system-level units.
 
-API_UNIT="transcribe-api.service"
-# ASR_UNIT="transcribe-asr-pool.service"
-BATCH_WORKER_UNIT="asr-worker-batch.service"
+API_UNIT="omniscripta-api.service"
+BATCH_WORKER_UNIT="asr-worker.service"
 LLM_WORKER_UNIT="llm-worker.service"
 
 API_HEALTH_URL="http://127.0.0.1:8000/health"
@@ -79,7 +78,6 @@ print_status() {
 
 log "Restarting API..."
 systemctl_live restart "$API_UNIT"
-# systemctl_live restart "$API_UNIT" "$ASR_UNIT"
 
 log "Waiting for API health..."
 wait_for_http "$API_HEALTH_URL" "$API_READY_TIMEOUT_S" "API health" "200"

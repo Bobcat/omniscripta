@@ -1,0 +1,16 @@
+# /etc/systemd/system/asr-pool-dc2-tunnel.service
+[Unit]
+Description=ASR Pool dc2 tunnel (dc1:8090 -> dc2:18090)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gunnar
+Group=gunnar
+ExecStart=/usr/bin/ssh -N -L 127.0.0.1:8090:127.0.0.1:18090 gunnar@dc2 -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

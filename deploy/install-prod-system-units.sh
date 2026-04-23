@@ -22,9 +22,10 @@ install_unit() {
   printf 'installed %s\n' "$UNIT_DIR/$dst_name"
 }
 
-install_unit "$TRANSCRIBE_REPO_ROOT/deploy/systemd/transcribe-api.service"
+install_unit "$TRANSCRIBE_REPO_ROOT/deploy/systemd/omniscripta-api.service"
 install_unit "$TRANSCRIBE_REPO_ROOT/deploy/systemd/llm-worker.service"
-install_unit "$ASR_WORKER_REPO_ROOT/deploy/systemd/asr-worker-batch.service"
+install_unit "$TRANSCRIBE_REPO_ROOT/deploy/systemd/asr-pool-dc2-tunnel.service"
+install_unit "$ASR_WORKER_REPO_ROOT/deploy/systemd/asr-worker.service"
 
 $SUDO systemctl daemon-reload
 printf 'reloaded systemd units\n'

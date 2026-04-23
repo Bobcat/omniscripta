@@ -1,6 +1,6 @@
-# /etc/systemd/system/transcribe-api.service
+# /etc/systemd/system/omniscripta-api.service
 [Unit]
-Description=Transcribe Portal API (FastAPI/Uvicorn)
+Description=Omniscripta Portal API (FastAPI/Uvicorn)
 After=network.target
 
 [Service]
