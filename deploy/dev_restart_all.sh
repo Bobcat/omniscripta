@@ -4,11 +4,11 @@ set -euo pipefail
 # Restart the full dev stack in a stable order and wait for key HTTP endpoints.
 # This guarantees fresh processes for all involved services.
 
-API_UNIT="transcribe-api-dev.service"
-ASR_UNIT="transcribe-asr-pool-dev.service"
-BATCH_WORKER_UNIT="asr-worker-batch-dev@1.service"
+API_UNIT="omniscripta-api-dev.service"
+ASR_UNIT="asr-pool-dev.service"
+BATCH_WORKER_UNIT="asr-worker-dev@1.service"
 LLM_WORKER_UNIT="llm-worker-dev@1.service"
-FRONTEND_UNIT="transcribe-frontend-dev.service"
+FRONTEND_UNIT="omniscripta-frontend-dev.service"
 
 API_HEALTH_URL="http://127.0.0.1:8001/health"
 ASR_POOL_URL="http://127.0.0.1:18090/asr/v1/pool"

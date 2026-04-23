@@ -1,7 +1,7 @@
 [Unit]
-Description=Transcribe Dev Frontend + /api Proxy
-After=transcribe-api-dev.service
-Requires=transcribe-api-dev.service
+Description=Omniscripta Dev Frontend + /api Proxy
+After=omniscripta-api-dev.service
+Requires=omniscripta-api-dev.service
 
 [Service]
 EnvironmentFile=-/home/gunnar/.config/transcribe/dev.env

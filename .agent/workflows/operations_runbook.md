@@ -8,12 +8,12 @@ description: Canonical workflow for Omniscripta frontend + Transcribe backend (p
 
 1. If frontend changed, deploy to dev static target:
 ```bash
-/var/www/omniscripta-app/deploy-dev.sh
+/var/www/omniscripta-ui/deploy/deploy-dev.sh
 ```
 
 2. Verify server-side dev services on `dc1`:
 ```bash
-systemctl --user --no-pager status transcribe-api-dev.service transcribe-asr-pool-dev.service transcribe-frontend-dev.service asr-worker-batch-dev@1.service llm-worker-dev@1.service
+systemctl --user --no-pager status omniscripta-api-dev.service asr-pool-dev.service omniscripta-frontend-dev.service asr-worker-dev@1.service llm-worker-dev@1.service
 ```
 
 3. If you changed backend code and want the full dev stack fresh:
@@ -32,9 +32,9 @@ systemctl --user --no-pager status transcribe-api-dev.service transcribe-asr-poo
 
 ## 1) Repositories and Roles
 
-1. **Frontend source repo**: `/var/www/omniscripta-app`
+1. **Frontend source repo**: `/var/www/omniscripta-ui`
    - Edit UI/UX and editor logic here (`index.html`, `js/*`, `css/*`).
-   - Deploy scripts are in this repo: `deploy.sh` (prod), `deploy-dev.sh` (dev static target).
+   - Deploy scripts are in this repo under `deploy/`: `deploy/deploy.sh` (prod), `deploy/deploy-dev.sh` (dev static target).
 
 2. **Prod repos on `dc1`**
    - `/srv/omniscripta` - production Omniscripta backend/API, LLM worker, deploy scripts, static files.
@@ -48,11 +48,11 @@ systemctl --user --no-pager status transcribe-api-dev.service transcribe-asr-poo
    - Separate data/config paths from prod.
 
 4. **Standalone ASR pool repo**: `~/projects/asr-pool-dev`
-   - Source for dev ASR pool service (`transcribe-asr-pool-dev.service`).
+   - Source for dev ASR pool service (`asr-pool-dev.service`).
    - Keep ASR pool runtime/config changes here.
 
 5. **Standalone ASR worker repo**: `~/projects/asr-worker-dev`
-   - Source for the dev batch worker service (`asr-worker-batch-dev@1.service`).
+   - Source for the dev batch worker service (`asr-worker-dev@1.service`).
    - Keep ASR worker runtime/config changes here.
 
 6. **Standalone ASR pool client repo**: `~/projects/asr-pool-api-dev`
@@ -78,7 +78,7 @@ systemctl --user --no-pager status transcribe-api-dev.service transcribe-asr-poo
 - ASR worker env file: `/etc/asr-worker/asr-worker.env`
 - Tabby tunnel service: `transcribe-tabby-tunnel.service`
 - Frontend static target: `/srv/omniscripta/static` (served by nginx)
-- Worker queue root: `/srv/omniscripta/data/jobs/upload_worker`
+- Worker queue root: `/srv/omniscripta/data/upload/jobs/worker`
 - API `/ops` on prod uses the local systemd drop-in `/etc/systemd/system/transcribe-api.service.d/ops-env.conf` so it points at the prod pool access path on `:8090` and worker ops `:28111`.
 - Note: on `dc1`, prod consumers talk to the prod ASR pool through the configured dc1->dc2 access path; `dc1` does not run the pool process locally.
 - Note: current prod `main` still runs the legacy internal layout. Installing the repo-backed prod units from the current dev branch only becomes valid after the prod Omniscripta checkout has been promoted to the `app/` + `workers/llm` layout and `/srv/realtime-asr-engine` exists as a sibling checkout.
@@ -88,14 +88,13 @@ systemctl --user --no-pager status transcribe-api-dev.service transcribe-asr-poo
 - ASR pool backend root: `~/projects/asr-pool-dev`
 - ASR worker backend root: `~/projects/asr-worker-dev`
 - ASR pool client root: `~/projects/asr-pool-api-dev`
-- API service: `transcribe-api-dev.service` (127.0.0.1:8001)
-- ASR pool service: `transcribe-asr-pool-dev.service` (127.0.0.1:18090)
-- Worker service template: `asr-worker-batch-dev@.service`
+- API service: `omniscripta-api-dev.service` (127.0.0.1:8001)
+- ASR pool service: `asr-pool-dev.service` (127.0.0.1:18090)
+- Worker service template: `asr-worker-dev@.service`
 - LLM worker service template: `llm-worker-dev@.service`
-- Janitor timer: `transcribe-demo-jobs-janitor-dev.timer`
-- Frontend proxy service: `transcribe-frontend-dev.service` (127.0.0.1:8010)
+- Frontend proxy service: `omniscripta-frontend-dev.service` (127.0.0.1:8010)
 - API/LLM/frontend env file: `~/.config/transcribe/dev.env`
-- ASR pool env file: `~/.config/asr-pool/asr-pool.env`
+- ASR pool env file: `~/.config/asr-pool-dev/dev.env`
 - ASR worker env file: `~/.config/asr-worker/asr-worker.dev.env`
 - Dev frontend static target: `~/projects/omniscripta/static`
 - Note: dev API code now lives under `~/projects/omniscripta/app`, the LLM worker code now lives under `~/projects/omniscripta/workers/llm`, and the live engine resolves `realtime_asr_engine` from the sibling checkout at `~/projects/realtime-asr-engine/src`. The dev API service still uses the legacy venv at `/srv/omniscripta/portal-api/.venv`, and `llm-worker-dev@.service` still uses `/srv/omniscripta/worker/.venv`.
@@ -104,8 +103,8 @@ systemctl --user --no-pager status transcribe-api-dev.service transcribe-asr-poo
 ### Shared client library
 - Dev consumers now import `asr_pool_api` from the dedicated dev repo `~/projects/asr-pool-api-dev`.
 - Dev resolution is service-scoped, not code-scoped:
-  1. `transcribe-api-dev.service` sets `PYTHONPATH=~/projects/asr-pool-api-dev/src`
-  2. `asr-worker-batch-dev@.service` sets `PYTHONPATH=~/projects/asr-pool-api-dev/src`
+  1. `omniscripta-api-dev.service` sets `PYTHONPATH=~/projects/asr-pool-api-dev/src`
+  2. `asr-worker-dev@.service` sets `PYTHONPATH=~/projects/asr-pool-api-dev/src`
 - Operational consequence:
   - You can iterate on `asr-pool-api-dev` without modifying prod services or prod consumer checkouts.
 - Note:
@@ -125,53 +124,42 @@ systemctl --user --no-pager status transcribe-api-dev.service transcribe-asr-poo
 
 From `~/projects/omniscripta`:
 
-1. Dev full start:
-```bash
-~/projects/omniscripta/deploy/dev_start_all.sh
-```
-
-2. Dev full restart:
+1. Dev full restart:
 ```bash
 ~/projects/omniscripta/deploy/dev_restart_all.sh
 ```
 
-3. Prod full start:
-```bash
-~/projects/omniscripta/deploy/live_start_all.sh
-```
-
-4. Prod full restart:
+2. Prod full restart:
 ```bash
 ~/projects/omniscripta/deploy/live_restart_all.sh
 ```
 
-5. Install repo-backed dev user units:
+3. Install repo-backed dev user units:
 ```bash
 ~/projects/omniscripta/deploy/install-dev-user-units.sh
 ```
 
-6. Install repo-backed prod system units on `dc1`:
+4. Install repo-backed prod system units on `dc1`:
 ```bash
 ~/projects/omniscripta/deploy/install-prod-system-units.sh
 ```
 
 These scripts are the current canonical stack-control and unit-sync entry points.
-Current gap: `transcribe-asr-pool-dev.service` is not yet installed by `install-dev-user-units.sh` because `asr-pool-dev` does not currently track a matching source file under `deploy/systemd/`.
 Current scope limit: `install-prod-system-units.sh` installs the `dc1` prod consumer units only; it does not manage the remote prod ASR pool runtime on `dc2`.
 
 ## 5) Deploy Scripts
 
-From `/var/www/omniscripta-app`:
+From `/var/www/omniscripta-ui`:
 
 1. Prod deploy:
 ```bash
-/var/www/omniscripta-app/deploy.sh
+/var/www/omniscripta-ui/deploy/deploy.sh
 ```
 - Builds frontend bundle and deploys to `/srv/omniscripta/static`.
 
 2. Dev deploy:
 ```bash
-/var/www/omniscripta-app/deploy-dev.sh
+/var/www/omniscripta-ui/deploy/deploy-dev.sh
 ```
 - Builds frontend bundle and deploys to `~/projects/omniscripta/static`.
 
@@ -180,10 +168,10 @@ From `/var/www/omniscripta-app`:
 ### On server (`dc1`) - user services
 
 ```bash
-systemctl --user enable --now transcribe-api-dev.service
-systemctl --user enable --now transcribe-asr-pool-dev.service
-systemctl --user enable --now transcribe-frontend-dev.service
-systemctl --user enable --now asr-worker-batch-dev@1.service
+systemctl --user enable --now omniscripta-api-dev.service
+systemctl --user enable --now asr-pool-dev.service
+systemctl --user enable --now omniscripta-frontend-dev.service
+systemctl --user enable --now asr-worker-dev@1.service
 systemctl --user enable --now llm-worker-dev@1.service
 ```
 
@@ -289,7 +277,7 @@ These are also user services on your other computer, never on `dc1`.
 
 ### Prod
 
-1. Omniscripta API / LLM worker / janitor:
+1. Omniscripta API / LLM worker:
    - `/etc/transcribe/transcribe.env`
    - This is also where prod Tabby-related values are stored.
 
@@ -301,7 +289,7 @@ These are also user services on your other computer, never on `dc1`.
 
 ### Dev
 
-1. Omniscripta API / frontend proxy / LLM worker / janitor:
+1. Omniscripta API / frontend proxy / LLM worker:
    - `~/.config/transcribe/dev.env`
 
 2. ASR pool:
@@ -312,17 +300,17 @@ These are also user services on your other computer, never on `dc1`.
 
 4. Dev key quick set for the transcribe-side env:
 ```bash
-mkdir -p ~/.config/transcribe && printf 'TABBY_API_KEY=VUL_HIER_DE_KEY_IN\n' > ~/.config/transcribe/dev.env && chmod 600 ~/.config/transcribe/dev.env && systemctl --user restart asr-worker-batch-dev@1.service llm-worker-dev@1.service
+mkdir -p ~/.config/transcribe && printf 'TABBY_API_KEY=VUL_HIER_DE_KEY_IN\n' > ~/.config/transcribe/dev.env && chmod 600 ~/.config/transcribe/dev.env && systemctl --user restart asr-worker-dev@1.service llm-worker-dev@1.service
 ```
 
 ## 9) Golden Rules
 
-1. Build frontend in `/var/www/omniscripta-app`, never in `/srv/omniscripta/static`.
+1. Build frontend in `/var/www/omniscripta-ui`, never in `/srv/omniscripta/static`.
 2. Do API/LLM backend development in `~/projects/omniscripta`, not in `/srv/omniscripta`.
 3. Do ASR pool development in `~/projects/asr-pool-dev`, not on the prod runtime host/process.
 4. Do ASR worker development in `~/projects/asr-worker-dev`, not in `/srv/asr-worker`.
-5. Use `deploy.sh` only for prod release.
-6. Use `deploy-dev.sh` for dev-backend testing.
+5. Use `deploy/deploy.sh` only for prod release.
+6. Use `deploy/deploy-dev.sh` for dev-backend testing.
 7. Keep both frontend tunnel paths available (`8080` prod and `18010` dev) for fast A/B validation.
 8. Keep dev and prod observability tunnels separate; batch worker ops use `18111` and `28111` on purpose.
 9. In dev repos, do all development on `dev/*` branches (`dev/omniscripta`, `dev/asr-pool-dev`, `dev/asr-worker-dev`); use `main` only for controlled merge/release steps.

@@ -20,16 +20,16 @@ install_unit() {
 
 mkdir -p "$UNIT_DIR"
 
-install_unit "$TRANSCRIBE_REPO_ROOT/deploy/systemd/transcribe-api-dev.service"
-install_unit "$TRANSCRIBE_REPO_ROOT/deploy/systemd/transcribe-frontend-dev.service"
+install_unit "$TRANSCRIBE_REPO_ROOT/deploy/systemd/omniscripta-api-dev.service"
+install_unit "$TRANSCRIBE_REPO_ROOT/deploy/systemd/omniscripta-frontend-dev.service"
 install_unit "$TRANSCRIBE_REPO_ROOT/deploy/systemd/llm-worker-dev@.service"
-install_unit "$ASR_WORKER_REPO_ROOT/deploy/systemd/asr-worker-batch-dev@.service"
+install_unit "$ASR_WORKER_REPO_ROOT/deploy/systemd/asr-worker-dev@.service"
 
-if [[ -f "$ASR_POOL_REPO_ROOT/deploy/systemd/transcribe-asr-pool-dev.service" ]]; then
-  install_unit "$ASR_POOL_REPO_ROOT/deploy/systemd/transcribe-asr-pool-dev.service"
+if [[ -f "$ASR_POOL_REPO_ROOT/deploy/systemd/asr-pool-dev.service" ]]; then
+  install_unit "$ASR_POOL_REPO_ROOT/deploy/systemd/asr-pool-dev.service"
 else
-  printf 'note: skipped transcribe-asr-pool-dev.service; no tracked source file at %s\n' \
-    "$ASR_POOL_REPO_ROOT/deploy/systemd/transcribe-asr-pool-dev.service" >&2
+  printf 'note: skipped asr-pool-dev.service; no tracked source file at %s\n' \
+    "$ASR_POOL_REPO_ROOT/deploy/systemd/asr-pool-dev.service" >&2
 fi
 
 systemctl --user daemon-reload
