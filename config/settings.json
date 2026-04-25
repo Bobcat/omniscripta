@@ -82,8 +82,6 @@
       "worker_base": "data/upload/jobs/worker"
     },
     "worker": {
-      "progress_db_dir": "data/upload/progress_db",
-      "progress_runs_path": "data/upload/progress_db/runs_v1.jsonl",
       "host_id": "",
       "hardware_key": ""
     },

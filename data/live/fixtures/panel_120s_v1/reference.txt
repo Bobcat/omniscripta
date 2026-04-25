@@ -1,0 +1,29 @@
+Andrew, I know you do a lot of vibe coding.
+How do you feel about how it has evolved?
+And particularly now, in some ways, I see a spirit of we can start with ideas instead of starting necessarily with code or technical specs.
+But I have very mixed feelings about the term vibe coding.
+I know it's taken off.
+Maybe it is the term we're stuck with.
+But I think it's led a lot of people to think, oh, just go with the vibes and accept all the changes in Cursa.
+But it's not like that, right?
+I think after half a day of coding of AI, I'm mentally exhausted.
+So I have very mixed feelings about that term.
+I tend to call it AI coding these days.
+And maybe I actually have a...
+A lot of my teams use lovable v0 and so on.
+There's actually one interesting thing I've seen, which is among people entering software coding for the first time, I see a little bit of sometimes insecurity, maybe imposter syndrome.
+I actually have a request to make of all of you.
+So this lesson I learned in the early days of machine learning, which is,
+Not a single time did I ever see any senior machine learning person go to a junior person and say, the work you did, that's not actually machine learning.
+I have seen that like zero times in my career.
+So what I saw, one of the reasons I think machine learning AI won, why it took off, was because
+If you want to call yourself a machine learning person, good enough for me.
+You're one of us.
+And what I hope we can do is when we see someone that's not an official developer, if they're writing code, hey, if they want to call themselves a developer, good enough for me.
+They're one of us.
+And I find that it's that really embracing, welcoming community where you go to all of these people that, you know,
+did not have a CS degree or whatever.
+And I actually routinely go to my team and they did something lovable.
+I routinely go and say, congrats, you're now one of us.
+And I hope we can keep doing that and just embrace everyone to get everyone to code.
+Yeah, maybe also to add to both of what you said is that one of the big difference of the current generation tools that are based on AI versus the last generation of low-code, no-code tools was that with them, you as a non-developer could get really far and then
