@@ -184,3 +184,61 @@ LIVE_ROLLING_CONTEXT_CONFIG_KEYS = (
 def live_engine_rolling_context_config() -> dict[str, Any]:
     module_globals = globals()
     return {key: module_globals[key] for key in LIVE_ROLLING_CONTEXT_CONFIG_KEYS}
+
+
+def live_benchmark_tuning_snapshot() -> dict[str, Any]:
+    return {
+        "engine": str(LIVE_ENGINE),
+        "audio": {
+            "sample_rate_hz": int(LIVE_AUDIO_SAMPLE_RATE_HZ),
+            "channels": int(LIVE_AUDIO_CHANNELS),
+            "sample_width_bytes": int(LIVE_AUDIO_SAMPLE_WIDTH_BYTES),
+        },
+        "asr": {
+            "language": LIVE_ASR_LANGUAGE,
+            "beam_size": LIVE_ASR_BEAM_SIZE,
+            "chunk_size": LIVE_ASR_CHUNK_SIZE,
+            "backend": LIVE_ASR_BACKEND,
+            "diarize_enabled": bool(LIVE_DIARIZE_ENABLED),
+            "diarize_speaker_mode": str(LIVE_DIARIZE_SPEAKER_MODE),
+            "diarize_min_speakers": int(LIVE_DIARIZE_MIN_SPEAKERS),
+            "diarize_max_speakers": int(LIVE_DIARIZE_MAX_SPEAKERS),
+        },
+        "timing": {
+            "emit_min_ms": int(LIVE_ROLLING_MIN_EMIT_INTERVAL_MS),
+            "drain_wait_s": float(LIVE_DRAIN_WAIT_S),
+            "post_close_wait_s": float(LIVE_POST_CLOSE_WAIT_S),
+        },
+        "rolling": {
+            "min_infer_audio_ms": int(LIVE_ROLLING_MIN_INFER_AUDIO_MS),
+            "min_new_audio_ms": int(LIVE_ROLLING_MIN_NEW_AUDIO_MS),
+            "max_decode_window_ms": int(LIVE_ROLLING_MAX_DECODE_WINDOW_MS),
+            "single_segment_commit_min_ms": int(LIVE_ROLLING_SINGLE_COMMIT_MIN_MS),
+            "force_commit_repeats": int(LIVE_ROLLING_FORCE_COMMIT_REPEATS),
+            "max_uncommitted_ms": int(LIVE_ROLLING_MAX_UNCOMMITTED_MS),
+            "hard_clip_keep_tail_ms": int(LIVE_ROLLING_HARD_CLIP_KEEP_TAIL_MS),
+            "buffer_trim_threshold_ms": int(LIVE_ROLLING_BUFFER_TRIM_THRESHOLD_MS),
+            "buffer_trim_drop_ms": int(LIVE_ROLLING_BUFFER_TRIM_DROP_MS),
+            "pacing": {
+                "base_emit_ms": int(LIVE_ROLLING_PACING_BASE_EMIT_MS),
+                "startup_duration_ms": int(LIVE_ROLLING_PACING_STARTUP_DURATION_MS),
+                "startup_emit_ms": int(LIVE_ROLLING_PACING_STARTUP_EMIT_MS),
+                "startup_min_infer_audio_ms": int(LIVE_ROLLING_PACING_STARTUP_MIN_INFER_AUDIO_MS),
+                "startup_min_new_audio_ms": int(LIVE_ROLLING_PACING_STARTUP_MIN_NEW_AUDIO_MS),
+            },
+            "vad": {
+                "enabled": bool(LIVE_ROLLING_VAD_ENABLED),
+                "venv": LIVE_ROLLING_VAD_VENV,
+                "threshold": float(LIVE_ROLLING_VAD_THRESHOLD),
+                "max_speech_duration_s": float(LIVE_ROLLING_VAD_MAX_SPEECH_DURATION_S),
+                "min_speech_ms": int(LIVE_ROLLING_VAD_MIN_SPEECH_MS),
+                "hangover_ms": int(LIVE_ROLLING_VAD_HANGOVER_MS),
+            },
+            "speech_gate": {
+                "silence_enter_ms": int(LIVE_ROLLING_SPEECH_GATE_SILENCE_ENTER_MS),
+                "rearm_hits": int(LIVE_ROLLING_SPEECH_GATE_REARM_HITS),
+                "rearm_window_ms": int(LIVE_ROLLING_SPEECH_GATE_REARM_WINDOW_MS),
+                "force_commit_silence_ms": int(LIVE_ROLLING_SPEECH_GATE_FORCE_COMMIT_SILENCE_MS),
+            },
+        },
+    }

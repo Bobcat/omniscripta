@@ -191,3 +191,70 @@ def try_autosave_live_benchmark_snapshot(
         )
     except Exception as e:
         print(f"[live-benchmark-autosave] failed {artifact_name} session={session_id}: {type(e).__name__}: {e}")
+
+
+def _read_json_file(path: Path) -> dict[str, Any] | None:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def _flatten_live_benchmark_record(record: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(record.get("payload") or {})
+    quality = dict(payload.get("quality") or {})
+    score = dict(quality.get("score") or {})
+    run = dict(quality.get("run_metrics") or {})
+    request_meta = dict(record.get("request_meta") or {})
+    tuning = dict(request_meta.get("live_tuning_snapshot") or {})
+
+    return {
+        "session_id": str(record.get("session_id") or payload.get("session_id") or ""),
+        "saved_at_utc": str(record.get("saved_at_utc") or ""),
+        "fixture_id": str(payload.get("fixture_id") or ""),
+        "fixture_test_mode": str(request_meta.get("fixture_test_mode") or ""),
+        "fixture_version": str(request_meta.get("fixture_version") or ""),
+        "score": score.get("upload_similarity_score"),
+        "word_edit_distance": score.get("word_edit_distance"),
+        "word_count_live": score.get("word_count_live"),
+        "word_count_reference": score.get("word_count_reference"),
+        "recording_duration_ms": int(run.get("recording_duration_ms") or 0),
+        "transcript_revision": int(run.get("transcript_revision") or 0),
+        "chunks_total": int(run.get("chunks_total") or 0),
+        "chunks_done": int(run.get("chunks_done") or 0),
+        "chunks_failed": int(run.get("chunks_failed") or 0),
+        "chunks_pending": int(run.get("chunks_pending") or 0),
+        "final_segments_count": int(run.get("final_segments_count") or 0),
+        "chunk_reason_counts": (
+            dict(run.get("chunk_reason_counts"))
+            if isinstance(run.get("chunk_reason_counts"), dict)
+            else {}
+        ),
+        "gpu_proxy_transcribe_total_s": run.get("gpu_proxy_transcribe_total_s"),
+        "gpu_proxy_pipeline_total_s": run.get("gpu_proxy_pipeline_total_s"),
+        "live_tuning_snapshot": tuning,
+    }
+
+
+def list_live_benchmark_exports(
+    *,
+    limit: int = 30,
+    fixture_test_mode: str | None = None,
+) -> list[dict[str, Any]]:
+    safe_limit = int(max(1, min(200, int(limit))))
+    wanted_mode = str(fixture_test_mode or "").strip().lower()
+    rows: list[dict[str, Any]] = []
+
+    for path in sorted(LIVE_BENCHMARK_EXPORT_ROOT.glob("*.final-quality.latest.json"), reverse=True):
+        record = _read_json_file(path)
+        if not record:
+            continue
+        flat = _flatten_live_benchmark_record(record)
+        mode = str(flat.get("fixture_test_mode") or "").strip().lower()
+        if wanted_mode and mode != wanted_mode:
+            continue
+        rows.append(flat)
+        if len(rows) >= safe_limit:
+            break
+    return rows

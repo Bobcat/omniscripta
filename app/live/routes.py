@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Dict
 from urllib.parse import urlparse
 
@@ -8,6 +9,7 @@ from fastapi.responses import FileResponse, Response
 
 from live.results.exports import (
     build_live_result_envelope,
+    list_live_benchmark_exports,
     live_pc_events_to_text,
     live_recording_wav_path_from_result,
     live_result_to_plain_text,
@@ -21,6 +23,7 @@ from live.config import (
     LIVE_AUDIO_SAMPLE_RATE_HZ,
     LIVE_ENGINE,
     LIVE_SESSIONS,
+    live_benchmark_tuning_snapshot,
     live_engine_rolling_context_config,
     rooted_path,
 )
@@ -231,6 +234,11 @@ def get_live_session_quality(session_id: str, fixture_id: str | None = None) -> 
         session_id=str(session_id),
         artifact_name="final-quality",
         envelope=envelope,
+        request_meta={
+            "fixture_test_mode": str(result.get("fixture_test_mode") or ""),
+            "fixture_version": str(result.get("fixture_version") or ""),
+            "live_tuning_snapshot": live_benchmark_tuning_snapshot(),
+        },
     )
     return envelope
 
@@ -283,6 +291,22 @@ def get_live_metrics() -> Dict[str, Any]:
         "protocol_version": PROTOCOL_VERSION,
         "live_engine": LIVE_ENGINE,
         "metrics": LIVE_SESSIONS.metrics_payload(),
+    }
+
+
+@router.get("/demo/live/benchmarks")
+def get_live_benchmarks(limit: int = 30, mode: str | None = None) -> Dict[str, Any]:
+    normalized_mode = str(mode or "").strip().lower()
+    if normalized_mode and normalized_mode not in {"inject", "playback"}:
+        raise HTTPException(status_code=400, detail="mode must be inject or playback")
+    return {
+        "protocol_version": PROTOCOL_VERSION,
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "current_tuning_snapshot": live_benchmark_tuning_snapshot(),
+        "rows": list_live_benchmark_exports(
+            limit=limit,
+            fixture_test_mode=(normalized_mode or None),
+        ),
     }
 
 
