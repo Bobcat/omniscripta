@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict
 
-from live.config import LIVE_BENCHMARK_EXPORT_ROOT, LIVE_RECORDINGS_ROOT
+from live.config import LIVE_BENCHMARK_EXPORT_ROOT, LIVE_ENGINE, LIVE_RECORDINGS_ROOT
 
 
 def _format_srt_timestamp(ms: int) -> str:

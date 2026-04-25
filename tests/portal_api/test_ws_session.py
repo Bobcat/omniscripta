@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import sys
 import types
 import unittest
@@ -80,6 +81,7 @@ if "app.config.settings" not in sys.modules:
     sys.modules["app.config.settings"] = app_config_stub
 
 from live import config as live_config
+from live.results.exports import build_live_result_envelope
 from live.runtime import ws_session
 from live.session.manager import LiveSessionManager
 
@@ -170,21 +172,27 @@ class WebSocketSessionTests(unittest.TestCase):
 
         self.assertEqual(websocket.payloads, [{"type": "ready"}])
 
-    def test_result_envelope_marks_rolling_context_ready_only_for_ready_or_finalized(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            wav_path = Path(tmpdir) / "recording.wav"
+    def test_result_envelope_marks_recording_finalized_not_ready(self) -> None:
+        recordings_root = live_config.LIVE_RECORDINGS_ROOT
+        recordings_root.mkdir(parents=True, exist_ok=True)
+        wav_path = recordings_root / "test_result_envelope_marks_recording_finalized_not_ready.wav"
+        try:
             wav_path.write_bytes(b"RIFF")
             session = self._session()
 
-            envelope = session._result_envelope_from_payload(
-                {
+            envelope = build_live_result_envelope(
+                session_id=session.session_id,
+                result_payload={
                     "finalization_state": "recording_finalized",
                     "final_segments": [{"text": "hello", "t0_ms": 0, "t1_ms": 100}],
                     "recording_path": str(wav_path),
                     "pc_events_count": 1,
                 },
-                live_engine="rolling_context",
+                rooted_path_cb=session.rooted_path_cb,
             )
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                wav_path.unlink()
 
         self.assertEqual(envelope["live_engine"], "rolling_context")
         self.assertFalse(envelope["ready"])
@@ -195,22 +203,23 @@ class WebSocketSessionTests(unittest.TestCase):
         self.assertEqual(envelope["recording_wav_url"], "/api/demo/live/sessions/session-1/recording.wav")
         self.assertEqual(envelope["transcript_pc_url"], "/api/demo/live/sessions/session-1/transcript.pc")
 
-    def test_result_envelope_keeps_non_rolling_ready_state_behavior(self) -> None:
+    def test_result_envelope_keeps_payload_live_engine_when_present(self) -> None:
         session = self._session()
 
-        envelope = session._result_envelope_from_payload(
-            {
+        envelope = build_live_result_envelope(
+            session_id=session.session_id,
+            result_payload={
                 "live_engine": "other_engine",
                 "finalization_state": "recording_finalized",
                 "final_segments": [],
                 "recording_path": "/definitely/missing.wav",
                 "pc_events_count": 0,
             },
-            live_engine="rolling_context",
+            rooted_path_cb=session.rooted_path_cb,
         )
 
         self.assertEqual(envelope["live_engine"], "other_engine")
-        self.assertTrue(envelope["ready"])
+        self.assertFalse(envelope["ready"])
         self.assertFalse(envelope["can_export_srt"])
         self.assertFalse(envelope["can_export_wav"])
         self.assertFalse(envelope["can_export_pc"])
@@ -222,11 +231,12 @@ class WebSocketSessionTests(unittest.TestCase):
         config = live_config.live_engine_rolling_context_config()
         session = self._session(config=config)
 
-        ctx = session._configure_context()
+        session._configure_context()
         runner = session.rt.runner
 
-        self.assertEqual(ctx["audio_format"].bytes_per_second, config["LIVE_AUDIO_BYTES_PER_SECOND"])
         self.assertIsNotNone(runner)
+        self.assertEqual(runner.audio_format.bytes_per_second, config["LIVE_AUDIO_BYTES_PER_SECOND"])
+        self.assertEqual(session._ctx["LIVE_AUDIO_SAMPLE_RATE_HZ"], config["LIVE_AUDIO_SAMPLE_RATE_HZ"])
         self.assertEqual(runner.settings.pacing.min_emit_interval_ms, config["LIVE_ROLLING_MIN_EMIT_INTERVAL_MS"])
 
     def test_configure_context_normalizes_rolling_settings_via_package(self) -> None:
