@@ -1,0 +1,29 @@
+(SPEAKER_01, 00:08:09-00:08:12) Andrew, I know you do a lot of vibe coding.
+(SPEAKER_01, 00:08:12-00:08:15) How do you feel about how it has evolved?
+(SPEAKER_01, 00:08:15-00:08:23) And particularly now, in some ways, I see a spirit of we can start with ideas instead of starting necessarily with code or technical specs.
+(SPEAKER_00, 00:08:23-00:08:29) But I have very mixed feelings about the term vibe coding.
+(SPEAKER_00, 00:08:29-00:08:30) I know it's taken off.
+(SPEAKER_00, 00:08:30-00:08:31) Maybe it is the term we're stuck with.
+(SPEAKER_00, 00:08:31-00:08:35) But I think it's led a lot of people to think, oh, just go with the vibes and accept all the changes in Cursa.
+(SPEAKER_00, 00:08:35-00:08:40) But it's not like that, right?
+(SPEAKER_00, 00:08:40-00:08:43) I think after half a day of coding of AI, I'm mentally exhausted.
+(SPEAKER_00, 00:08:43-00:08:46) So I have very mixed feelings about that term.
+(SPEAKER_00, 00:08:46-00:08:47) I tend to call it AI coding these days.
+(SPEAKER_00, 00:08:47-00:08:49) And maybe I actually have a...
+(SPEAKER_00, 00:08:49-00:08:53) A lot of my teams use lovable v0 and so on.
+(SPEAKER_00, 00:08:53-00:09:04) There's actually one interesting thing I've seen, which is among people entering software coding for the first time, I see a little bit of sometimes insecurity, maybe imposter syndrome.
+(SPEAKER_00, 00:09:04-00:09:06) I actually have a request to make of all of you.
+(SPEAKER_00, 00:09:06-00:09:09) So this lesson I learned in the early days of machine learning, which is,
+(SPEAKER_00, 00:09:09-00:09:18) Not a single time did I ever see any senior machine learning person go to a junior person and say, the work you did, that's not actually machine learning.
+(SPEAKER_00, 00:09:18-00:09:21) I have seen that like zero times in my career.
+(SPEAKER_00, 00:09:21-00:09:25) So what I saw, one of the reasons I think machine learning AI won, why it took off, was because
+(SPEAKER_00, 00:09:25-00:09:28) If you want to call yourself a machine learning person, good enough for me.
+(SPEAKER_00, 00:09:28-00:09:29) You're one of us.
+(SPEAKER_00, 00:09:29-00:09:39) And what I hope we can do is when we see someone that's not an official developer, if they're writing code, hey, if they want to call themselves a developer, good enough for me.
+(SPEAKER_00, 00:09:39-00:09:40) They're one of us.
+(SPEAKER_00, 00:09:40-00:09:45) And I find that it's that really embracing, welcoming community where you go to all of these people that, you know,
+(SPEAKER_00, 00:09:45-00:09:48) did not have a CS degree or whatever.
+(SPEAKER_00, 00:09:48-00:09:52) And I actually routinely go to my team and they did something lovable.
+(SPEAKER_00, 00:09:52-00:09:55) I routinely go and say, congrats, you're now one of us.
+(SPEAKER_00, 00:09:55-00:10:00) And I hope we can keep doing that and just embrace everyone to get everyone to code.
+(SPEAKER_03, 00:10:00-00:10:16) Yeah, maybe also to add to both of what you said is that one of the big difference of the current generation tools that are based on AI versus the last generation of low-code, no-code tools was that with them, you as a non-developer could get really far and then

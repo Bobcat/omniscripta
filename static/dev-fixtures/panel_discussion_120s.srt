@@ -1,0 +1,109 @@
+1
+00:00:00,632 --> 00:00:02,614
+[SPEAKER_01]: Andrew, I know you do a lot of vibe coding.
+
+2
+00:00:03,375 --> 00:00:05,618
+[SPEAKER_01]: How do you feel about how it has evolved?
+
+3
+00:00:05,678 --> 00:00:13,568
+[SPEAKER_01]: And particularly now, in some ways, I see a spirit of we can start with ideas instead of starting necessarily with code or technical specs.
+
+4
+00:00:14,645 --> 00:00:17,627
+[SPEAKER_02]: But I have very mixed feelings about the term vibe coding.
+
+5
+00:00:18,127 --> 00:00:18,968
+[SPEAKER_02]: I know it's taken off.
+
+6
+00:00:19,168 --> 00:00:20,709
+[SPEAKER_02]: Maybe the term was stuck with.
+
+7
+00:00:20,749 --> 00:00:26,832
+[SPEAKER_02]: But I think it's led a lot of people to think, oh, just go with the vibes and accept all the changes in Cursa.
+
+8
+00:00:26,853 --> 00:00:28,654
+[SPEAKER_02]: But it's not like that, right?
+
+9
+00:00:29,014 --> 00:00:30,535
+[SPEAKER_02]: I think after half a day of...
+
+10
+00:00:30,995 --> 00:00:33,717
+[SPEAKER_02]: coding of AI, I'm mentally exhausted.
+
+11
+00:00:33,817 --> 00:00:35,718
+[SPEAKER_02]: So I have very mixed feelings about that term.
+
+12
+00:00:35,738 --> 00:00:37,219
+[SPEAKER_02]: I tend to call it AI coding these days.
+
+13
+00:00:37,760 --> 00:00:44,184
+[SPEAKER_02]: And maybe I actually have a, you know, listening to, a lot of my teams use lovable v0 and so on.
+
+14
+00:00:44,804 --> 00:00:54,747
+[SPEAKER_02]: There's actually one interesting thing I've seen, which is among people entering software coding for the first time, I see a little bit of sometimes insecurity, maybe imposter syndrome.
+
+15
+00:00:55,187 --> 00:00:56,908
+[SPEAKER_02]: I actually have a request to make of all of you.
+
+16
+00:00:56,968 --> 00:01:00,049
+[SPEAKER_02]: So there's a lesson I learned in the early days of machine learning, which is...
+
+17
+00:01:00,809 --> 00:01:09,037
+[SPEAKER_02]: Not a single time did I ever see any senior machine learning person go to a junior person and say, the work you did, that's not actually machine learning.
+
+18
+00:01:09,157 --> 00:01:11,239
+[SPEAKER_02]: I have seen that like zero times in my career.
+
+19
+00:01:11,900 --> 00:01:19,570
+[SPEAKER_02]: So what I saw, one of the reasons I think machine learning AI won, why it took off, was because if you want to call yourself a machine learning person, good enough for me.
+
+20
+00:01:19,610 --> 00:01:20,291
+[SPEAKER_02]: You're one of us.
+
+21
+00:01:20,491 --> 00:01:25,257
+[SPEAKER_02]: And what I hope we can do is when we see someone that's not an official developer,
+
+22
+00:01:25,817 --> 00:01:36,597
+[SPEAKER_02]: if they're writing code hey if they want to call themselves a developer good enough for me they're they're one of us and i find that is that really embracing welcoming community we go to all of these people that you know
+
+23
+00:01:37,077 --> 00:01:39,038
+[SPEAKER_02]: did not have a CS degree or whatever.
+
+24
+00:01:39,058 --> 00:01:43,040
+[SPEAKER_02]: And I actually routinely go to my team and they did something lovable.
+
+25
+00:01:43,060 --> 00:01:45,982
+[SPEAKER_02]: I routinely go and say, congrats, you're now one of us.
+
+26
+00:01:46,442 --> 00:01:50,825
+[SPEAKER_02]: And I hope we can keep doing that and just embrace everyone to get everyone to code.
+
+27
+00:01:51,612 --> 00:01:59,758
+[SPEAKER_00]: Yeah, maybe also to add to both of what you said is that one of the big difference of the current generation tools that are based on AI versus the last generation of
+
+<!-- OMNISCRIPTA_META: {"topics":[{"n":1,"topic_title":"Evolution of Vibe Coding","topic_description":"Discussion on the evolution of vibe coding and its impact on starting with ideas rather than code or technical specs.","start_time":"00:00:00","end_time":"00:00:14","raw_line":"1 | Evolution of Vibe Coding | Discussion on the evolution of vibe coding and its impact on starting with ideas rather than code or technical specs. | 00:00:00 | 00:00:14"},{"n":2,"topic_title":"Criticism of the Term \"Vibe Coding\"","topic_description":"Critique of the term \"vibe coding\" and its potential to mislead people into accepting changes without proper understanding.","start_time":"00:00:14","end_time":"00:00:37","raw_line":"2 | Criticism of the Term \"Vibe Coding\" | Critique of the term \"vibe coding\" and its potential to mislead people into accepting changes without proper understanding. | 00:00:14 | 00:00:37"},{"n":3,"topic_title":"Personal Experiences with AI Coding","topic_description":"Sharing personal experiences with AI coding, including mental exhaustion and preferred terminology.","start_time":"00:00:37","end_time":"00:00:55","raw_line":"3 | Personal Experiences with AI Coding | Sharing personal experiences with AI coding, including mental exhaustion and preferred terminology. | 00:00:37 | 00:00:55"},{"n":4,"topic_title":"Insecurity and Imposter Syndrome in New Coders","topic_description":"Discussion on the insecurity and imposter syndrome experienced by new coders entering the field.","start_time":"00:00:55","end_time":"00:01:00","raw_line":"4 | Insecurity and Imposter Syndrome in New Coders | Discussion on the insecurity and imposter syndrome experienced by new coders entering the field. | 00:00:55 | 00:01:00"},{"n":5,"topic_title":"Lessons from Machine Learning","topic_description":"Lessons learned from the early days of machine learning, emphasizing inclusivity and support for junior developers.","start_time":"00:01:00","end_time":"00:01:37","raw_line":"5 | Lessons from Machine Learning | Lessons learned from the early days of machine learning, emphasizing inclusivity and support for junior developers. | 00:01:00 | 00:01:37"},{"n":6,"topic_title":"Embracing New Developers","topic_description":"The importance of embracing and welcoming new developers, regardless of their formal education or experience.","start_time":"00:01:37","end_time":"00:01:51","raw_line":"6 | Embracing New Developers | The importance of embracing and welcoming new developers, regardless of their formal education or experience. | 00:01:37 | 00:01:51"},{"n":7,"topic_title":"Comparison of AI-Based Tools","topic_description":"Brief mention of the differences between current AI-based tools and the previous generation of tools.","start_time":"00:01:51","end_time":"00:01:59","raw_line":"7 | Comparison of AI-Based Tools | Brief mention of the differences between current AI-based tools and the previous generation of tools. | 00:01:51 | 00:01:59"}]} -->

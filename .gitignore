@@ -8,7 +8,13 @@ config/local.json
 *.env
 
 # Data / job outputs / logs
-data/
+data/*
+!data/live/
+data/live/*
+!data/live/fixtures/
+data/live/fixtures/*
+!data/live/fixtures/panel_120s_v1/
+!data/live/fixtures/panel_120s_v1/**
 *.log
 
 # Audio / subtitle artifacts (never commit)
@@ -17,6 +23,9 @@ data/
 *.m4a
 *.srt
 *.vtt
+!static/dev-fixtures/panel_discussion_120s.mp3
+!static/dev-fixtures/panel_discussion_120s.srt
+!data/live/fixtures/panel_120s_v1/panel_120s_v1_08m09s_10m09s.mp3
 
 # Caches
 .cache/
