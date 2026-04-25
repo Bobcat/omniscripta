@@ -70,16 +70,16 @@ systemctl --user --no-pager status omniscripta-api-dev.service asr-pool-dev.serv
 - Shared live ASR engine package root for the current dev rollout target: `/srv/realtime-asr-engine`
 - ASR pool runtime: remote on `dc2`
 - ASR worker root: `/srv/asr-worker`
-- API service: `transcribe-api.service`
-- Worker service: `asr-worker-batch.service` (ops on 127.0.0.1:28111)
+- API service: `omniscripta-api.service`
+- Worker service: `asr-worker.service` (ops on 127.0.0.1:28111)
 - LLM worker service: `llm-worker.service`
+- ASR pool access tunnel on `dc1`: `asr-pool-dc2-tunnel.service`
 - API/LLM env file: `/etc/transcribe/transcribe.env`
 - ASR pool env file: `/etc/asr-pool/asr-pool.env`
 - ASR worker env file: `/etc/asr-worker/asr-worker.env`
-- Tabby tunnel service: `transcribe-tabby-tunnel.service`
 - Frontend static target: `/srv/omniscripta/static` (served by nginx)
 - Worker queue root: `/srv/omniscripta/data/upload/jobs/worker`
-- API `/ops` on prod uses the local systemd drop-in `/etc/systemd/system/transcribe-api.service.d/ops-env.conf` so it points at the prod pool access path on `:8090` and worker ops `:28111`.
+- API `/ops` on prod uses the local systemd drop-in `/etc/systemd/system/omniscripta-api.service.d/ops-env.conf` so it points at the prod pool access path on `:8090` and worker ops `:28111`.
 - Note: on `dc1`, prod consumers talk to the prod ASR pool through the configured dc1->dc2 access path; `dc1` does not run the pool process locally.
 - Note: current prod `main` still runs the legacy internal layout. Installing the repo-backed prod units from the current dev branch only becomes valid after the prod Omniscripta checkout has been promoted to the `app/` + `workers/llm` layout and `/srv/realtime-asr-engine` exists as a sibling checkout.
 
@@ -178,10 +178,10 @@ systemctl --user enable --now llm-worker-dev@1.service
 ### On server (`dc1`) - prod services (system scope)
 
 ```bash
-sudo systemctl enable --now transcribe-api.service
-sudo systemctl enable --now asr-worker-batch.service
+sudo systemctl enable --now omniscripta-api.service
+sudo systemctl enable --now asr-worker.service
 sudo systemctl enable --now llm-worker.service
-sudo systemctl enable --now transcribe-tabby-tunnel.service
+sudo systemctl enable --now asr-pool-dc2-tunnel.service
 ```
 
 ## 7) Tunnel Services on Your Other Computer
@@ -251,35 +251,12 @@ Optional (if you need user services before interactive login):
 sudo loginctl enable-linger "$USER"
 ```
 
-### C) Observability tunnel services
-
-These are also user services on your other computer, never on `dc1`.
-
-1. **Dev observability tunnel**
-   - Unit name: `transcribe-observability-tunnel.service`
-   - Local ports:
-     - `8001` -> `dc1:8001` (API `/ops`)
-     - `18090` -> `dc1:18090` (ASR pool `/ops`)
-     - `18111` -> `dc1:18111` (worker batch `/ops`)
-
-2. **Prod observability tunnel**
-   - Unit name: `transcribe-observability-live-tunnel.service`
-   - Local ports:
-     - `8000` -> `dc1:8000` (API `/ops`)
-     - `8090` -> `dc1:8090` (ASR pool `/ops`)
-     - `28111` -> `dc1:28111` (worker batch `/ops`)
-
-3. Tracked unit files for these observability tunnels are in:
-   - `~/projects/omniscripta/deploy/systemd/transcribe-observability-tunnel.service`
-   - `~/projects/omniscripta/deploy/systemd/transcribe-observability-live-tunnel.service`
-
 ## 8) Environment Files and Secrets
 
 ### Prod
 
 1. Omniscripta API / LLM worker:
    - `/etc/transcribe/transcribe.env`
-   - This is also where prod Tabby-related values are stored.
 
 2. ASR pool:
    - `/etc/asr-pool/asr-pool.env`
@@ -298,11 +275,6 @@ These are also user services on your other computer, never on `dc1`.
 3. ASR workers:
    - `~/.config/asr-worker/asr-worker.dev.env`
 
-4. Dev key quick set for the transcribe-side env:
-```bash
-mkdir -p ~/.config/transcribe && printf 'TABBY_API_KEY=VUL_HIER_DE_KEY_IN\n' > ~/.config/transcribe/dev.env && chmod 600 ~/.config/transcribe/dev.env && systemctl --user restart asr-worker-dev@1.service llm-worker-dev@1.service
-```
-
 ## 9) Golden Rules
 
 1. Build frontend in `/var/www/omniscripta-ui`, never in `/srv/omniscripta/static`.
@@ -312,6 +284,5 @@ mkdir -p ~/.config/transcribe && printf 'TABBY_API_KEY=VUL_HIER_DE_KEY_IN\n' > ~
 5. Use `deploy/deploy.sh` only for prod release.
 6. Use `deploy/deploy-dev.sh` for dev-backend testing.
 7. Keep both frontend tunnel paths available (`8080` prod and `18010` dev) for fast A/B validation.
-8. Keep dev and prod observability tunnels separate; batch worker ops use `18111` and `28111` on purpose.
-9. In dev repos, do all development on `dev/*` branches (`dev/omniscripta`, `dev/asr-pool-dev`, `dev/asr-worker-dev`); use `main` only for controlled merge/release steps.
-10. If you temporarily check out `main` in a dev repo for merge/release work, switch back to the matching `dev/*` branch before continuing development.
+8. In dev repos, do all development on `dev/*` branches (`dev/omniscripta`, `dev/asr-pool-dev`, `dev/asr-worker-dev`); use `main` only for controlled merge/release steps.
+9. If you temporarily check out `main` in a dev repo for merge/release work, switch back to the matching `dev/*` branch before continuing development.
