@@ -39,7 +39,7 @@ def _write_status_safely(status_path: Path, **patch: Any) -> None:
 
 
 def _write_topics_status(status_path: Path, *, subphase: str, message: str, **patch: Any) -> None:
-  _write_status(status_path, phase="topics", subphase=subphase, status_owner="api-topics", message=message, **patch)
+  _write_status(status_path, state="running", phase="topics", subphase=subphase, status_owner="api-topics", message=message, **patch)
 
 
 def _fmt_eta(seconds: float) -> str:

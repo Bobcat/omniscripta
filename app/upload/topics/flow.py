@@ -52,6 +52,26 @@ def _unique_hints(values: Any) -> list[str]:
     return out
 
 
+def _status_elapsed_for_topics(status: dict[str, Any]) -> float:
+    base_elapsed = max(0.0, float(_safe_float(status.get("elapsed_s")) or 0.0))
+    asr_elapsed = max(0.0, float(_safe_float(status.get("asr_elapsed_s")) or 0.0))
+    return max(0.0, base_elapsed + asr_elapsed)
+
+
+def _status_eta_confidence(status: dict[str, Any]) -> float:
+    local = _safe_float(status.get("eta_confidence"))
+    if local is not None:
+        return max(0.0, float(local))
+    asr_local = _safe_float(status.get("asr_eta_confidence"))
+    if asr_local is not None:
+        return max(0.0, float(asr_local))
+    return 0.0
+
+
+def _status_eta_hints(status: dict[str, Any]) -> list[str]:
+    return _unique_hints(status.get("eta_hints")) or _unique_hints(status.get("asr_eta_hints"))
+
+
 def _safe_int(value: Any) -> int | None:
     try:
         return int(value)
@@ -210,6 +230,7 @@ class _TopicsProgressTracker:
 
         _write_status(
             self._status_path,
+            state="running",
             progress=progress,
             phase="topics",
             status_owner=self._current_status_owner,
@@ -505,6 +526,7 @@ class TopicsFlow:
         )
         _write_status_safely(
             job.status_path,
+            state="running",
             phase="topics",
             subphase="queue",
             status_owner=llm_status_owner,
@@ -519,6 +541,7 @@ class TopicsFlow:
         wait_message = f"Topics: waiting for 0/{len(task_ids)} llm tasks"
         _write_status_safely(
             job.status_path,
+            state="running",
             phase="topics",
             subphase="wait",
             status_owner=llm_status_owner,
@@ -612,12 +635,12 @@ class TopicsFlow:
         final_eta_confidence = (
             progress_tracker.eta_confidence
             if progress_tracker is not None
-            else max(0.0, float(_safe_float(status.get("eta_confidence")) or 0.0))
+            else _status_eta_confidence(status)
         )
         final_eta_hints = (
             progress_tracker.eta_hints
             if progress_tracker is not None
-            else _unique_hints(status.get("eta_hints"))
+            else _status_eta_hints(status)
         )
         patch: dict[str, Any] = {
             "state": "done",
@@ -684,7 +707,7 @@ class TopicsFlow:
                 snippet_seconds = int(snip_cfg.get("minutes_default", 15)) * 60
         prompt_id = _topics_prompt_id(topics_cfg.get("prompt_id"))
         coord_started_mono = time.monotonic()
-        base_elapsed_s = max(0.0, float(_safe_float(status.get("elapsed_s")) or 0.0))
+        base_elapsed_s = _status_elapsed_for_topics(status)
         progress_tracker = self._build_progress_tracker(
             status_path=job.status_path,
             status=status,

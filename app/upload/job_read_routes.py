@@ -10,12 +10,16 @@ from fastapi.responses import FileResponse, Response
 
 from app.config.settings import get_str
 from upload._util import (
+    _normalize_speaker_mode,
     _resolve_child_path,
     _resolve_status_owner,
     _topics_merged_filename,
     _topics_prompt_id,
     _topics_enabled_for_job,
 )
+from upload.pipeline.coordinator import _hardware_key, _host_id, _progress_runs_path
+from upload.pipeline.progress_plan import build_prediction, phase_order_for_job
+from upload.status_io import _fmt_eta, _timings_with_running_total
 from upload.jobs.queue_fs import find_job_dir
 from upload.queue_roots import UPLOAD_PREP_QUEUE, UPLOAD_WORKER_QUEUE
 from upload.upload_request_io import read_upload_request
@@ -54,11 +58,163 @@ def _queue_position(job_dir: Path, *, inbox_dir: Path) -> int | None:
     return None
 
 
+def _snippet_seconds_for_projection(*, status: dict[str, Any], job_cfg: dict[str, Any] | None) -> int:
+    try:
+        status_value = int(status.get("snippet_seconds"))
+    except Exception:
+        status_value = None
+    if status_value is not None and status_value > 0:
+        return int(status_value)
+    cfg = dict((job_cfg or {}).get("options") or {})
+    try:
+        cfg_value = int(cfg.get("snippet_seconds"))
+    except Exception:
+        cfg_value = None
+    if cfg_value is not None and cfg_value > 0:
+        return int(cfg_value)
+    return 15 * 60
+
+
+def _unique_hints(*values: Any) -> list[str]:
+    out: list[str] = []
+    for raw_values in values:
+        if not isinstance(raw_values, list):
+            continue
+        for raw in raw_values:
+            item = str(raw).strip()
+            if item and item not in out:
+                out.append(item)
+    return out
+
+
+def _project_status_message(status: dict[str, Any]) -> dict[str, Any]:
+    out = dict(status or {})
+    msg = str(out.get("message") or "")
+    if not msg:
+        return out
+    if " || eta: " in msg:
+        msg = msg.split(" || eta: ", 1)[0]
+    if " || timings: " in msg:
+        msg = msg.split(" || timings: ", 1)[0]
+
+    timings = str(out.get("timings_text", "") or "").strip()
+    eta_total = out.get("eta_total_s")
+    eta_remaining = out.get("eta_remaining_s")
+    elapsed_s = out.get("elapsed_s")
+    eta_hints = _unique_hints(out.get("eta_hints"))
+
+    running_total_s: float | None = None
+    if elapsed_s is not None:
+        try:
+            running_total_s = float(elapsed_s)
+        except Exception:
+            running_total_s = None
+    elif eta_total is not None and eta_remaining is not None:
+        try:
+            running_total_s = float(eta_total) - float(eta_remaining)
+        except Exception:
+            running_total_s = None
+    timings = _timings_with_running_total(timings, running_total_s)
+
+    eta_suffix = ""
+    if eta_total is not None and eta_remaining is not None:
+        try:
+            eta_suffix = f" || eta: ETA {_fmt_eta(float(eta_remaining))} | est_total {_fmt_eta(float(eta_total))}"
+        except Exception:
+            eta_suffix = ""
+    if eta_suffix and eta_hints:
+        eta_suffix += f" | hints: {','.join(eta_hints)}"
+
+    if timings:
+        out["message"] = f"{msg}{eta_suffix} || timings: {timings}"
+    else:
+        out["message"] = f"{msg}{eta_suffix}"
+    return out
+
+
+def _project_asr_progress(status: dict[str, Any], *, job_cfg: dict[str, Any] | None) -> dict[str, Any]:
+    out = dict(status or {})
+    if out.get("topics_status") is not None:
+        return out
+    state = str(out.get("state") or "").strip().lower()
+    if state not in {"running", "done"}:
+        return out
+    phase = str(out.get("phase") or "").strip().lower()
+    if phase in {"topics", "error"}:
+        return out
+
+    raw_asr_progress = out.get("asr_progress")
+    if raw_asr_progress is None:
+        return out
+
+    try:
+        asr_progress = min(1.0, max(0.0, float(raw_asr_progress)))
+    except Exception:
+        return out
+
+    topics_enabled = _topics_enabled_for_job(status=out, job_cfg=job_cfg)
+    if topics_enabled is None:
+        topics_enabled = True
+    speaker_mode = _normalize_speaker_mode(out.get("speaker_mode", "auto"))
+    snippet_seconds = _snippet_seconds_for_projection(status=out, job_cfg=job_cfg)
+    prediction = build_prediction(
+        runs_path=_progress_runs_path(),
+        hardware_key=_hardware_key(_host_id()),
+        topics_enabled=bool(topics_enabled),
+        speaker_mode=speaker_mode,
+        snippet_seconds=snippet_seconds,
+    )
+    phase_order = phase_order_for_job(topics_enabled=bool(topics_enabled), speaker_mode=speaker_mode)
+    total_expected = max(1.0, float(prediction.total_expected_s))
+    completed_before_asr = max(0.0, float(prediction.phase_expected_s.get("snipping", 0.0)))
+    asr_expected = sum(
+        max(0.0, float(prediction.phase_expected_s.get(phase_name, 0.0)))
+        for phase_name in phase_order
+        if phase_name.startswith("whisperx_")
+    )
+    topics_phase = phase_order[-1]
+    topics_expected = max(0.0, float(prediction.phase_expected_s.get(topics_phase, 0.0)))
+    try:
+        base_elapsed = max(0.0, float(out.get("elapsed_s") or 0.0))
+    except Exception:
+        base_elapsed = 0.0
+    try:
+        asr_elapsed = max(0.0, float(out.get("asr_elapsed_s") or 0.0))
+    except Exception:
+        asr_elapsed = 0.0
+    if asr_elapsed <= 0.0:
+        try:
+            asr_eta_total = float(out.get("asr_eta_total_s") or 0.0)
+            asr_eta_remaining = float(out.get("asr_eta_remaining_s") or 0.0)
+            asr_elapsed = max(0.0, asr_eta_total - asr_eta_remaining)
+        except Exception:
+            asr_elapsed = 0.0
+    try:
+        asr_remaining = max(0.0, float(out.get("asr_eta_remaining_s") or 0.0))
+    except Exception:
+        asr_remaining = 0.0
+    projected = (completed_before_asr + (asr_progress * asr_expected)) / total_expected
+    out["progress"] = min(0.99, max(0.0, float(projected)))
+    upload_elapsed = max(0.0, base_elapsed + asr_elapsed)
+    upload_remaining = max(0.0, asr_remaining + topics_expected)
+    out["elapsed_s"] = round(upload_elapsed, 3)
+    out["eta_remaining_s"] = round(upload_remaining, 3)
+    out["eta_total_s"] = round(upload_elapsed + upload_remaining, 3)
+    try:
+        out["eta_confidence"] = round(float(out.get("asr_eta_confidence")), 3)
+    except Exception:
+        out["eta_confidence"] = round(float(prediction.confidence), 3)
+    out["eta_hints"] = _unique_hints(out.get("asr_eta_hints"), prediction.hints)
+    return out
+
+
 def _project_upload_ui_status(status: dict[str, Any], *, job_dir: Path | None = None) -> dict[str, Any]:
     """Keep the upload UI on an in-progress topics phase until topics_status exists."""
     out = dict(status or {})
-    if out.get("topics_enabled") is None and job_dir is not None:
-        topics_enabled = _topics_enabled_for_job(status=out, job_cfg=read_upload_request(job_dir))
+    job_cfg = read_upload_request(job_dir) if job_dir is not None else None
+    out = _project_asr_progress(out, job_cfg=job_cfg)
+    if out.get("topics_enabled") is None and job_cfg is not None:
+        topics_enabled = _topics_enabled_for_job(status=out, job_cfg=job_cfg)
         if topics_enabled is not None:
             out["topics_enabled"] = topics_enabled
     state = str(out.get("state") or "").strip().lower()
@@ -72,6 +228,7 @@ def _project_upload_ui_status(status: dict[str, Any], *, job_dir: Path | None = 
         out["progress"] = min(0.99, max(0.0, float(out.get("progress") or 0.0)))
         if not str(out.get("message") or "").strip().lower().startswith("topics:"):
             out["message"] = "Topics: processing"
+    out = _project_status_message(out)
     if job_dir is not None and state == "queued":
         try:
             in_upload_worker_inbox = job_dir.parent.resolve() == UPLOAD_WORKER_QUEUE.inbox.resolve()
