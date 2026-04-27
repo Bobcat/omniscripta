@@ -23,7 +23,6 @@ install_unit() {
 }
 
 install_unit "$TRANSCRIBE_REPO_ROOT/deploy/systemd/omniscripta-api.service"
-install_unit "$TRANSCRIBE_REPO_ROOT/deploy/systemd/llm-worker.service"
 install_unit "$TRANSCRIBE_REPO_ROOT/deploy/systemd/asr-pool-dc2-tunnel.service"
 install_unit "$ASR_WORKER_REPO_ROOT/deploy/systemd/asr-worker.service"
 

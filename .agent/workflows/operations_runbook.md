@@ -37,7 +37,7 @@ systemctl --user --no-pager status omniscripta-api-dev.service asr-pool-dev.serv
    - Deploy scripts are in this repo under `deploy/`: `deploy/deploy.sh` (prod), `deploy/deploy-dev.sh` (dev static target).
 
 2. **Prod repos on `dc1`**
-   - `/srv/omniscripta` - production Omniscripta backend/API, LLM worker, deploy scripts, static files.
+   - `/srv/omniscripta` - production Omniscripta backend/API, deploy scripts, static files.
    - `/srv/realtime-asr-engine` - production checkout of the shared live ASR engine package used by the current dev branch rollout.
    - `/srv/asr-worker` - production ASR worker repo checkout.
    - Prod ASR pool runtime is remote on `dc2`, not a local process on `dc1`.
@@ -72,7 +72,6 @@ systemctl --user --no-pager status omniscripta-api-dev.service asr-pool-dev.serv
 - ASR worker root: `/srv/asr-worker`
 - API service: `omniscripta-api.service`
 - Worker service: `asr-worker.service` (ops on 127.0.0.1:28111)
-- LLM worker service: `llm-worker.service`
 - ASR pool access tunnel on `dc1`: `asr-pool-dc2-tunnel.service`
 - API/LLM env file: `/etc/transcribe/transcribe.env`
 - ASR pool env file: `/etc/asr-pool/asr-pool.env`
@@ -81,7 +80,8 @@ systemctl --user --no-pager status omniscripta-api-dev.service asr-pool-dev.serv
 - Worker queue root: `/srv/omniscripta/data/upload/jobs/worker`
 - API `/ops` on prod uses the local systemd drop-in `/etc/systemd/system/omniscripta-api.service.d/ops-env.conf` so it points at the prod pool access path on `:8090` and worker ops `:28111`.
 - Note: on `dc1`, prod consumers talk to the prod ASR pool through the configured dc1->dc2 access path; `dc1` does not run the pool process locally.
-- Note: current prod `main` still runs the legacy internal layout. Installing the repo-backed prod units from the current dev branch only becomes valid after the prod Omniscripta checkout has been promoted to the `app/` + `workers/llm` layout and `/srv/realtime-asr-engine` exists as a sibling checkout.
+- Note: upload topics now route directly to the shared llm-pool on `dc2`; `dc1` no longer runs a separate LLM worker service.
+- Note: current prod `main` still runs the legacy internal layout. Installing the repo-backed prod units from the current dev branch only becomes valid after the prod Omniscripta checkout has been promoted to the current `app/` layout and `/srv/realtime-asr-engine` exists as a sibling checkout.
 
 ### Dev
 - API/LLM backend root: `~/projects/omniscripta`
@@ -178,7 +178,6 @@ systemctl --user enable --now asr-worker-dev@1.service
 ```bash
 sudo systemctl enable --now omniscripta-api.service
 sudo systemctl enable --now asr-worker.service
-sudo systemctl enable --now llm-worker.service
 sudo systemctl enable --now asr-pool-dc2-tunnel.service
 ```
 
@@ -253,7 +252,7 @@ sudo loginctl enable-linger "$USER"
 
 ### Prod
 
-1. Omniscripta API / LLM worker:
+1. Omniscripta API:
    - `/etc/transcribe/transcribe.env`
 
 2. ASR pool:
@@ -264,7 +263,7 @@ sudo loginctl enable-linger "$USER"
 
 ### Dev
 
-1. Omniscripta API / frontend proxy / LLM worker:
+1. Omniscripta API / frontend proxy:
    - `~/.config/transcribe/dev.env`
 
 2. ASR pool:
