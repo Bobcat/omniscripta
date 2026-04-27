@@ -37,4 +37,6 @@ data/live/fixtures/*
 # Local agent/worktree artifacts
 .agent/
 AGENTS.md
-docs/
+docs/*
+!docs/backlog/
+!docs/backlog/**
