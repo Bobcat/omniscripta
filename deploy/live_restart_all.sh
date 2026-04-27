@@ -6,7 +6,6 @@ set -euo pipefail
 
 API_UNIT="omniscripta-api.service"
 BATCH_WORKER_UNIT="asr-worker.service"
-LLM_WORKER_UNIT="llm-worker.service"
 
 API_HEALTH_URL="http://127.0.0.1:8000/health"
 ASR_POOL_URL="http://127.0.0.1:8090/asr/v1/pool"
@@ -86,14 +85,13 @@ log "Waiting for ASR pool readiness via the dc1 prod access path..."
 wait_for_http "$ASR_POOL_URL" "$ASR_POOL_READY_TIMEOUT_S" "ASR pool readiness" "200,401"
 
 log "Restarting workers..."
-systemctl_live restart "$BATCH_WORKER_UNIT" "$LLM_WORKER_UNIT"
+systemctl_live restart "$BATCH_WORKER_UNIT"
 
 echo
 echo "[live-restart] Service status:"
 print_status \
   "$API_UNIT" \
-  "$BATCH_WORKER_UNIT" \
-  "$LLM_WORKER_UNIT"
+  "$BATCH_WORKER_UNIT"
 
 echo
 echo "[live-restart] OK"
