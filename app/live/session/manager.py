@@ -216,8 +216,20 @@ class LiveSessionManager:
         chunks_failed: int | None = None,
         finalization_state: str | None = None,
         batch_job_id: str | None = None,
-        gpu_proxy_transcribe_s: float | None = None,
-        gpu_proxy_pipeline_s: float | None = None,
+        asr_transcribe_s: float | None = None,
+        asr_load_audio_s: float | None = None,
+        asr_runner_wall_s: float | None = None,
+        asr_pool_wall_s: float | None = None,
+        asr_pool_ingest_s: float | None = None,
+        asr_pool_queue_wait_s: float | None = None,
+        asr_pool_outside_runner_s: float | None = None,
+        asr_backend_wall_s: float | None = None,
+        asr_backend_wav_write_s: float | None = None,
+        asr_backend_submit_s: float | None = None,
+        asr_backend_result_collect_s: float | None = None,
+        asr_backend_artifact_get_s: float | None = None,
+        asr_backend_srt_parse_s: float | None = None,
+        asr_backend_outside_pool_s: float | None = None,
     ) -> dict[str, Any]:
         now_unix = time.time()
         with self._lock:
@@ -242,10 +254,34 @@ class LiveSessionManager:
                 sess.finalization_state = str(finalization_state or "idle")
             if batch_job_id is not None:
                 sess.batch_job_id = str(batch_job_id)
-            if gpu_proxy_transcribe_s is not None:
-                sess.gpu_proxy_transcribe_s = max(0.0, float(gpu_proxy_transcribe_s))
-            if gpu_proxy_pipeline_s is not None:
-                sess.gpu_proxy_pipeline_s = max(0.0, float(gpu_proxy_pipeline_s))
+            if asr_transcribe_s is not None:
+                sess.asr_transcribe_s = max(0.0, float(asr_transcribe_s))
+            if asr_load_audio_s is not None:
+                sess.asr_load_audio_s = max(0.0, float(asr_load_audio_s))
+            if asr_runner_wall_s is not None:
+                sess.asr_runner_wall_s = max(0.0, float(asr_runner_wall_s))
+            if asr_pool_wall_s is not None:
+                sess.asr_pool_wall_s = max(0.0, float(asr_pool_wall_s))
+            if asr_pool_ingest_s is not None:
+                sess.asr_pool_ingest_s = max(0.0, float(asr_pool_ingest_s))
+            if asr_pool_queue_wait_s is not None:
+                sess.asr_pool_queue_wait_s = max(0.0, float(asr_pool_queue_wait_s))
+            if asr_pool_outside_runner_s is not None:
+                sess.asr_pool_outside_runner_s = max(0.0, float(asr_pool_outside_runner_s))
+            if asr_backend_wall_s is not None:
+                sess.asr_backend_wall_s = max(0.0, float(asr_backend_wall_s))
+            if asr_backend_wav_write_s is not None:
+                sess.asr_backend_wav_write_s = max(0.0, float(asr_backend_wav_write_s))
+            if asr_backend_submit_s is not None:
+                sess.asr_backend_submit_s = max(0.0, float(asr_backend_submit_s))
+            if asr_backend_result_collect_s is not None:
+                sess.asr_backend_result_collect_s = max(0.0, float(asr_backend_result_collect_s))
+            if asr_backend_artifact_get_s is not None:
+                sess.asr_backend_artifact_get_s = max(0.0, float(asr_backend_artifact_get_s))
+            if asr_backend_srt_parse_s is not None:
+                sess.asr_backend_srt_parse_s = max(0.0, float(asr_backend_srt_parse_s))
+            if asr_backend_outside_pool_s is not None:
+                sess.asr_backend_outside_pool_s = max(0.0, float(asr_backend_outside_pool_s))
             return self._session_payload_locked(sess)
 
     def set_fixture_metadata(
@@ -517,8 +553,20 @@ class LiveSessionManager:
                 arc.fixture_version = str(src_sess.fixture_version or "")
                 arc.fixture_test_mode = str(src_sess.fixture_test_mode or "")
                 arc.asr_language = str(src_sess.asr_language or "")
-                arc.gpu_proxy_transcribe_s = float(max(0.0, src_sess.gpu_proxy_transcribe_s))
-                arc.gpu_proxy_pipeline_s = float(max(0.0, src_sess.gpu_proxy_pipeline_s))
+                arc.asr_transcribe_s = float(max(0.0, src_sess.asr_transcribe_s))
+                arc.asr_load_audio_s = float(max(0.0, src_sess.asr_load_audio_s))
+                arc.asr_runner_wall_s = float(max(0.0, src_sess.asr_runner_wall_s))
+                arc.asr_pool_wall_s = float(max(0.0, src_sess.asr_pool_wall_s))
+                arc.asr_pool_ingest_s = float(max(0.0, src_sess.asr_pool_ingest_s))
+                arc.asr_pool_queue_wait_s = float(max(0.0, src_sess.asr_pool_queue_wait_s))
+                arc.asr_pool_outside_runner_s = float(max(0.0, src_sess.asr_pool_outside_runner_s))
+                arc.asr_backend_wall_s = float(max(0.0, src_sess.asr_backend_wall_s))
+                arc.asr_backend_wav_write_s = float(max(0.0, src_sess.asr_backend_wav_write_s))
+                arc.asr_backend_submit_s = float(max(0.0, src_sess.asr_backend_submit_s))
+                arc.asr_backend_result_collect_s = float(max(0.0, src_sess.asr_backend_result_collect_s))
+                arc.asr_backend_artifact_get_s = float(max(0.0, src_sess.asr_backend_artifact_get_s))
+                arc.asr_backend_srt_parse_s = float(max(0.0, src_sess.asr_backend_srt_parse_s))
+                arc.asr_backend_outside_pool_s = float(max(0.0, src_sess.asr_backend_outside_pool_s))
             self._archives[arc.session_id] = arc
             return self._archive_payload_locked(arc)
 

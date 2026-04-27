@@ -76,8 +76,20 @@ class _RollingRuntime:
 
     rolling_inflight: dict[str, Any] | None = None
     rolling_last_applied_seq: int = -1
-    rolling_gpu_proxy_transcribe_s: float = 0.0
-    rolling_gpu_proxy_pipeline_s: float = 0.0
+    rolling_asr_transcribe_s: float = 0.0
+    rolling_asr_load_audio_s: float = 0.0
+    rolling_asr_runner_wall_s: float = 0.0
+    rolling_asr_pool_wall_s: float = 0.0
+    rolling_asr_pool_ingest_s: float = 0.0
+    rolling_asr_pool_queue_wait_s: float = 0.0
+    rolling_asr_pool_outside_runner_s: float = 0.0
+    rolling_asr_backend_wall_s: float = 0.0
+    rolling_asr_backend_wav_write_s: float = 0.0
+    rolling_asr_backend_submit_s: float = 0.0
+    rolling_asr_backend_result_collect_s: float = 0.0
+    rolling_asr_backend_artifact_get_s: float = 0.0
+    rolling_asr_backend_srt_parse_s: float = 0.0
+    rolling_asr_backend_outside_pool_s: float = 0.0
     last_result_event_signature: str = ""
 
 
@@ -298,8 +310,20 @@ class LiveWebSocketSession:
                 chunks_failed=rt.rolling_chunks_failed,
                 finalization_state=rt.finalization_state,
                 batch_job_id="",
-                gpu_proxy_transcribe_s=rt.rolling_gpu_proxy_transcribe_s,
-                gpu_proxy_pipeline_s=rt.rolling_gpu_proxy_pipeline_s,
+                asr_transcribe_s=rt.rolling_asr_transcribe_s,
+                asr_load_audio_s=rt.rolling_asr_load_audio_s,
+                asr_runner_wall_s=rt.rolling_asr_runner_wall_s,
+                asr_pool_wall_s=rt.rolling_asr_pool_wall_s,
+                asr_pool_ingest_s=rt.rolling_asr_pool_ingest_s,
+                asr_pool_queue_wait_s=rt.rolling_asr_pool_queue_wait_s,
+                asr_pool_outside_runner_s=rt.rolling_asr_pool_outside_runner_s,
+                asr_backend_wall_s=rt.rolling_asr_backend_wall_s,
+                asr_backend_wav_write_s=rt.rolling_asr_backend_wav_write_s,
+                asr_backend_submit_s=rt.rolling_asr_backend_submit_s,
+                asr_backend_result_collect_s=rt.rolling_asr_backend_result_collect_s,
+                asr_backend_artifact_get_s=rt.rolling_asr_backend_artifact_get_s,
+                asr_backend_srt_parse_s=rt.rolling_asr_backend_srt_parse_s,
+                asr_backend_outside_pool_s=rt.rolling_asr_backend_outside_pool_s,
             )
         with contextlib.suppress(Exception):
             self.live_sessions.set_live_engine_runtime(
@@ -599,8 +623,20 @@ class LiveWebSocketSession:
 
         poll_status = dict(poll.status or {})
         for status_key, state_key in (
-            ("asr_timing_whisperx_transcribe_call_s", "rolling_gpu_proxy_transcribe_s"),
-            ("asr_timing_whisperx_total_s", "rolling_gpu_proxy_pipeline_s"),
+            ("asr_timing_transcribe_call_s", "rolling_asr_transcribe_s"),
+            ("asr_timing_load_audio_s", "rolling_asr_load_audio_s"),
+            ("asr_timing_runner_wall_s", "rolling_asr_runner_wall_s"),
+            ("asr_timing_pool_wall_s", "rolling_asr_pool_wall_s"),
+            ("asr_timing_pool_ingest_s", "rolling_asr_pool_ingest_s"),
+            ("asr_timing_pool_queue_wait_s", "rolling_asr_pool_queue_wait_s"),
+            ("asr_timing_pool_outside_runner_s", "rolling_asr_pool_outside_runner_s"),
+            ("asr_timing_backend_wall_s", "rolling_asr_backend_wall_s"),
+            ("asr_timing_backend_wav_write_s", "rolling_asr_backend_wav_write_s"),
+            ("asr_timing_backend_submit_s", "rolling_asr_backend_submit_s"),
+            ("asr_timing_backend_result_collect_s", "rolling_asr_backend_result_collect_s"),
+            ("asr_timing_backend_artifact_get_s", "rolling_asr_backend_artifact_get_s"),
+            ("asr_timing_backend_srt_parse_s", "rolling_asr_backend_srt_parse_s"),
+            ("asr_timing_backend_outside_pool_s", "rolling_asr_backend_outside_pool_s"),
         ):
             value = _safe_float(poll_status.get(status_key))
             if value is not None:

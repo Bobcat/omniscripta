@@ -223,8 +223,9 @@ class LiveSessionManagerTests(unittest.TestCase):
             recording_path="/tmp/test.wav",
             recording_duration_ms=2000,
             finalization_state="recording",
-            gpu_proxy_transcribe_s=1.25,
-            gpu_proxy_pipeline_s=2.5,
+            asr_transcribe_s=1.25,
+            asr_load_audio_s=0.75,
+            asr_runner_wall_s=2.5,
         )
         self.manager.set_fixture_metadata(
             session_id,
@@ -296,8 +297,9 @@ class LiveSessionManagerTests(unittest.TestCase):
             "fixture_version",
             "fixture_test_mode",
             "asr_language",
-            "gpu_proxy_transcribe_s",
-            "gpu_proxy_pipeline_s",
+            "asr_transcribe_s",
+            "asr_load_audio_s",
+            "asr_runner_wall_s",
             "pc_events_count",
         ):
             self.assertEqual(archive_result[key], active_result[key])

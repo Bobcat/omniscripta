@@ -96,7 +96,6 @@ def score_live_text_against_fixture(
     *,
     fixture_id: str,
     live_text: str,
-    live_result: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     fixture = load_fixture_reference(fixture_id)
     ref_text = str(fixture.get("reference_text") or "")
@@ -117,42 +116,8 @@ def score_live_text_against_fixture(
     if ref_words:
         word_count_ratio = round(float(len(live_words)) / float(len(ref_words)), 4)
 
-    result = live_result if isinstance(live_result, dict) else {}
-    chunk_rows = result.get("chunk_results") if isinstance(result.get("chunk_results"), list) else []
-    gpu_proxy_transcribe_total_s = max(0.0, float(result.get("gpu_proxy_transcribe_s") or 0.0))
-    gpu_proxy_pipeline_total_s = max(0.0, float(result.get("gpu_proxy_pipeline_s") or 0.0))
-
-    recording_duration_ms = int(max(0, int(result.get("recording_duration_ms") or 0)))
-    recording_s = float(recording_duration_ms) / 1000.0 if recording_duration_ms > 0 else 0.0
-    gpu_proxy_transcribe_pct_of_recording: float | None = None
-    gpu_proxy_pipeline_pct_of_recording: float | None = None
-    if recording_s > 0:
-        gpu_proxy_transcribe_pct_of_recording = round((gpu_proxy_transcribe_total_s / recording_s) * 100.0, 1)
-        gpu_proxy_pipeline_pct_of_recording = round((gpu_proxy_pipeline_total_s / recording_s) * 100.0, 1)
-
-    run_metrics: dict[str, Any] = {
-        "finalization_state": str(result.get("finalization_state") or ""),
-        "recording_duration_ms": recording_duration_ms,
-        "chunks_total": int(max(0, int(result.get("chunks_total") or 0))),
-        "chunks_done": int(max(0, int(result.get("chunks_done") or 0))),
-        "chunks_failed": int(max(0, int(result.get("chunks_failed") or 0))),
-        "chunks_pending": int(max(0, int(result.get("chunks_pending") or 0))),
-        "chunk_reason_counts": (
-            dict(result.get("chunk_reason_counts"))
-            if isinstance(result.get("chunk_reason_counts"), dict)
-            else {}
-        ),
-        "transcript_revision": int(max(0, int(result.get("transcript_revision") or 0))),
-        "final_text_chars": len(live_text),
-        "final_segments_count": int(max(0, int(result.get("final_segments_count") or 0))),
-        "gpu_proxy_transcribe_total_s": round(gpu_proxy_transcribe_total_s, 3),
-        "gpu_proxy_pipeline_total_s": round(gpu_proxy_pipeline_total_s, 3),
-        "gpu_proxy_transcribe_pct_of_recording": gpu_proxy_transcribe_pct_of_recording,
-        "gpu_proxy_pipeline_pct_of_recording": gpu_proxy_pipeline_pct_of_recording,
-    }
-
     return {
-        "metric_version": "live_quality_v1",
+        "metric_version": "live_quality_v2",
         "fixture": {
             "fixture_id": str(fixture_id),
             "reference_txt_path": str(fixture.get("reference_txt_path") or ""),
@@ -169,5 +134,4 @@ def score_live_text_against_fixture(
             "normalized_char_count_live": int(len(live_norm)),
             "normalized_char_count_reference": int(len(ref_norm)),
         },
-        "run_metrics": run_metrics,
     }
