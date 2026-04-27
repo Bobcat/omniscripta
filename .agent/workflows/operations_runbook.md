@@ -13,7 +13,7 @@ description: Canonical workflow for Omniscripta frontend + Transcribe backend (p
 
 2. Verify server-side dev services on `dc1`:
 ```bash
-systemctl --user --no-pager status omniscripta-api-dev.service asr-pool-dev.service omniscripta-frontend-dev.service asr-worker-dev@1.service llm-worker-dev@1.service
+systemctl --user --no-pager status omniscripta-api-dev.service asr-pool-dev.service omniscripta-frontend-dev.service asr-worker-dev@1.service
 ```
 
 3. If you changed backend code and want the full dev stack fresh:
@@ -91,14 +91,13 @@ systemctl --user --no-pager status omniscripta-api-dev.service asr-pool-dev.serv
 - API service: `omniscripta-api-dev.service` (127.0.0.1:8001)
 - ASR pool service: `asr-pool-dev.service` (127.0.0.1:18090)
 - Worker service template: `asr-worker-dev@.service`
-- LLM worker service template: `llm-worker-dev@.service`
 - Frontend proxy service: `omniscripta-frontend-dev.service` (127.0.0.1:8010)
 - API/LLM/frontend env file: `~/.config/transcribe/dev.env`
 - ASR pool env file: `~/.config/asr-pool-dev/dev.env`
 - ASR worker env file: `~/.config/asr-worker/asr-worker.dev.env`
 - Dev frontend static target: `~/projects/omniscripta/static`
-- Note: dev API code now lives under `~/projects/omniscripta/app`, the LLM worker code now lives under `~/projects/omniscripta/workers/llm`, and the live engine resolves `realtime_asr_engine` from the sibling checkout at `~/projects/realtime-asr-engine/src`. The dev API service still uses the legacy venv at `/srv/omniscripta/portal-api/.venv`, and `llm-worker-dev@.service` still uses `/srv/omniscripta/worker/.venv`.
-- Dev API and worker services resolve `asr_pool_api` from `~/projects/asr-pool-api-dev/src` via service-level `PYTHONPATH`.
+- Note: dev API code now lives under `~/projects/omniscripta/app`, and the live engine resolves `realtime_asr_engine` from the sibling checkout at `~/projects/realtime-asr-engine/src`. The dev API service still uses the legacy venv at `/srv/omniscripta/portal-api/.venv`.
+- Dev API and ASR worker services resolve `asr_pool_api` from `~/projects/asr-pool-api-dev/src` via service-level `PYTHONPATH`.
 
 ### Shared client library
 - Dev consumers now import `asr_pool_api` from the dedicated dev repo `~/projects/asr-pool-api-dev`.
@@ -172,7 +171,6 @@ systemctl --user enable --now omniscripta-api-dev.service
 systemctl --user enable --now asr-pool-dev.service
 systemctl --user enable --now omniscripta-frontend-dev.service
 systemctl --user enable --now asr-worker-dev@1.service
-systemctl --user enable --now llm-worker-dev@1.service
 ```
 
 ### On server (`dc1`) - prod services (system scope)

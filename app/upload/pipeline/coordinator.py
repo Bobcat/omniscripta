@@ -59,7 +59,7 @@ def _load_service_cfg() -> dict[str, Any]:
             "api": "api",
             "asr_worker_batch": "asr-worker-batch",
             "api_topics": "api-topics",
-            "llm_worker": "llm-worker",
+            "llm_pool": "llm-pool",
         },
     }
     raw_snip = get_setting("upload.snip", {})
@@ -209,6 +209,7 @@ class UploadBatchCoordinator:
             1.0,
             float(get_float("upload.coordinator.idle_log_interval_s", 30.0, min_value=1.0)),
         )
+        self._llm_pool_base_url = str(get_str("llm.pool.base_url", "http://127.0.0.1:8011") or "").strip()
         self._llm_wait_poll_s = max(
             0.1,
             float(get_float("upload.coordinator.llm_wait_poll_s", 0.5, min_value=0.1)),
@@ -525,6 +526,7 @@ class UploadBatchCoordinator:
             service_cfg=_load_service_cfg(),
             progress_runs_path=_progress_runs_path(),
             hardware_key=_hardware_key(_host_id()),
+            llm_pool_base_url=self._llm_pool_base_url,
             llm_wait_poll_s=self._llm_wait_poll_s,
             llm_wait_timeout_s=self._llm_wait_timeout_s,
             stop_event=self._stop,
