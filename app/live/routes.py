@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Request, WebSocket
 from fastapi.responses import FileResponse, Response
 
 from live.results.exports import (
+    build_live_result_metrics_snapshot,
     build_live_result_envelope,
     list_live_benchmark_exports,
     live_pc_events_to_text,
@@ -216,7 +217,6 @@ def get_live_session_quality(session_id: str, fixture_id: str | None = None) -> 
         quality = score_live_text_against_fixture(
             fixture_id=resolved_fixture_id,
             live_text=final_text,
-            live_result=result,
         )
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -230,10 +230,12 @@ def get_live_session_quality(session_id: str, fixture_id: str | None = None) -> 
         "ready": True,
         "quality": quality,
     }
+    benchmark_envelope = dict(envelope)
+    benchmark_envelope["result_metrics"] = build_live_result_metrics_snapshot(result)
     try_autosave_live_benchmark_snapshot(
         session_id=str(session_id),
         artifact_name="final-quality",
-        envelope=envelope,
+        envelope=benchmark_envelope,
         request_meta={
             "fixture_test_mode": str(result.get("fixture_test_mode") or ""),
             "fixture_version": str(result.get("fixture_version") or ""),

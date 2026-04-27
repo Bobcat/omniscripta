@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import threading
+import time
 import wave
 from dataclasses import dataclass
 from pathlib import Path
@@ -213,10 +214,36 @@ class LiveChunkBatchBridge:
     def _request_consumer_id(self, *, safe_session_id: str) -> str:
         return f"live_{safe_session_id[:96]}"
 
+    def _with_timing_fields(self, *, status: dict[str, Any], timings: dict[str, Any]) -> dict[str, Any]:
+        merged = dict(status or {})
+        resolved_timings = dict(timings or {})
+        merged["asr_timings"] = resolved_timings
+        merged["asr_timing_runner_wall_s"] = _safe_float(resolved_timings.get("total_s"))
+        merged["asr_timing_prepare_s"] = _safe_float(resolved_timings.get("prepare_s"))
+        merged["asr_timing_load_audio_s"] = _safe_float(resolved_timings.get("load_audio_s"))
+        merged["asr_timing_transcribe_call_s"] = _safe_float(resolved_timings.get("transcribe_call_s"))
+        merged["asr_timing_transcribe_s"] = _safe_float(resolved_timings.get("transcribe_s"))
+        merged["asr_timing_transcribe_overhead_s"] = _safe_float(resolved_timings.get("transcribe_overhead_s"))
+        merged["asr_timing_align_s"] = _safe_float(resolved_timings.get("align_s"))
+        merged["asr_timing_diarize_s"] = _safe_float(resolved_timings.get("diarize_s"))
+        merged["asr_timing_finalize_s"] = _safe_float(resolved_timings.get("finalize_s"))
+        merged["asr_timing_pool_ingest_s"] = _safe_float(resolved_timings.get("pool_ingest_s"))
+        merged["asr_timing_pool_queue_wait_s"] = _safe_float(resolved_timings.get("pool_queue_wait_s"))
+        merged["asr_timing_pool_wall_s"] = _safe_float(resolved_timings.get("pool_wall_s"))
+        merged["asr_timing_pool_outside_runner_s"] = _safe_float(resolved_timings.get("pool_outside_runner_s"))
+        merged["asr_timing_backend_wav_write_s"] = _safe_float(resolved_timings.get("backend_wav_write_s"))
+        merged["asr_timing_backend_submit_s"] = _safe_float(resolved_timings.get("backend_submit_s"))
+        merged["asr_timing_backend_result_collect_s"] = _safe_float(resolved_timings.get("backend_result_collect_s"))
+        merged["asr_timing_backend_artifact_get_s"] = _safe_float(resolved_timings.get("backend_artifact_get_s"))
+        merged["asr_timing_backend_srt_parse_s"] = _safe_float(resolved_timings.get("backend_srt_parse_s"))
+        merged["asr_timing_backend_wall_s"] = _safe_float(resolved_timings.get("backend_wall_s"))
+        merged["asr_timing_backend_outside_pool_s"] = _safe_float(resolved_timings.get("backend_outside_pool_s"))
+        return merged
+
     def _pool_status_from_response(self, *, request_id: str, response: dict[str, Any]) -> dict[str, Any]:
         timings = dict(response.get("timings") or {})
         runtime_meta = dict(response.get("runtime") or {})
-        return {
+        status = {
             "state": "done",
             "phase": "done",
             "progress": 1.0,
@@ -225,15 +252,44 @@ class LiveChunkBatchBridge:
             "asr_request_id": str(request_id),
             "asr_state": "completed",
             "asr_runtime": runtime_meta,
-            "asr_timings": timings,
-            "asr_timing_whisperx_total_s": _safe_float(timings.get("total_s")),
-            "asr_timing_whisperx_prepare_s": _safe_float(timings.get("prepare_s")),
-            "asr_timing_whisperx_transcribe_call_s": _safe_float(timings.get("transcribe_call_s")),
-            "asr_timing_whisperx_transcribe_s": _safe_float(timings.get("transcribe_s")),
-            "asr_timing_whisperx_align_s": _safe_float(timings.get("align_s")),
-            "asr_timing_whisperx_diarize_s": _safe_float(timings.get("diarize_s")),
-            "asr_timing_whisperx_finalize_s": _safe_float(timings.get("finalize_s")),
         }
+        return self._with_timing_fields(status=status, timings=timings)
+
+    def _augment_backend_status(
+        self,
+        *,
+        status: dict[str, Any],
+        meta: dict[str, Any],
+        result_collect_s: float,
+        artifact_get_s: float = 0.0,
+        srt_parse_s: float = 0.0,
+    ) -> dict[str, Any]:
+        merged = dict(status or {})
+        timings = dict(merged.get("asr_timings") or {})
+
+        backend_wav_write_s = _safe_float(meta.get("backend_wav_write_s"))
+        if backend_wav_write_s is not None:
+            timings["backend_wav_write_s"] = round(float(backend_wav_write_s), 6)
+
+        backend_submit_s = _safe_float(meta.get("backend_submit_s"))
+        if backend_submit_s is not None:
+            timings["backend_submit_s"] = round(float(backend_submit_s), 6)
+
+        timings["backend_result_collect_s"] = round(max(0.0, float(result_collect_s)), 6)
+        timings["backend_artifact_get_s"] = round(max(0.0, float(artifact_get_s)), 6)
+        timings["backend_srt_parse_s"] = round(max(0.0, float(srt_parse_s)), 6)
+
+        backend_started_mono = _safe_float(meta.get("backend_started_mono"))
+        backend_wall_s: float | None = None
+        if backend_started_mono is not None:
+            backend_wall_s = max(0.0, float(time.monotonic()) - float(backend_started_mono))
+            timings["backend_wall_s"] = round(float(backend_wall_s), 6)
+
+        pool_wall_s = _safe_float(timings.get("pool_wall_s"))
+        if backend_wall_s is not None and pool_wall_s is not None:
+            timings["backend_outside_pool_s"] = round(max(0.0, float(backend_wall_s) - float(pool_wall_s)), 6)
+
+        return self._with_timing_fields(status=merged, timings=timings)
 
     def _on_completion_stream_event(self, kind: str, payload: dict[str, Any]) -> None:
         event_kind = str(kind or "").strip().lower()
@@ -350,6 +406,7 @@ class LiveChunkBatchBridge:
         asr_backend: str | None = None,
         initial_prompt: str | None = None,
     ) -> EnqueuedChunkJob:
+        backend_started_mono = time.monotonic()
         safe_id = _safe_session_id(session_id)
         idx = int(max(0, chunk_index))
         sess_dir = (self.chunks_root / safe_id).resolve()
@@ -359,11 +416,13 @@ class LiveChunkBatchBridge:
         raw = bytes(pcm16le or b"")
         if (len(raw) % DEFAULT_SAMPLE_WIDTH_BYTES) != 0:
             raw = raw[: len(raw) - 1]
+        wav_write_started_mono = time.monotonic()
         with wave.open(str(chunk_wav), "wb") as wf:
             wf.setnchannels(self.channels)
             wf.setsampwidth(DEFAULT_SAMPLE_WIDTH_BYTES)
             wf.setframerate(self.sample_rate_hz)
             wf.writeframes(raw)
+        backend_wav_write_s = max(0.0, float(time.monotonic()) - float(wav_write_started_mono))
 
         prompt_text = str(initial_prompt or "").strip()
         prompt_words = len([tok for tok in prompt_text.split() if tok])
@@ -417,22 +476,25 @@ class LiveChunkBatchBridge:
                 text=False,
                 segments=False,
                 srt=True,
-                srt_inline=False,
+                srt_inline=True,
             ),
         )
+        submit_started_mono = time.monotonic()
         try:
             submit_status = self._pool_client.submit_audio(submit_request)
         except ASRPoolError as e:
             raise RuntimeError(f"{e.code}: {e.message}") from e
+        backend_submit_s = max(0.0, float(time.monotonic()) - float(submit_started_mono))
         accepted_request_id = str(submit_status.request_id or request_id).strip() or request_id
-        srt_path = (sess_dir / f"{accepted_request_id}.srt").resolve()
         with self._lock:
             feed_generation = int(max(0, self._feed_generation))
             self._request_meta[str(accepted_request_id)] = {
                 "session_id": str(session_id),
                 "consumer_id": str(consumer_id),
-                "srt_path": str(srt_path),
                 "feed_generation": int(feed_generation),
+                "backend_started_mono": float(backend_started_mono),
+                "backend_wav_write_s": round(float(backend_wav_write_s), 6),
+                "backend_submit_s": round(float(backend_submit_s), 6),
             }
         return EnqueuedChunkJob(
             session_id=str(session_id),
@@ -469,6 +531,7 @@ class LiveChunkBatchBridge:
                     "asr_request_id": rid,
                     "asr_state": "feed_reset",
                 }
+                status = self._augment_backend_status(status=status, meta=meta, result_collect_s=0.0)
                 with self._lock:
                     self._request_meta.pop(rid, None)
                 return ChunkJobPollResult(
@@ -494,32 +557,32 @@ class LiveChunkBatchBridge:
                 segments=[],
             )
         raw_state = str(terminal.get("state") or "").strip().lower()
+        result_collect_started_mono = time.monotonic()
         if raw_state == "completed":
+            artifact_get_s = 0.0
+            srt_parse_s = 0.0
             srt_text = ""
             plain = ""
             segments: list[dict[str, Any]] = []
-            srt_path_raw = str(meta.get("srt_path") or "").strip()
-            if not srt_path_raw:
-                raise RuntimeError(f"Missing SRT output path for request: {rid}")
-            srt_path = Path(srt_path_raw).resolve()
-            try:
-                self._pool_client.download_srt(
-                    request_id=rid,
-                    dst_path=srt_path,
-                    allow_empty=True,
-                )
-            except ASRPoolError as e:
-                raise RuntimeError(f"{e.code}: {e.message}") from e
-            if srt_path.exists():
-                srt_text = srt_path.read_text(encoding="utf-8")
-                segments = _parse_srt_segments(srt_text, t0_offset_ms=int(max(0, t0_offset_ms)))
-                plain = "\n".join(
-                    str(seg.get("text") or "").strip() for seg in segments if str(seg.get("text") or "").strip()
-                )
-                if not plain:
-                    plain = _srt_to_plain_text(srt_text)
             response = dict(terminal.get("response") or {})
+            result = dict(response.get("result") or {})
+            if "srt_text" not in result:
+                raise RuntimeError(f"Missing inline SRT in terminal response for request: {rid}")
+            srt_parse_started_mono = time.monotonic()
+            srt_text = str(result.get("srt_text") or "")
+            segments = _parse_srt_segments(srt_text, t0_offset_ms=int(max(0, t0_offset_ms)))
+            plain = "\n".join(str(seg.get("text") or "").strip() for seg in segments if str(seg.get("text") or "").strip())
+            if not plain:
+                plain = _srt_to_plain_text(srt_text)
+            srt_parse_s = max(0.0, float(time.monotonic()) - float(srt_parse_started_mono))
             status = self._pool_status_from_response(request_id=rid, response=response)
+            status = self._augment_backend_status(
+                status=status,
+                meta=meta,
+                result_collect_s=max(0.0, float(time.monotonic()) - float(result_collect_started_mono)),
+                artifact_get_s=artifact_get_s,
+                srt_parse_s=srt_parse_s,
+            )
             with self._lock:
                 self._request_meta.pop(rid, None)
             return ChunkJobPollResult(
@@ -545,6 +608,14 @@ class LiveChunkBatchBridge:
             "asr_request_id": rid,
             "asr_state": raw_state,
         }
+        response = dict(terminal.get("response") or {})
+        if response:
+            status = self._with_timing_fields(status=status, timings=dict(response.get("timings") or {}))
+        status = self._augment_backend_status(
+            status=status,
+            meta=meta,
+            result_collect_s=max(0.0, float(time.monotonic()) - float(result_collect_started_mono)),
+        )
         with self._lock:
             self._request_meta.pop(rid, None)
         return ChunkJobPollResult(

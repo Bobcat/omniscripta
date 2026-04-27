@@ -56,8 +56,20 @@ class LiveSession:
     fixture_test_mode: str = ""
     asr_language: str = ""
     live_engine_runtime: dict[str, Any] = field(default_factory=dict)
-    gpu_proxy_transcribe_s: float = 0.0
-    gpu_proxy_pipeline_s: float = 0.0
+    asr_transcribe_s: float = 0.0
+    asr_load_audio_s: float = 0.0
+    asr_runner_wall_s: float = 0.0
+    asr_pool_wall_s: float = 0.0
+    asr_pool_ingest_s: float = 0.0
+    asr_pool_queue_wait_s: float = 0.0
+    asr_pool_outside_runner_s: float = 0.0
+    asr_backend_wall_s: float = 0.0
+    asr_backend_wav_write_s: float = 0.0
+    asr_backend_submit_s: float = 0.0
+    asr_backend_result_collect_s: float = 0.0
+    asr_backend_artifact_get_s: float = 0.0
+    asr_backend_srt_parse_s: float = 0.0
+    asr_backend_outside_pool_s: float = 0.0
 
 
 @dataclass
@@ -86,8 +98,20 @@ class ClosedSessionArchive:
     fixture_test_mode: str = ""
     asr_language: str = ""
     live_engine_runtime: dict[str, Any] = field(default_factory=dict)
-    gpu_proxy_transcribe_s: float = 0.0
-    gpu_proxy_pipeline_s: float = 0.0
+    asr_transcribe_s: float = 0.0
+    asr_load_audio_s: float = 0.0
+    asr_runner_wall_s: float = 0.0
+    asr_pool_wall_s: float = 0.0
+    asr_pool_ingest_s: float = 0.0
+    asr_pool_queue_wait_s: float = 0.0
+    asr_pool_outside_runner_s: float = 0.0
+    asr_backend_wall_s: float = 0.0
+    asr_backend_wav_write_s: float = 0.0
+    asr_backend_submit_s: float = 0.0
+    asr_backend_result_collect_s: float = 0.0
+    asr_backend_artifact_get_s: float = 0.0
+    asr_backend_srt_parse_s: float = 0.0
+    asr_backend_outside_pool_s: float = 0.0
 
 
 def copy_pc_events(events: list[dict[str, str]]) -> list[dict[str, str]]:

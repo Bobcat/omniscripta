@@ -201,11 +201,45 @@ def _read_json_file(path: Path) -> dict[str, Any] | None:
     return raw if isinstance(raw, dict) else None
 
 
+def build_live_result_metrics_snapshot(result_payload: dict[str, Any]) -> dict[str, Any]:
+    result = dict(result_payload or {})
+    return {
+        "finalization_state": str(result.get("finalization_state") or ""),
+        "recording_duration_ms": int(result.get("recording_duration_ms") or 0),
+        "transcript_revision": int(result.get("transcript_revision") or 0),
+        "chunks_total": int(result.get("chunks_total") or 0),
+        "chunks_done": int(result.get("chunks_done") or 0),
+        "chunks_failed": int(result.get("chunks_failed") or 0),
+        "chunks_pending": int(result.get("chunks_pending") or 0),
+        "final_segments_count": int(result.get("final_segments_count") or 0),
+        "final_text_chars": len(live_result_to_plain_text(result)),
+        "chunk_reason_counts": (
+            dict(result.get("chunk_reason_counts"))
+            if isinstance(result.get("chunk_reason_counts"), dict)
+            else {}
+        ),
+        "asr_transcribe_total_s": result.get("asr_transcribe_s"),
+        "asr_load_audio_total_s": result.get("asr_load_audio_s"),
+        "asr_runner_wall_total_s": result.get("asr_runner_wall_s"),
+        "asr_pool_wall_total_s": result.get("asr_pool_wall_s"),
+        "asr_pool_ingest_total_s": result.get("asr_pool_ingest_s"),
+        "asr_pool_queue_wait_total_s": result.get("asr_pool_queue_wait_s"),
+        "asr_pool_outside_runner_total_s": result.get("asr_pool_outside_runner_s"),
+        "asr_backend_wall_total_s": result.get("asr_backend_wall_s"),
+        "asr_backend_wav_write_total_s": result.get("asr_backend_wav_write_s"),
+        "asr_backend_submit_total_s": result.get("asr_backend_submit_s"),
+        "asr_backend_result_collect_total_s": result.get("asr_backend_result_collect_s"),
+        "asr_backend_artifact_get_total_s": result.get("asr_backend_artifact_get_s"),
+        "asr_backend_srt_parse_total_s": result.get("asr_backend_srt_parse_s"),
+        "asr_backend_outside_pool_total_s": result.get("asr_backend_outside_pool_s"),
+    }
+
+
 def _flatten_live_benchmark_record(record: dict[str, Any]) -> dict[str, Any]:
     payload = dict(record.get("payload") or {})
     quality = dict(payload.get("quality") or {})
     score = dict(quality.get("score") or {})
-    run = dict(quality.get("run_metrics") or {})
+    run = dict(payload.get("result_metrics") or {})
     request_meta = dict(record.get("request_meta") or {})
     tuning = dict(request_meta.get("live_tuning_snapshot") or {})
 
@@ -231,8 +265,11 @@ def _flatten_live_benchmark_record(record: dict[str, Any]) -> dict[str, Any]:
             if isinstance(run.get("chunk_reason_counts"), dict)
             else {}
         ),
-        "gpu_proxy_transcribe_total_s": run.get("gpu_proxy_transcribe_total_s"),
-        "gpu_proxy_pipeline_total_s": run.get("gpu_proxy_pipeline_total_s"),
+        "asr_transcribe_total_s": run.get("asr_transcribe_total_s"),
+        "asr_load_audio_total_s": run.get("asr_load_audio_total_s"),
+        "asr_runner_wall_total_s": run.get("asr_runner_wall_total_s"),
+        "asr_pool_wall_total_s": run.get("asr_pool_wall_total_s"),
+        "asr_backend_wall_total_s": run.get("asr_backend_wall_total_s"),
         "live_tuning_snapshot": tuning,
     }
 
