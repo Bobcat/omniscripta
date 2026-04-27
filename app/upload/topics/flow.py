@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import Future
 import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from app.config.settings import get_str
 from upload.jobs.queue_fs import JobPaths
 from upload._util import (
     _append_log,
@@ -21,11 +23,13 @@ from upload._util import (
 from upload.pipeline.progress_plan import DEFAULTS_SECONDS, build_prediction, phase_order_for_job
 from upload.status_io import _write_status, _write_status_safely
 from upload.topics.chunk_speaker_lines import chunk_speaker_lines
+from upload.topics.llm_pool import run_prompt_to_output_files
 from upload.topics.merge import merge_topics
 from upload.topics.parse import parse_topics_raw_file
 from upload.topics.speaker_lines import make_speaker_lines_from_srt
 from upload.topics.validate import validate_all_chunks
-from workers.llm.queue_fs import DONE as LLM_DONE, ERROR as LLM_ERROR, init_task_in_inbox
+
+
 def _pick_srt_path(*, job: JobPaths, status: dict[str, Any]) -> Path | None:
     whisperx_dir = (job.dir / "whisperx").resolve()
     srt_name = str(status.get("srt_filename") or "").strip()
@@ -292,6 +296,7 @@ class TopicsFlow:
         service_cfg: dict[str, Any],
         progress_runs_path: Path,
         hardware_key: str,
+        llm_pool_base_url: str,
         llm_wait_poll_s: float,
         llm_wait_timeout_s: float,
         stop_event: threading.Event,
@@ -299,6 +304,7 @@ class TopicsFlow:
         self._service_cfg = dict(service_cfg or {})
         self._progress_runs_path = progress_runs_path
         self._hardware_key = str(hardware_key)
+        self._llm_pool_base_url = str(llm_pool_base_url or "").strip()
         self._llm_wait_poll_s = max(0.1, float(llm_wait_poll_s))
         self._llm_wait_timeout_s = max(30.0, float(llm_wait_timeout_s))
         self._stop = stop_event
@@ -306,25 +312,47 @@ class TopicsFlow:
     def _status_owner(self, key: str, default: str) -> str:
         return _resolve_status_owner(service_cfg=self._service_cfg, key=key, default=default)
 
-    def _enqueue_topics_tasks(
+    def _run_topics_pool_requests(
         self,
         *,
         job: JobPaths,
         manifest_path: Path,
         orig_stem: str,
         prompt_id: str,
-    ) -> dict[int, str]:
+        progress_tracker: _TopicsProgressTracker,
+    ) -> dict[int, Path]:
+        llm_status_owner = self._status_owner("llm_pool", "llm-pool")
+        progress_tracker.start(
+            message="Topics: dispatching llm requests",
+            status_owner=llm_status_owner,
+        )
+        _write_status_safely(
+            job.status_path,
+            state="running",
+            phase="topics",
+            subphase="llm_pool",
+            status_owner=llm_status_owner,
+            message="Topics: dispatching llm requests",
+        )
+        if not self._llm_pool_base_url:
+            raise RuntimeError("Missing llm.pool.base_url")
+
         topics_cfg = dict(self._service_cfg.get("topics") or {})
         result_dir = (job.dir / "result").resolve()
         prompt_path = Path(str(topics_cfg.get("prompt_path") or "").strip())
         if not prompt_path.is_absolute():
             prompt_path = (Path(__file__).resolve().parents[3] / prompt_path).resolve()
+        prompt_text = prompt_path.read_text(encoding="utf-8", errors="replace").rstrip("\n")
         model = str(topics_cfg.get("model") or "").strip()
+        if not model:
+            model = get_str("llm.default_model", "").strip()
+        if not model:
+            raise RuntimeError("upload.topics.model is not set and llm.default_model is empty")
         generation = dict(topics_cfg.get("generation") or {})
 
         manifest = _read_json(manifest_path)
         chunks = manifest.get("chunks") or []
-        task_ids: dict[int, str] = {}
+        pending_futures: dict[int, Future[Path]] = {}
         for ch in chunks:
             if not isinstance(ch, dict):
                 continue
@@ -334,70 +362,81 @@ class TopicsFlow:
                 continue
             chunk_path = (result_dir / chunk_name).resolve()
             if not chunk_path.exists():
-                raise RuntimeError(f"Missing chunk input for llm task: {chunk_path}")
+                raise RuntimeError(f"Missing chunk input for llm request: {chunk_path}")
             out_base = f"{orig_stem}_{prompt_id}_chunk_{idx:04d}"
-            task = init_task_in_inbox(
-                task_kind="prompt_run",
-                spec={
-                    "owner_kind": "upload_audio",
-                    "owner_job_id": job.job_id,
-                    "prompt_id": prompt_id,
-                    "model": model,
-                    "prompt_path": str(prompt_path),
-                    "generation": generation,
-                    "input_artifact": str(chunk_path),
-                    "output_dir": str(result_dir),
+            result_future: Future[Path] = Future()
+
+            def _runner(*, future: Future[Path], input_path: Path, output_basename: str) -> None:
+                try:
+                    text_path = run_prompt_to_output_files(
+                        base_url=self._llm_pool_base_url,
+                        model=model,
+                        prompt_text=prompt_text,
+                        input_path=input_path,
+                        output_dir=result_dir,
+                        output_basename=output_basename,
+                        decoding=generation,
+                        timeout_s=self._llm_wait_timeout_s,
+                    )
+                except Exception as exc:
+                    future.set_exception(exc)
+                    return
+                future.set_result(text_path)
+
+            thread = threading.Thread(
+                target=_runner,
+                kwargs={
+                    "future": result_future,
+                    "input_path": chunk_path,
                     "output_basename": out_base,
                 },
+                name=f"topics-llm-{job.job_id}-{idx:04d}",
+                daemon=True,
             )
-            task_ids[idx] = task.task_id
-        return task_ids
+            thread.start()
+            pending_futures[idx] = result_future
 
-    def _wait_topics_tasks(
-        self,
-        task_ids: dict[int, str],
-        *,
-        progress_tracker: _TopicsProgressTracker | None = None,
-    ) -> dict[int, Path]:
-        pending = dict(task_ids)
+        wait_message = f"Topics: waiting for 0/{len(pending_futures)} llm responses"
+        _write_status_safely(
+            job.status_path,
+            state="running",
+            phase="topics",
+            subphase="llm_pool",
+            status_owner=llm_status_owner,
+            message=wait_message,
+        )
+        progress_tracker.update(
+            done_count=0,
+            total_count=len(pending_futures),
+            message=wait_message,
+            status_owner=llm_status_owner,
+        )
+
         outputs: dict[int, Path] = {}
-        total = len(task_ids)
+        total = len(pending_futures)
         deadline = time.monotonic() + self._llm_wait_timeout_s
-        while pending and not self._stop.is_set():
-            for idx, task_id in list(pending.items()):
-                done_dir = (LLM_DONE / task_id).resolve()
-                err_dir = (LLM_ERROR / task_id).resolve()
-                if done_dir.exists():
-                    status_path = (done_dir / "status.json").resolve()
-                    status = _read_json(status_path) if status_path.exists() else {}
-                    result = dict(status.get("result") or {})
-                    text_path_raw = str(result.get("output_text_path") or "").strip()
-                    if not text_path_raw:
-                        raise RuntimeError(f"Missing output_text_path in llm task result: {task_id}")
-                    text_path = Path(text_path_raw).resolve()
-                    if not text_path.exists():
-                        raise RuntimeError(f"LLM task output text missing: {text_path}")
-                    outputs[idx] = text_path
-                    pending.pop(idx, None)
+        while pending_futures and not self._stop.is_set():
+            for idx, result_future in list(pending_futures.items()):
+                if not result_future.done():
                     continue
-                if err_dir.exists():
-                    status_path = (err_dir / "status.json").resolve()
-                    status = _read_json(status_path) if status_path.exists() else {}
-                    err = str(status.get("error") or "unknown llm worker error")
-                    raise RuntimeError(f"LLM task failed task_id={task_id}: {err}")
-            if progress_tracker is not None:
-                progress_tracker.update(
-                    done_count=len(outputs),
-                    total_count=total,
-                    message=f"Topics: waiting for {len(outputs)}/{total} llm tasks",
-                )
-            if not pending:
+                try:
+                    outputs[idx] = result_future.result()
+                except Exception as exc:
+                    raise RuntimeError(f"LLM pool request failed chunk={idx}: {exc}") from exc
+                pending_futures.pop(idx, None)
+            progress_tracker.update(
+                done_count=len(outputs),
+                total_count=total,
+                message=f"Topics: waiting for {len(outputs)}/{total} llm responses",
+                status_owner=llm_status_owner,
+            )
+            if not pending_futures:
                 break
             if time.monotonic() > deadline:
-                raise RuntimeError(f"Timed out waiting for llm tasks: pending={len(pending)}")
+                raise RuntimeError(f"Timed out waiting for llm pool responses: pending={len(pending_futures)}")
             self._stop.wait(self._llm_wait_poll_s)
         if self._stop.is_set():
-            raise RuntimeError("Coordinator stopping while waiting for llm tasks")
+            raise RuntimeError("Coordinator stopping while waiting for llm pool responses")
         return outputs
 
     def _build_progress_tracker(
@@ -479,7 +518,7 @@ class TopicsFlow:
         topics_status = "ok"
         topics_warning = ""
         try:
-            chunk_outputs = self._run_topics_queue_wait(
+            chunk_outputs = self._run_topics_pool_requests(
                 job=job,
                 manifest_path=manifest_path,
                 orig_stem=orig_stem,
@@ -509,51 +548,6 @@ class TopicsFlow:
             _append_log(job.log_path, f"topics_nonfatal error={e!r}")
         topics_llm_elapsed_s = max(0.0, time.monotonic() - topics_llm_started_mono)
         return topics_status, topics_warning, topics_llm_elapsed_s
-
-    def _run_topics_queue_wait(
-        self,
-        *,
-        job: JobPaths,
-        manifest_path: Path,
-        orig_stem: str,
-        prompt_id: str,
-        progress_tracker: _TopicsProgressTracker,
-    ) -> dict[int, Path]:
-        llm_status_owner = self._status_owner("llm_worker", "llm-worker")
-        progress_tracker.start(
-            message="Topics: enqueueing llm tasks",
-            status_owner=llm_status_owner,
-        )
-        _write_status_safely(
-            job.status_path,
-            state="running",
-            phase="topics",
-            subphase="queue",
-            status_owner=llm_status_owner,
-            message="Topics: enqueueing llm tasks",
-        )
-        task_ids = self._enqueue_topics_tasks(
-            job=job,
-            manifest_path=manifest_path,
-            orig_stem=orig_stem,
-            prompt_id=prompt_id,
-        )
-        wait_message = f"Topics: waiting for 0/{len(task_ids)} llm tasks"
-        _write_status_safely(
-            job.status_path,
-            state="running",
-            phase="topics",
-            subphase="wait",
-            status_owner=llm_status_owner,
-            message=wait_message,
-        )
-        progress_tracker.update(
-            done_count=0,
-            total_count=len(task_ids),
-            message=wait_message,
-            status_owner=llm_status_owner,
-        )
-        return self._wait_topics_tasks(task_ids, progress_tracker=progress_tracker)
 
     def _parse_topics_outputs(
         self,

@@ -7,7 +7,6 @@ set -euo pipefail
 API_UNIT="omniscripta-api-dev.service"
 ASR_UNIT="asr-pool-dev.service"
 BATCH_WORKER_UNIT="asr-worker-dev@1.service"
-LLM_WORKER_UNIT="llm-worker-dev@1.service"
 FRONTEND_UNIT="omniscripta-frontend-dev.service"
 
 API_HEALTH_URL="http://127.0.0.1:8001/health"
@@ -59,8 +58,8 @@ print_status() {
   done
 }
 
-log "Stopping workers to release long-lived pool connections..."
-systemctl --user stop "$BATCH_WORKER_UNIT" "$LLM_WORKER_UNIT"
+log "Stopping upload worker to release long-lived pool connections..."
+systemctl --user stop "$BATCH_WORKER_UNIT"
 
 log "Restarting API + ASR pool..."
 systemctl --user restart "$API_UNIT" "$ASR_UNIT"
@@ -72,7 +71,7 @@ log "Waiting for ASR pool readiness (warm startup may take time)..."
 wait_for_http "$ASR_POOL_URL" "$ASR_POOL_READY_TIMEOUT_S" "ASR pool readiness"
 
 log "Starting workers..."
-systemctl --user start "$BATCH_WORKER_UNIT" "$LLM_WORKER_UNIT"
+systemctl --user start "$BATCH_WORKER_UNIT"
 
 log "Restarting frontend proxy..."
 systemctl --user restart "$FRONTEND_UNIT"
@@ -86,7 +85,6 @@ print_status \
   "$API_UNIT" \
   "$ASR_UNIT" \
   "$BATCH_WORKER_UNIT" \
-  "$LLM_WORKER_UNIT" \
   "$FRONTEND_UNIT"
 
 echo
