@@ -189,7 +189,7 @@ def _queue_snapshot(queue_root: Any) -> Dict[str, Any]:
 
 def _api_ops_metrics_snapshot() -> Dict[str, Any]:
     from live.config import LIVE_SESSIONS
-    from upload.queue_roots import UPLOAD_PREP_QUEUE, UPLOAD_WORKER_QUEUE
+    from upload.jobs.roots import UPLOAD_PREP_QUEUE, UPLOAD_WORKER_QUEUE
     from upload.pipeline.coordinator import UPLOAD_BATCH_COORDINATOR
 
     now_ts = datetime.now(timezone.utc).timestamp()

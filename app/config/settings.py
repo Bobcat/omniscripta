@@ -202,9 +202,3 @@ def reload_config() -> dict[str, Any]:
     global _CONFIG
     _CONFIG = load_config()
     return _CONFIG
-
-
-# Legacy compatibility: helper to get env var with prefix
-def env(name: str, default: T | None = None) -> T | Any:
-    """Get environment variable (legacy helper)."""
-    return _get_env_value(name, default)

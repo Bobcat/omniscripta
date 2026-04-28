@@ -10,6 +10,7 @@ from typing import Any
 
 from app.config.settings import get_str
 from upload.jobs.queue_fs import JobPaths
+from upload.jobs.status import _write_status, _write_status_safely
 from upload._util import (
     _append_log,
     _normalize_speaker_mode,
@@ -21,7 +22,6 @@ from upload._util import (
     _topics_prompt_id,
 )
 from upload.pipeline.progress_plan import DEFAULTS_SECONDS, build_prediction, phase_order_for_job
-from upload.status_io import _write_status, _write_status_safely
 from upload.topics.chunk_speaker_lines import chunk_speaker_lines
 from upload.topics.llm_pool import run_prompt_to_output_files
 from upload.topics.merge import merge_topics
