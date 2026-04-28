@@ -143,6 +143,11 @@ From `~/projects/omniscripta`:
 ~/projects/omniscripta/deploy/install-prod-system-units.sh
 ```
 
+5. Promote the prod backend checkout on `dc1` to the current `main` commit:
+```bash
+~/projects/omniscripta/deploy/promote_prod_checkout.sh
+```
+
 These scripts are the current canonical stack-control and unit-sync entry points.
 Current scope limit: `install-prod-system-units.sh` installs the `dc1` prod consumer units only; it does not manage the remote prod ASR pool runtime on `dc2`.
 
@@ -162,7 +167,39 @@ From `/var/www/omniscripta-ui`:
 ```
 - Builds frontend bundle and deploys to `~/projects/omniscripta/static`.
 
-## 6) Required systemd Services
+## 6) Prod Promote Flow
+
+When `origin/main` has moved and you want `dc1` to run that new backend code, use this order:
+
+1. Promote `/srv/omniscripta` to the target `main` commit:
+```bash
+~/projects/omniscripta/deploy/promote_prod_checkout.sh
+```
+- Default target is `origin/main`.
+- Optional explicit target:
+```bash
+~/projects/omniscripta/deploy/promote_prod_checkout.sh <commit-or-ref>
+```
+- The script keeps `/srv/omniscripta` detached on purpose.
+- It allows only the known generated `static/index.html` and `static/app/index.html` local changes.
+- If the target commit also changes those tracked static files, the script stops and tells you to restore them first, then redeploy the frontend after the promote.
+
+2. If `deploy/systemd/` changed, reinstall prod units:
+```bash
+sudo /srv/omniscripta/deploy/install-prod-system-units.sh
+```
+
+3. Restart the prod backend stack:
+```bash
+sudo /srv/omniscripta/deploy/live_restart_all.sh
+```
+
+4. If the frontend changed, deploy it separately from the frontend repo:
+```bash
+/var/www/omniscripta-ui/deploy/deploy.sh
+```
+
+## 7) Required systemd Services
 
 ### On server (`dc1`) - user services
 
@@ -181,7 +218,7 @@ sudo systemctl enable --now asr-worker.service
 sudo systemctl enable --now asr-pool-dc2-tunnel.service
 ```
 
-## 7) Tunnel Services on Your Other Computer
+## 8) Tunnel Services on Your Other Computer
 
 Tunnels run on your other computer, not on `dc1`.
 If you want tunnel auto-start after reboot, create user services there.
@@ -248,7 +285,7 @@ Optional (if you need user services before interactive login):
 sudo loginctl enable-linger "$USER"
 ```
 
-## 8) Environment Files and Secrets
+## 9) Environment Files and Secrets
 
 ### Prod
 
@@ -272,7 +309,7 @@ sudo loginctl enable-linger "$USER"
 3. ASR workers:
    - `~/.config/asr-worker/asr-worker.dev.env`
 
-## 9) Golden Rules
+## 10) Golden Rules
 
 1. Build frontend in `/var/www/omniscripta-ui`, never in `/srv/omniscripta/static`.
 2. Do API/LLM backend development in `~/projects/omniscripta`, not in `/srv/omniscripta`.
