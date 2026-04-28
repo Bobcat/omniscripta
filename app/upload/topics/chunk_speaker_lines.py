@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from upload._util import _hms_to_seconds, _seconds_to_hms
-from upload.status_io import _write_topics_status
+from upload.jobs.status import _write_topics_status
 
 
 _LINE_RE = re.compile(r"^\(\s*[^,]+,\s*(\d{2}:\d{2}:\d{2})(?:\s*-\s*\d{2}:\d{2}:\d{2})?\s*\)\s*(.*)$")

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from upload._util import _hms_to_seconds
-from upload.status_io import _write_topics_status
+from upload.jobs.status import _write_topics_status
 
 
 _SPK_RE = re.compile(r"^\s*\[?(SPEAKER_\d+)\]?\s*:?\s*(.*)\s*$", re.IGNORECASE)

@@ -14,8 +14,8 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from upload._util import _resolve_child_path, _write_json_atomic
-from upload.status_io import _write_status_snapshot
-from upload.upload_request_io import UPLOAD_REQUEST_FILENAME
+from upload.jobs.request import UPLOAD_REQUEST_FILENAME
+from upload.jobs.status import _write_status_snapshot
 
 
 def _utc_stamp() -> str:

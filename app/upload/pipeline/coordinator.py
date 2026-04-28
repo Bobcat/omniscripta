@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import socket
 import sys
 import threading
 import time
@@ -10,6 +9,9 @@ from pathlib import Path
 from typing import Any
 
 from app.config.settings import get_float, get_setting, get_str
+from upload.jobs.request import read_upload_request, upload_request_path
+from upload.jobs.roots import UPLOAD_PREP_QUEUE, UPLOAD_WORKER_QUEUE
+from upload.jobs.status import _write_status, _write_status_safely
 from upload.jobs.queue_fs import (
     JobPaths,
     finish_job,
@@ -17,7 +19,6 @@ from upload.jobs.queue_fs import (
     move_job_to_queue_inbox,
     nudge_inbox,
 )
-from upload.queue_roots import UPLOAD_PREP_QUEUE, UPLOAD_WORKER_QUEUE
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
@@ -33,10 +34,9 @@ from upload._util import (
     _write_json_atomic,
 )
 from upload.pipeline.progress_plan import DEFAULTS_SECONDS, build_prediction
+from upload.pipeline.runtime_config import hardware_key, host_id, progress_runs_path
 from upload.pipeline.snipping import make_snippet
-from upload.status_io import _write_status, _write_status_safely
 from upload.topics.flow import TopicsFlow
-from upload.upload_request_io import read_upload_request, upload_request_path
 
 def _load_service_cfg() -> dict[str, Any]:
     cfg: dict[str, Any] = {
@@ -83,42 +83,6 @@ def _load_service_cfg() -> dict[str, Any]:
         merged_status_owners.update(raw_status_owners)
         cfg["status_owners"] = merged_status_owners
     return cfg
-
-
-def _resolve_cfg_path(path_value: str, *, fallback_rel: str) -> Path:
-    raw = str(path_value or "").strip() or fallback_rel
-    p = Path(raw)
-    return p if p.is_absolute() else (_REPO_ROOT / p)
-
-
-def _progress_runs_path() -> Path:
-    raw = get_str("upload.worker.progress_runs_path", "").strip()
-    if raw:
-        return _resolve_cfg_path(raw, fallback_rel="data/upload/progress_db/runs_v1.jsonl")
-    base = _resolve_cfg_path(
-        get_str("upload.worker.progress_db_dir", "data/upload/progress_db"),
-        fallback_rel="data/upload/progress_db",
-    )
-    return (base / "runs_v1.jsonl").resolve()
-
-
-def _host_id() -> str:
-    raw = get_str("upload.worker.host_id", "").strip()
-    if raw:
-        return raw
-    return socket.gethostname().split(".")[0]
-
-
-def _hardware_key(host_id: str) -> str:
-    raw = get_str("upload.worker.hardware_key", "").strip()
-    if raw:
-        return raw
-    if host_id == "dc1":
-        return "dc1-rtx5070ti-cuda"
-    if host_id == "dc2":
-        return "dc2-rtx5090-cuda"
-    return f"{host_id}-unknown"
-
 
 class _SnippingProgressTracker:
     def __init__(
@@ -486,8 +450,8 @@ class UploadBatchCoordinator:
         speaker_mode = _normalize_speaker_mode(opts.get("speaker_mode", "auto"))
         topics_enabled = _topics_enabled_for_job(opts=opts, service_cfg=service_cfg)
         prediction = build_prediction(
-            runs_path=_progress_runs_path(),
-            hardware_key=_hardware_key(_host_id()),
+            runs_path=progress_runs_path(),
+            hardware_key=hardware_key(host_id()),
             topics_enabled=topics_enabled,
             speaker_mode=speaker_mode,
             snippet_seconds=snippet_seconds,
@@ -524,8 +488,8 @@ class UploadBatchCoordinator:
     def _process_job_locked(self, *, job: JobPaths, status: dict[str, Any]) -> None:
         TopicsFlow(
             service_cfg=_load_service_cfg(),
-            progress_runs_path=_progress_runs_path(),
-            hardware_key=_hardware_key(_host_id()),
+            progress_runs_path=progress_runs_path(),
+            hardware_key=hardware_key(host_id()),
             llm_pool_base_url=self._llm_pool_base_url,
             llm_wait_poll_s=self._llm_wait_poll_s,
             llm_wait_timeout_s=self._llm_wait_timeout_s,
