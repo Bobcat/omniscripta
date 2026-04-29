@@ -21,6 +21,7 @@ Omniscripta stack.
 - [Tests](#tests)
 - [Deployment Notes](#deployment-notes)
 - [Screenshots](#screenshots)
+- [License](#license)
 
 ## What It Does
 
