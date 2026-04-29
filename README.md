@@ -8,8 +8,6 @@ coordination, live recording session management, and operational scripts that
 tie together the separate ASR, LLM, worker, and frontend pieces of the
 Omniscripta stack.
 
-![Omniscripta live recording](static/landing-screenshots/omniscripta_live_recording.png)
-
 ## Index
 
 - [What It Does](#what-it-does)
@@ -262,6 +260,8 @@ Frontend deployment is separate from backend promotion. The frontend source repo
 builds into this repo's `static/` directory.
 
 ## Screenshots
+
+![Omniscripta live recording](static/landing-screenshots/omniscripta_live_recording.png)
 
 ![Upload transcription progress](static/landing-screenshots/omniscripta_upload_transcribing.png)
 
