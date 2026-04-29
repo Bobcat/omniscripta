@@ -263,6 +263,8 @@ builds into this repo's `static/` directory.
 
 ![Omniscripta live recording](static/landing-screenshots/omniscripta_live_recording.png)
 
+![Live recording diagnostics](static/landing-screenshots/omniscripta_live_recording_diagnostics.png)
+
 ![Upload transcription progress](static/landing-screenshots/omniscripta_upload_transcribing.png)
 
 ![Transcript editor](static/landing-screenshots/omniscripta_transcript_editor.png)
