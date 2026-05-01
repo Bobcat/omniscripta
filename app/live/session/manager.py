@@ -221,6 +221,10 @@ class LiveSessionManager:
         asr_runner_wall_s: float | None = None,
         asr_pool_wall_s: float | None = None,
         asr_pool_ingest_s: float | None = None,
+        asr_pool_ingest_body_read_s: float | None = None,
+        asr_pool_ingest_multipart_parse_s: float | None = None,
+        asr_pool_ingest_audio_write_s: float | None = None,
+        asr_pool_ingest_submit_enqueue_s: float | None = None,
         asr_pool_queue_wait_s: float | None = None,
         asr_pool_outside_runner_s: float | None = None,
         asr_backend_wall_s: float | None = None,
@@ -264,6 +268,14 @@ class LiveSessionManager:
                 sess.asr_pool_wall_s = max(0.0, float(asr_pool_wall_s))
             if asr_pool_ingest_s is not None:
                 sess.asr_pool_ingest_s = max(0.0, float(asr_pool_ingest_s))
+            if asr_pool_ingest_body_read_s is not None:
+                sess.asr_pool_ingest_body_read_s = max(0.0, float(asr_pool_ingest_body_read_s))
+            if asr_pool_ingest_multipart_parse_s is not None:
+                sess.asr_pool_ingest_multipart_parse_s = max(0.0, float(asr_pool_ingest_multipart_parse_s))
+            if asr_pool_ingest_audio_write_s is not None:
+                sess.asr_pool_ingest_audio_write_s = max(0.0, float(asr_pool_ingest_audio_write_s))
+            if asr_pool_ingest_submit_enqueue_s is not None:
+                sess.asr_pool_ingest_submit_enqueue_s = max(0.0, float(asr_pool_ingest_submit_enqueue_s))
             if asr_pool_queue_wait_s is not None:
                 sess.asr_pool_queue_wait_s = max(0.0, float(asr_pool_queue_wait_s))
             if asr_pool_outside_runner_s is not None:
@@ -558,6 +570,14 @@ class LiveSessionManager:
                 arc.asr_runner_wall_s = float(max(0.0, src_sess.asr_runner_wall_s))
                 arc.asr_pool_wall_s = float(max(0.0, src_sess.asr_pool_wall_s))
                 arc.asr_pool_ingest_s = float(max(0.0, src_sess.asr_pool_ingest_s))
+                arc.asr_pool_ingest_body_read_s = float(max(0.0, src_sess.asr_pool_ingest_body_read_s))
+                arc.asr_pool_ingest_multipart_parse_s = float(
+                    max(0.0, src_sess.asr_pool_ingest_multipart_parse_s)
+                )
+                arc.asr_pool_ingest_audio_write_s = float(max(0.0, src_sess.asr_pool_ingest_audio_write_s))
+                arc.asr_pool_ingest_submit_enqueue_s = float(
+                    max(0.0, src_sess.asr_pool_ingest_submit_enqueue_s)
+                )
                 arc.asr_pool_queue_wait_s = float(max(0.0, src_sess.asr_pool_queue_wait_s))
                 arc.asr_pool_outside_runner_s = float(max(0.0, src_sess.asr_pool_outside_runner_s))
                 arc.asr_backend_wall_s = float(max(0.0, src_sess.asr_backend_wall_s))

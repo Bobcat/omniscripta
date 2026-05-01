@@ -591,3 +591,307 @@ That means:
 
 are the next technical suspects, but they should be weighed against end-to-end
 browser-visible latency before further optimization work is prioritized.
+
+## Addendum 2026-05-01
+
+This addendum records the first prod-path submit transport experiment.
+
+### Persistent Submit HTTP Connection
+
+The shared `asr_pool_api` client was changed to keep one persistent stdlib HTTP
+connection per `ASRPoolClient` for submit requests:
+
+- repo: `/home/gunnar/projects/asr-pool-api-dev`
+- commit: `dae8b3a Reuse persistent HTTP connection for ASR submits`
+- prod checkout: `/srv/asr-pool-api`
+- consumer import path verified from:
+  - `/srv/omniscripta/portal-api/.venv`
+  - `/srv/asr-worker/.venv`
+
+Scope of the change:
+
+- `ASRPoolClient.submit_audio(...)` now reuses an HTTP/HTTPS connection for
+  consecutive submits to the same pool origin.
+- The protocol is still one multipart `POST /asr/v1/requests` per live ASR
+  chunk.
+- The completion stream was not changed.
+- No Omniscripta live backend code changed for this experiment.
+
+### Prod Runs Compared
+
+Baseline before the persistent submit connection:
+
+- session: `live_20260501T090903Z_c016af0e`
+- benchmark export:
+  `/srv/omniscripta/data/live/benchmark_exports/live_20260501T090903Z_c016af0e.final-quality.latest.json`
+
+Post-change runs:
+
+- `live_20260501T093212Z_c967b8a5`
+- `live_20260501T093530Z_954f1b0d`
+- `live_20260501T093816Z_d16bffa4`
+
+Top-level comparison:
+
+```text
+session                           chunks  backend_wall  submit   pool_wall  pool_ingest  runner_wall
+live_20260501T090903Z_c016af0e        15       57.516s  14.468s    53.692s       5.000s      45.476s
+live_20260501T093212Z_c967b8a5        16       57.008s  12.281s    52.601s       5.160s      44.285s
+live_20260501T093530Z_954f1b0d        16       57.913s  11.459s    55.036s       5.330s      46.322s
+live_20260501T093816Z_d16bffa4        17       59.282s  12.050s    54.883s       5.503s      46.019s
+```
+
+Submit per completed live chunk:
+
+```text
+baseline: 14.468s / 15 = 964.5ms/chunk
+post 1:   12.281s / 16 = 767.6ms/chunk
+post 2:   11.459s / 16 = 716.2ms/chunk
+post 3:   12.050s / 17 = 708.8ms/chunk
+```
+
+### Interpretation
+
+The persistent connection appears to reduce `backend_submit_s` consistently:
+
+```text
+baseline submit total: 14.468s
+post median submit:    12.050s
+approx submit gain:     2.418s per run
+```
+
+This is a real improvement in the bucket it targets, but it does not reliably
+lower total `backend_wall_s` in these three runs. The remaining total wall time
+is still dominated by runner time plus pool-side ingest/orchestration variance.
+
+`pool_ingest_s` did not improve:
+
+```text
+baseline pool ingest: 5.000s
+post runs:            5.160s, 5.330s, 5.503s
+```
+
+That means TCP connection setup was not the main cause of pool ingest. The
+remaining ingest cost is more likely in the existing multipart flow:
+
+- client-side file read and multipart body materialization
+- network body transfer while the pool handler is active
+- pool-side `await request.body()`
+- multipart parsing
+- pool-side upload file write
+- enqueue/validation overhead
+
+### Updated Reading
+
+Keep the persistent submit connection patch: it is small, removes repeated
+connection setup, and lowers `backend_submit_s` in the measured prod path.
+
+Do not treat it as sufficient for the remote transport problem. The next useful
+measurement is a finer split of submit/ingest:
+
+Client-side `asr_pool_api`:
+
+- multipart build/read time
+- HTTP request/response time
+- retry/stale-connection count
+
+Pool-side `asr-pool`:
+
+- request body read time
+- multipart parse time
+- uploaded audio write time
+- submit/enqueue time
+
+Without that split, further transport changes would be guessing between network
+transfer, Python multipart parsing, and disk write costs.
+
+### Submit/Ingest Split Added
+
+The finer split proposed above was then added to the dev live path.
+
+New pool-side ingest fields:
+
+- `pool_ingest_body_read_s`
+- `pool_ingest_multipart_parse_s`
+- `pool_ingest_audio_write_s`
+- `pool_ingest_submit_enqueue_s`
+
+They are now also rolled into the live benchmark export as:
+
+- `asr_pool_ingest_body_read_total_s`
+- `asr_pool_ingest_multipart_parse_total_s`
+- `asr_pool_ingest_audio_write_total_s`
+- `asr_pool_ingest_submit_enqueue_total_s`
+
+First dev run with the split:
+
+- session: `live_20260501T100000Z_1ddb504f`
+- benchmark export:
+  [live_20260501T100000Z_1ddb504f.final-quality.latest.json](/home/gunnar/projects/omniscripta/data/live/benchmark_exports/live_20260501T100000Z_1ddb504f.final-quality.latest.json)
+
+Totals:
+
+```text
+ASR runner: transcribe 47.434s | load_audio 7.159s | wall 54.705s
+Pool:       wall 59.177s | ingest 1.591s | queue 0.062s | non-runner 4.472s
+Backend:    wall 59.714s | wav 0.055s | submit 1.939s | collect 0.006s | non-pool 0.537s
+```
+
+Pool ingest split:
+
+```text
+body_read        0.028s
+multipart_parse  1.473s
+audio_write      0.018s
+submit_enqueue   0.014s
+```
+
+Interpretation:
+
+- `multipart_parse_s` was almost the whole remaining dev ingest cost
+- the existing parser path was the next concrete target
+- body read, audio write, and enqueue were already small
+
+### Narrow Multipart Parser
+
+The pool request parser was then changed from the generic email multipart parser
+to a narrow parser for the ASR submit payload shape.
+
+Scope:
+
+- repo: `/home/gunnar/projects/asr-pool-dev`
+- file: [api.py](/home/gunnar/projects/asr-pool-dev/app/api.py)
+- protocol unchanged:
+  - still one multipart `POST /asr/v1/requests`
+  - still one JSON part and one audio file part
+
+Validation run:
+
+- session: `live_20260501T100626Z_c7f13ab4`
+- benchmark export:
+  [live_20260501T100626Z_c7f13ab4.final-quality.latest.json](/home/gunnar/projects/omniscripta/data/live/benchmark_exports/live_20260501T100626Z_c7f13ab4.final-quality.latest.json)
+
+Totals:
+
+```text
+ASR runner: transcribe 50.379s | load_audio 8.276s | wall 58.841s
+Pool:       wall 62.479s | ingest 0.373s | queue 0.154s | non-runner 3.638s
+Backend:    wall 63.050s | wav 0.053s | submit 0.849s | collect 0.007s | non-pool 0.571s
+```
+
+Measured impact versus `live_20260501T100000Z_1ddb504f`:
+
+```text
+pool_ingest:          1.591s -> 0.373s   (-1.218s, -76.6%)
+multipart_parse:      1.473s -> 0.095s   (-1.378s, -93.6%)
+backend_submit:       1.939s -> 0.849s   (-1.090s, -56.2%)
+backend_wall:        59.714s -> 63.050s  (+3.336s, run variance)
+```
+
+Interpretation:
+
+- the ingest parser fix worked directly
+- the backend submit bucket also fell because the pool request handler returns
+  acceptance only after the body has been read, parsed, written, and submitted
+- total wall did not fall in that run because runner time was higher
+
+### Live PCM16 WAV Load Fast Path
+
+The next runner-side target was `load_audio_s`.
+
+Reason:
+
+- live chunks are created by Omniscripta as `16kHz`, `mono`, `PCM16` WAV files
+- the runner was still loading them through generic `whisperx.load_audio(...)`
+- local measurement over the same `182` WAV files showed:
+
+```text
+whisperx.load_audio: 5.136s total, 28.2ms/request
+direct PCM16 WAV:    0.020s total, 0.1ms/request
+```
+
+The pool runner now uses a narrow fast path for live input only.
+
+Scope:
+
+- repo: `/home/gunnar/projects/asr-pool-dev`
+- file: [transcribe.py](/home/gunnar/projects/asr-pool-dev/app/whisperx/transcribe.py)
+
+The fast path is guarded by all of these checks:
+
+- `request_id` or `consumer_id` starts with `live_`
+- request metadata says:
+  - `format = wav`
+  - `sample_rate_hz = 16000`
+  - `channels = 1`
+- the WAV header itself says:
+  - one channel
+  - sample width `2`
+  - sample rate `16000`
+  - uncompressed PCM
+
+If any check fails, the code falls back to `whisperx.load_audio(...)`.
+
+Validation before enabling the service:
+
+```text
+fast live path: max diff vs whisperx.load_audio = 0.0
+non-live request: fallback
+wrong sample rate: fallback
+```
+
+Validation run:
+
+- session: `live_20260501T102258Z_c25e3b91`
+- benchmark export:
+  [live_20260501T102258Z_c25e3b91.final-quality.latest.json](/home/gunnar/projects/omniscripta/data/live/benchmark_exports/live_20260501T102258Z_c25e3b91.final-quality.latest.json)
+
+Totals:
+
+```text
+ASR runner: transcribe 50.906s | load_audio 0.049s | wall 51.150s
+Pool:       wall 54.772s | ingest 0.392s | queue 0.175s | non-runner 3.622s
+Backend:    wall 55.402s | wav 0.062s | submit 0.930s | collect 0.007s | non-pool 0.630s
+```
+
+Measured impact versus `live_20260501T100626Z_c7f13ab4`:
+
+```text
+load_audio:     8.276s -> 0.049s   (-8.227s, -99.4%)
+runner_wall:   58.841s -> 51.150s  (-7.691s, -13.1%)
+pool_wall:     62.479s -> 54.772s  (-7.707s, -12.3%)
+backend_wall:  63.050s -> 55.402s  (-7.648s, -12.1%)
+```
+
+Interpretation:
+
+- `load_audio_s` is no longer a meaningful live bottleneck
+- runner wall is now close to pure transcribe time
+- this is a real end-to-end live-path win because the reduction carried through
+  runner, pool, and backend wall totals
+
+### Current Reading After These Changes
+
+The biggest known remaining dev pool-side bucket is again:
+
+```text
+pool_non_runner = 3.622s
+```
+
+From the `184` terminal pool requests in `live_20260501T102258Z_c25e3b91`:
+
+```text
+pool_outside_runner_s              3.622s
+pool_ingest_s                      0.392s
+pool_queue_wait_s                  0.175s
+warm_runner_response_poll_lag_s    2.433s
+warm_runner_payload_write_s        0.041s
+warm_runner_request_read_s         0.027s
+warm_runner_response_read_s        0.020s
+warm_runner_response_write_s       0.013s
+warm_runner_dispatch_s             0.009s
+pool_stage_poller_join_s           0.003s
+```
+
+So the remaining clear technical target is still warm-runner response result
+polling, not ingest or audio loading.

@@ -228,6 +228,18 @@ class LiveChunkBatchBridge:
         merged["asr_timing_diarize_s"] = _safe_float(resolved_timings.get("diarize_s"))
         merged["asr_timing_finalize_s"] = _safe_float(resolved_timings.get("finalize_s"))
         merged["asr_timing_pool_ingest_s"] = _safe_float(resolved_timings.get("pool_ingest_s"))
+        merged["asr_timing_pool_ingest_body_read_s"] = _safe_float(
+            resolved_timings.get("pool_ingest_body_read_s")
+        )
+        merged["asr_timing_pool_ingest_multipart_parse_s"] = _safe_float(
+            resolved_timings.get("pool_ingest_multipart_parse_s")
+        )
+        merged["asr_timing_pool_ingest_audio_write_s"] = _safe_float(
+            resolved_timings.get("pool_ingest_audio_write_s")
+        )
+        merged["asr_timing_pool_ingest_submit_enqueue_s"] = _safe_float(
+            resolved_timings.get("pool_ingest_submit_enqueue_s")
+        )
         merged["asr_timing_pool_queue_wait_s"] = _safe_float(resolved_timings.get("pool_queue_wait_s"))
         merged["asr_timing_pool_wall_s"] = _safe_float(resolved_timings.get("pool_wall_s"))
         merged["asr_timing_pool_outside_runner_s"] = _safe_float(resolved_timings.get("pool_outside_runner_s"))

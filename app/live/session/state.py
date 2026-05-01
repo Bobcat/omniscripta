@@ -61,6 +61,10 @@ class LiveSession:
     asr_runner_wall_s: float = 0.0
     asr_pool_wall_s: float = 0.0
     asr_pool_ingest_s: float = 0.0
+    asr_pool_ingest_body_read_s: float = 0.0
+    asr_pool_ingest_multipart_parse_s: float = 0.0
+    asr_pool_ingest_audio_write_s: float = 0.0
+    asr_pool_ingest_submit_enqueue_s: float = 0.0
     asr_pool_queue_wait_s: float = 0.0
     asr_pool_outside_runner_s: float = 0.0
     asr_backend_wall_s: float = 0.0
@@ -103,6 +107,10 @@ class ClosedSessionArchive:
     asr_runner_wall_s: float = 0.0
     asr_pool_wall_s: float = 0.0
     asr_pool_ingest_s: float = 0.0
+    asr_pool_ingest_body_read_s: float = 0.0
+    asr_pool_ingest_multipart_parse_s: float = 0.0
+    asr_pool_ingest_audio_write_s: float = 0.0
+    asr_pool_ingest_submit_enqueue_s: float = 0.0
     asr_pool_queue_wait_s: float = 0.0
     asr_pool_outside_runner_s: float = 0.0
     asr_backend_wall_s: float = 0.0

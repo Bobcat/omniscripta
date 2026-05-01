@@ -226,6 +226,10 @@ class LiveSessionManagerTests(unittest.TestCase):
             asr_transcribe_s=1.25,
             asr_load_audio_s=0.75,
             asr_runner_wall_s=2.5,
+            asr_pool_ingest_body_read_s=0.11,
+            asr_pool_ingest_multipart_parse_s=0.22,
+            asr_pool_ingest_audio_write_s=0.33,
+            asr_pool_ingest_submit_enqueue_s=0.44,
         )
         self.manager.set_fixture_metadata(
             session_id,
@@ -300,6 +304,10 @@ class LiveSessionManagerTests(unittest.TestCase):
             "asr_transcribe_s",
             "asr_load_audio_s",
             "asr_runner_wall_s",
+            "asr_pool_ingest_body_read_s",
+            "asr_pool_ingest_multipart_parse_s",
+            "asr_pool_ingest_audio_write_s",
+            "asr_pool_ingest_submit_enqueue_s",
             "pc_events_count",
         ):
             self.assertEqual(archive_result[key], active_result[key])

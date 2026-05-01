@@ -81,6 +81,10 @@ class _RollingRuntime:
     rolling_asr_runner_wall_s: float = 0.0
     rolling_asr_pool_wall_s: float = 0.0
     rolling_asr_pool_ingest_s: float = 0.0
+    rolling_asr_pool_ingest_body_read_s: float = 0.0
+    rolling_asr_pool_ingest_multipart_parse_s: float = 0.0
+    rolling_asr_pool_ingest_audio_write_s: float = 0.0
+    rolling_asr_pool_ingest_submit_enqueue_s: float = 0.0
     rolling_asr_pool_queue_wait_s: float = 0.0
     rolling_asr_pool_outside_runner_s: float = 0.0
     rolling_asr_backend_wall_s: float = 0.0
@@ -315,6 +319,10 @@ class LiveWebSocketSession:
                 asr_runner_wall_s=rt.rolling_asr_runner_wall_s,
                 asr_pool_wall_s=rt.rolling_asr_pool_wall_s,
                 asr_pool_ingest_s=rt.rolling_asr_pool_ingest_s,
+                asr_pool_ingest_body_read_s=rt.rolling_asr_pool_ingest_body_read_s,
+                asr_pool_ingest_multipart_parse_s=rt.rolling_asr_pool_ingest_multipart_parse_s,
+                asr_pool_ingest_audio_write_s=rt.rolling_asr_pool_ingest_audio_write_s,
+                asr_pool_ingest_submit_enqueue_s=rt.rolling_asr_pool_ingest_submit_enqueue_s,
                 asr_pool_queue_wait_s=rt.rolling_asr_pool_queue_wait_s,
                 asr_pool_outside_runner_s=rt.rolling_asr_pool_outside_runner_s,
                 asr_backend_wall_s=rt.rolling_asr_backend_wall_s,
@@ -628,6 +636,10 @@ class LiveWebSocketSession:
             ("asr_timing_runner_wall_s", "rolling_asr_runner_wall_s"),
             ("asr_timing_pool_wall_s", "rolling_asr_pool_wall_s"),
             ("asr_timing_pool_ingest_s", "rolling_asr_pool_ingest_s"),
+            ("asr_timing_pool_ingest_body_read_s", "rolling_asr_pool_ingest_body_read_s"),
+            ("asr_timing_pool_ingest_multipart_parse_s", "rolling_asr_pool_ingest_multipart_parse_s"),
+            ("asr_timing_pool_ingest_audio_write_s", "rolling_asr_pool_ingest_audio_write_s"),
+            ("asr_timing_pool_ingest_submit_enqueue_s", "rolling_asr_pool_ingest_submit_enqueue_s"),
             ("asr_timing_pool_queue_wait_s", "rolling_asr_pool_queue_wait_s"),
             ("asr_timing_pool_outside_runner_s", "rolling_asr_pool_outside_runner_s"),
             ("asr_timing_backend_wall_s", "rolling_asr_backend_wall_s"),
