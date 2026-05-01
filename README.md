@@ -280,7 +280,7 @@ builds into this repo's `static/` directory.
 
 ### Live Recording Dev Tools
 
-![Live recording diagnostics](static/landing-screenshots/omniscripta_live_recording_diagnostics.png)
+![Live recording dev tools](static/landing-screenshots/omniscripta_live_recording_dev_tools.png)
 
 ## License
 
