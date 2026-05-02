@@ -54,14 +54,33 @@ class LiveSessionManager:
         self._stats_log_dir = (_repo_root() / "data" / "live" / "stats").resolve()
 
     @staticmethod
-    def _append_pc_event(sess: LiveSession, *, kind: str, text: str) -> None:
+    def _append_pc_event(
+        sess: LiveSession,
+        *,
+        kind: str,
+        text: str,
+        speech_start_ms: int,
+        speech_end_ms: int,
+        reason: str = "",
+    ) -> None:
         safe_kind = str(kind or "").strip().lower()
         if safe_kind not in {"p", "c"}:
             return
         safe_text = str(text or "")
         if safe_kind == "c" and not safe_text:
             return
-        sess.live_pc_events.append({"kind": safe_kind, "text": safe_text})
+        safe_start = int(max(0, int(speech_start_ms)))
+        safe_end = int(max(safe_start, int(speech_end_ms)))
+        row: dict[str, Any] = {
+            "kind": safe_kind,
+            "speech_start_ms": safe_start,
+            "speech_end_ms": safe_end,
+            "text": safe_text,
+        }
+        safe_reason = str(reason or "").strip()
+        if safe_reason:
+            row["reason"] = safe_reason
+        sess.live_pc_events.append(row)
 
     def _upsert_live_commit_row(self, sess: LiveSession, *, idx: int, row: dict[str, Any]) -> None:
         for i, existing in enumerate(sess.live_commit_results):
@@ -334,12 +353,14 @@ class LiveSessionManager:
         *,
         text: str,
         preview_seq: int,
+        audio_start_ms: int,
         audio_end_ms: int,
         append_to_existing: bool = True,
     ) -> dict[str, Any]:
         now_unix = time.time()
         incoming_raw_text = str(text or "")
         safe_seq = int(max(0, int(preview_seq)))
+        safe_audio_start_ms = int(max(0, int(audio_start_ms)))
         safe_audio_end_ms = int(max(0, int(audio_end_ms)))
         with self._lock:
             sess = self._session_for_update_locked(session_id, now_unix=now_unix)
@@ -348,6 +369,8 @@ class LiveSessionManager:
                 return self._session_payload_locked(sess)
 
             if append_to_existing:
+                if str(sess.live_preview_text or ""):
+                    safe_audio_start_ms = int(max(0, int(sess.live_preview_audio_start_ms or 0)))
                 preview_text = append_preview_text(
                     existing_text=str(sess.live_preview_text or ""),
                     incoming_text=incoming_raw_text,
@@ -355,11 +378,19 @@ class LiveSessionManager:
             else:
                 preview_text = str(incoming_raw_text or "").strip()
 
+            safe_audio_end_ms = int(max(safe_audio_start_ms, safe_audio_end_ms))
             sess.live_preview_text = str(preview_text or "")
             sess.live_preview_seq = int(safe_seq)
+            sess.live_preview_audio_start_ms = int(safe_audio_start_ms)
             sess.live_preview_audio_end_ms = int(safe_audio_end_ms)
             sess.live_preview_updated_unix = now_unix
-            self._append_pc_event(sess, kind="p", text=sess.live_preview_text)
+            self._append_pc_event(
+                sess,
+                kind="p",
+                text=sess.live_preview_text,
+                speech_start_ms=safe_audio_start_ms,
+                speech_end_ms=safe_audio_end_ms,
+            )
             return self._session_payload_locked(sess)
 
     def clear_live_preview(
@@ -374,12 +405,20 @@ class LiveSessionManager:
             current_seq = int(getattr(sess, "live_preview_seq", -1) or -1)
             if max_seq is None or current_seq <= int(max_seq):
                 previous_preview_text = str(sess.live_preview_text or "")
+                previous_preview_end_ms = int(max(0, int(sess.live_preview_audio_end_ms or 0)))
                 sess.live_preview_text = ""
                 sess.live_preview_seq = -1
+                sess.live_preview_audio_start_ms = 0
                 sess.live_preview_audio_end_ms = 0
                 sess.live_preview_updated_unix = 0.0
                 if previous_preview_text:
-                    self._append_pc_event(sess, kind="p", text="")
+                    self._append_pc_event(
+                        sess,
+                        kind="p",
+                        text="",
+                        speech_start_ms=previous_preview_end_ms,
+                        speech_end_ms=previous_preview_end_ms,
+                    )
             return self._session_payload_locked(sess)
 
     def set_live_engine_runtime(
@@ -445,15 +484,29 @@ class LiveSessionManager:
             sess.chunk_index_next = max(int(sess.chunk_index_next), idx + 1)
             if safe_state == "ready":
                 had_preview_text = bool(str(sess.live_preview_text or ""))
-                self._append_pc_event(sess, kind="c", text=safe_text)
+                self._append_pc_event(
+                    sess,
+                    kind="c",
+                    text=safe_text,
+                    speech_start_ms=safe_t0,
+                    speech_end_ms=safe_t1,
+                    reason=safe_reason,
+                )
                 # Keep preview-clear coupled to the ready-commit mutation.
                 # This makes commit + preview-clear an atomic payload-visible update.
                 sess.live_preview_text = ""
                 sess.live_preview_seq = -1
+                sess.live_preview_audio_start_ms = 0
                 sess.live_preview_audio_end_ms = 0
                 sess.live_preview_updated_unix = 0.0
                 if had_preview_text:
-                    self._append_pc_event(sess, kind="p", text="")
+                    self._append_pc_event(
+                        sess,
+                        kind="p",
+                        text="",
+                        speech_start_ms=safe_t1,
+                        speech_end_ms=safe_t1,
+                    )
             self._sync_live_commit_counts(sess)
             sess.live_final_segments = materialize_live_final_segments(
                 sess.live_commit_results,
@@ -472,7 +525,7 @@ class LiveSessionManager:
                 return self._live_archive_result_payload_locked(arc)
         raise KeyError("session_or_archive_not_found")
 
-    def live_pc_events(self, session_id: str) -> list[dict[str, str]]:
+    def live_pc_events(self, session_id: str) -> list[dict[str, Any]]:
         with self._lock:
             sess = self._sessions.get(session_id)
             if sess is not None:

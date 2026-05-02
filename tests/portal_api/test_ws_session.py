@@ -296,6 +296,56 @@ class WebSocketSessionTests(unittest.TestCase):
         self.assertEqual(runner.settings.speech_gate.force_commit_silence_ms, 100)
         self.assertEqual(runner.engine_runtime_payload()["vad"]["config"]["threshold"], 1.0)
 
+    def test_poll_inference_clamps_preview_start_to_processed_offset(self) -> None:
+        captured: dict[str, object] = {}
+
+        class FakeSessions:
+            def update_live_preview(self, session_id: str, **kwargs) -> None:
+                captured["session_id"] = session_id
+                captured.update(kwargs)
+
+        class FakeBridge:
+            def has_terminal_result(self, job_id: str) -> bool:
+                return True
+
+            def take_terminal_result(self, job_id: str, *, t0_offset_ms: int) -> SimpleNamespace:
+                return SimpleNamespace(
+                    done=True,
+                    ok=True,
+                    state="ready",
+                    text="preview after commit",
+                    segments=[],
+                    error="",
+                    status={},
+                )
+
+        class FakeRunner:
+            processed_offset_ms = 5000
+            preview_history = SimpleNamespace(last_preview_source_t0_ms=1000)
+
+            def apply_result(self, _result) -> SimpleNamespace:
+                return SimpleNamespace(
+                    reason="preview_applied",
+                    preview=SimpleNamespace(text="preview after commit", audio_end_ms=6200),
+                    committed_segments=(),
+                    commit_reason="",
+                )
+
+        async def noop_update() -> None:
+            return None
+
+        session = self._session(live_sessions=FakeSessions())
+        session.rt.chunk_bridge = FakeBridge()  # type: ignore[assignment]
+        session.rt.runner = FakeRunner()  # type: ignore[assignment]
+        session.rt.rolling_inflight = {"seq": 7, "job_id": "job-7", "t0_ms": 1000, "t1_ms": 6200}
+
+        with mock.patch.object(session, "_update_state_and_emit_result", new=noop_update):
+            asyncio.run(session._poll_inference())
+
+        self.assertEqual(captured["session_id"], "session-1")
+        self.assertEqual(captured["audio_start_ms"], 5000)
+        self.assertEqual(captured["audio_end_ms"], 6200)
+
 
 class RollingContextLivePathTests(unittest.TestCase):
     def test_run_processes_audio_to_committed_archive_result(self) -> None:
@@ -480,7 +530,18 @@ class RollingContextLivePathTests(unittest.TestCase):
             self.assertEqual(result["chunks_failed"], 0)
             self.assertEqual(result["transcript_revision"], 1)
             self.assertEqual(result["final_segments"][0]["text"], "hello world")
-            self.assertEqual(pc_events, [{"kind": "c", "text": "hello world"}])
+            self.assertEqual(
+                pc_events,
+                [
+                    {
+                        "kind": "c",
+                        "speech_start_ms": 0,
+                        "speech_end_ms": 400,
+                        "text": "hello world",
+                        "reason": "rolling_context_commit",
+                    }
+                ],
+            )
             stats_payload = next(payload for payload in websocket.sent_payloads if payload.get("type") == "stats")
             self.assertIn("rolling_guardrails", stats_payload)
             self.assertIn("vad_checks", stats_payload["rolling_guardrails"])

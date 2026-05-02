@@ -458,7 +458,11 @@ class LiveWebSocketSession:
             segments=[seg],
             state="ready",
             error="",
-            reason="rolling_context_tail_preview_commit",
+            reason=(
+                "rolling_context_speech_gate_tail_commit"
+                if bool(speech_gate_forced)
+                else "rolling_context_tail_preview_commit"
+            ),
             chunk_duration_ms=int(max(0, commit_t1 - commit_t0)),
         ):
             return False
@@ -699,6 +703,13 @@ class LiveWebSocketSession:
                         self.session_id,
                         text=preview_text,
                         preview_seq=int(max(0, seq)),
+                        audio_start_ms=int(
+                            max(
+                                0,
+                                rt.runner.processed_offset_ms,
+                                rt.runner.preview_history.last_preview_source_t0_ms,
+                            )
+                        ),
                         audio_end_ms=int(max(0, apply.preview.audio_end_ms)),
                         append_to_existing=False,
                     )

@@ -6,7 +6,12 @@ from pathlib import Path
 
 from tests.portal_api import _bootstrap  # noqa: F401
 
-from live.results.exports import live_pc_events_to_text
+from live.results.exports import (
+    LIVE_ROLLING_SPEECH_GATE_FORCE_COMMIT_SILENCE_MS,
+    LIVE_ROLLING_SPEECH_GATE_SILENCE_ENTER_MS,
+    SPEECH_GATE_TAIL_COMMIT_REASON,
+    live_pc_events_to_text,
+)
 from live.session.manager import LiveSessionManager
 
 
@@ -38,6 +43,7 @@ class LiveSessionManagerTests(unittest.TestCase):
             session_id,
             text="preview text",
             preview_seq=1,
+            audio_start_ms=0,
             audio_end_ms=900,
             append_to_existing=False,
         )
@@ -66,6 +72,7 @@ class LiveSessionManagerTests(unittest.TestCase):
             session_id,
             text="second preview",
             preview_seq=2,
+            audio_start_ms=1000,
             audio_end_ms=1100,
             append_to_existing=False,
         )
@@ -120,6 +127,7 @@ class LiveSessionManagerTests(unittest.TestCase):
             session_id,
             text="still previewing",
             preview_seq=7,
+            audio_start_ms=0,
             audio_end_ms=1400,
             append_to_existing=False,
         )
@@ -186,6 +194,7 @@ class LiveSessionManagerTests(unittest.TestCase):
             session_id,
             text="preview text",
             preview_seq=1,
+            audio_start_ms=0,
             audio_end_ms=900,
             append_to_existing=False,
         )
@@ -205,14 +214,49 @@ class LiveSessionManagerTests(unittest.TestCase):
         self.assertEqual(
             pc_events,
             [
-                {"kind": "p", "text": "preview text"},
-                {"kind": "c", "text": "committed line 1\ncommitted line 2"},
-                {"kind": "p", "text": ""},
+                {"kind": "p", "speech_start_ms": 0, "speech_end_ms": 900, "text": "preview text"},
+                {
+                    "kind": "c",
+                    "speech_start_ms": 0,
+                    "speech_end_ms": 1000,
+                    "text": "committed line 1\ncommitted line 2",
+                    "reason": "rolling_context_commit",
+                },
+                {"kind": "p", "speech_start_ms": 1000, "speech_end_ms": 1000, "text": ""},
             ],
         )
         self.assertEqual(
             live_pc_events_to_text(pc_events),
-            "p,preview text\nc,committed line 1 committed line 2\np,\n",
+            "kind,speech_start_ms,speech_end_ms,text\n"
+            "p,0,900,preview text\n"
+            "c,0,1000,committed line 1 committed line 2\n"
+            "p,1000,1000,\n",
+        )
+
+    def test_live_pc_export_shortens_speech_gate_tail_commit_end(self) -> None:
+        raw_end_ms = 3600
+        expected_end_ms = max(
+            1000,
+            raw_end_ms
+            - max(
+                LIVE_ROLLING_SPEECH_GATE_SILENCE_ENTER_MS,
+                LIVE_ROLLING_SPEECH_GATE_FORCE_COMMIT_SILENCE_MS,
+            ),
+        )
+        self.assertEqual(
+            live_pc_events_to_text(
+                [
+                    {
+                        "kind": "c",
+                        "speech_start_ms": 1000,
+                        "speech_end_ms": raw_end_ms,
+                        "text": "tail commit",
+                        "reason": SPEECH_GATE_TAIL_COMMIT_REASON,
+                    }
+                ]
+            ),
+            "kind,speech_start_ms,speech_end_ms,text\n"
+            f"c,1000,{expected_end_ms},tail commit\n",
         )
 
     def test_archive_live_result_payload_preserves_active_result_contract(self) -> None:
@@ -285,7 +329,18 @@ class LiveSessionManagerTests(unittest.TestCase):
         self.assertEqual(archive_result["preview"]["preview_seq"], -1)
         self.assertEqual(archive_result["engine_runtime"]["engine_state"]["vad"]["state"]["checks"], 7)
         self.assertEqual(archive_result["engine_runtime"]["engine_state"]["vad"]["config"]["hangover_ms"], 600)
-        self.assertEqual(archive_pc_events, [{"kind": "c", "text": "archive me"}])
+        self.assertEqual(
+            archive_pc_events,
+            [
+                {
+                    "kind": "c",
+                    "speech_start_ms": 0,
+                    "speech_end_ms": 1200,
+                    "text": "archive me",
+                    "reason": "rolling_context_commit",
+                }
+            ],
+        )
 
         for key in (
             "live_engine",
@@ -403,7 +458,18 @@ class LiveSessionManagerTests(unittest.TestCase):
         self.assertEqual(archive_result["final_segments_count"], 1)
         self.assertEqual(archive_result["chunk_results_count"], 1)
         self.assertEqual(archive_result["pc_events_count"], 1)
-        self.assertEqual(archive_pc_events, [{"kind": "c", "text": "long run commit"}])
+        self.assertEqual(
+            archive_pc_events,
+            [
+                {
+                    "kind": "c",
+                    "speech_start_ms": 0,
+                    "speech_end_ms": 1000,
+                    "text": "long run commit",
+                    "reason": "rolling_context_commit",
+                }
+            ],
+        )
 
 
 if __name__ == "__main__":

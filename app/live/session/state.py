@@ -46,9 +46,10 @@ class LiveSession:
     live_transcript_revision: int = 0
     live_final_segments: list[dict[str, Any]] = field(default_factory=list)
     live_commit_results: list[dict[str, Any]] = field(default_factory=list)
-    live_pc_events: list[dict[str, str]] = field(default_factory=list)
+    live_pc_events: list[dict[str, Any]] = field(default_factory=list)
     live_preview_text: str = ""
     live_preview_seq: int = -1
+    live_preview_audio_start_ms: int = 0
     live_preview_audio_end_ms: int = 0
     live_preview_updated_unix: float = 0.0
     fixture_id: str = ""
@@ -96,7 +97,7 @@ class ClosedSessionArchive:
     live_transcript_revision: int = 0
     live_final_segments: list[dict[str, Any]] = field(default_factory=list)
     live_commit_results: list[dict[str, Any]] = field(default_factory=list)
-    live_pc_events: list[dict[str, str]] = field(default_factory=list)
+    live_pc_events: list[dict[str, Any]] = field(default_factory=list)
     fixture_id: str = ""
     fixture_version: str = ""
     fixture_test_mode: str = ""
@@ -122,7 +123,7 @@ class ClosedSessionArchive:
     asr_backend_outside_pool_s: float = 0.0
 
 
-def copy_pc_events(events: list[dict[str, str]]) -> list[dict[str, str]]:
+def copy_pc_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [dict(event) for event in events]
 
 

@@ -1,13 +1,24 @@
 from __future__ import annotations
 
+import csv
 import json
 import os
 import time
 from datetime import datetime, timezone
+from io import StringIO
 from pathlib import Path
 from typing import Any, Callable, Dict
 
-from live.config import LIVE_BENCHMARK_EXPORT_ROOT, LIVE_ENGINE, LIVE_RECORDINGS_ROOT
+from live.config import (
+    LIVE_BENCHMARK_EXPORT_ROOT,
+    LIVE_ENGINE,
+    LIVE_RECORDINGS_ROOT,
+    LIVE_ROLLING_SPEECH_GATE_FORCE_COMMIT_SILENCE_MS,
+    LIVE_ROLLING_SPEECH_GATE_SILENCE_ENTER_MS,
+)
+
+
+SPEECH_GATE_TAIL_COMMIT_REASON = "rolling_context_speech_gate_tail_commit"
 
 
 def _format_srt_timestamp(ms: int) -> str:
@@ -64,7 +75,7 @@ def _normalize_pc_text(value: Any) -> str:
 
 
 def live_pc_events_to_text(events: list[dict[str, Any]]) -> str:
-    rows: list[str] = []
+    rows: list[list[object]] = []
     for event in events:
         if not isinstance(event, dict):
             continue
@@ -74,8 +85,32 @@ def live_pc_events_to_text(events: list[dict[str, Any]]) -> str:
         text = _normalize_pc_text(event.get("text"))
         if kind == "c" and not text:
             continue
-        rows.append(f"{kind},{text}")
-    return "".join(f"{row}\n" for row in rows)
+        speech_start_ms = _required_pc_ms(event, "speech_start_ms")
+        speech_end_ms = _required_pc_ms(event, "speech_end_ms")
+        if kind == "c" and str(event.get("reason") or "") == SPEECH_GATE_TAIL_COMMIT_REASON:
+            force_threshold_ms = max(
+                int(LIVE_ROLLING_SPEECH_GATE_SILENCE_ENTER_MS),
+                int(LIVE_ROLLING_SPEECH_GATE_FORCE_COMMIT_SILENCE_MS),
+            )
+            speech_end_ms = int(max(speech_start_ms, speech_end_ms - force_threshold_ms))
+        rows.append([kind, speech_start_ms, speech_end_ms, text])
+    if not rows:
+        return ""
+    buf = StringIO()
+    writer = csv.writer(buf, lineterminator="\n")
+    writer.writerow(["kind", "speech_start_ms", "speech_end_ms", "text"])
+    writer.writerows(rows)
+    return buf.getvalue()
+
+
+def _required_pc_ms(event: dict[str, Any], key: str) -> int:
+    if key not in event:
+        raise ValueError(f"PC event missing {key}: {event!r}")
+    try:
+        value = int(event.get(key))
+    except Exception as exc:
+        raise ValueError(f"PC event has invalid {key}: {event!r}") from exc
+    return int(max(0, value))
 
 
 def live_recording_wav_path_from_result(result: dict[str, Any]) -> Path | None:
