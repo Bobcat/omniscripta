@@ -6,6 +6,7 @@ TARGET_REF="${1:-origin/main}"
 REMOTE_NAME="${REMOTE_NAME:-origin}"
 
 ALLOWED_DIRTY_PATHS=(
+  "static/app.bundle.js"
   "static/index.html"
   "static/app/index.html"
 )
