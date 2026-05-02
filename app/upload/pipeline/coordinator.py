@@ -366,10 +366,7 @@ class UploadBatchCoordinator:
                 "diarize_enabled": bool(speaker_mode != "none"),
                 "align_enabled": opts.get("align_enabled", True),
                 "initial_prompt": opts.get("initial_prompt"),
-                "priority": "background",
-                "routing": {
-                    "slot_affinity": 0,
-                },
+                "priority": "normal",
             },
             "upload": {
                 "topics_enabled": topics_enabled,
