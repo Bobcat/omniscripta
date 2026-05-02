@@ -810,7 +810,8 @@ whisperx.load_audio: 5.136s total, 28.2ms/request
 direct PCM16 WAV:    0.020s total, 0.1ms/request
 ```
 
-The pool runner now uses a narrow fast path for live input only.
+The pool runner now uses a narrow fast path for any input that is already an
+exact `16kHz`, `mono`, `PCM16` WAV.
 
 Scope:
 
@@ -819,11 +820,10 @@ Scope:
 
 The fast path is guarded by all of these checks:
 
-- `request_id` or `consumer_id` starts with `live_`
-- request metadata says:
-  - `format = wav`
-  - `sample_rate_hz = 16000`
-  - `channels = 1`
+- request metadata does not contradict the fast path:
+  - if `format` is present, it must be `wav` or `wave`
+  - if `sample_rate_hz` is present, it must be `16000`
+  - if `channels` is present, it must be `1`
 - the WAV header itself says:
   - one channel
   - sample width `2`
@@ -835,9 +835,9 @@ If any check fails, the code falls back to `whisperx.load_audio(...)`.
 Validation before enabling the service:
 
 ```text
-fast live path: max diff vs whisperx.load_audio = 0.0
-non-live request: fallback
+non-live WAV without rate/channel metadata: fast path, max diff vs whisperx.load_audio = 0.0
 wrong sample rate: fallback
+wrong format: fallback
 ```
 
 Validation run:
@@ -895,3 +895,76 @@ pool_stage_poller_join_s           0.003s
 
 So the remaining clear technical target is still warm-runner response result
 polling, not ingest or audio loading.
+
+### Prod dc1 -> dc2 Submit/Ingest Reading
+
+After the submit, parser, and load-audio fixes, prod still has a large
+submit/ingest difference compared to local dev.
+
+Comparison:
+
+- dev session: `live_20260501T102258Z_c25e3b91`
+- prod session: `live_20260501T104421Z_3ff8ee7e`
+
+```text
+                 dev dc1->dc1       prod dc1->dc2
+pool requests    184                183
+audio payload    38M                38M
+
+backend submit   0.930s             11.209s
+pool ingest      0.392s              5.000s
+body_read        0.049s              4.557s
+multipart parse  0.106s              0.039s
+audio write      0.046s              0.027s
+enqueue          0.037s              0.016s
+```
+
+Interpretation:
+
+- prod ingest is now dominated by `pool_ingest_body_read_s`
+- parser, upload write, and enqueue are small
+- the remaining prod submit/ingest cost is mostly the dc1 -> dc2 request body
+  transfer path for many small audio uploads
+- reducing the number of ASR requests is intentionally out of scope
+
+### Future Experiment: Persistent TCP Framed Submit
+
+A possible next experiment is a "good old socket" submit path alongside the
+existing HTTP multipart submit.
+
+Goal:
+
+- compare HTTP multipart submit/body-read overhead against a persistent binary
+  transport
+- keep runner, scheduler, completion stream, and result collection unchanged
+
+Smallest useful experiment:
+
+- add a separate TCP listener on the ASR pool host
+- keep one persistent socket per backend/live session
+- use a simple framed protocol:
+  - fixed-size header with `request_id_len`, `json_len`, and `audio_len`
+  - JSON metadata frame
+  - raw audio bytes frame
+- the pool writes the audio to the same upload directory shape
+- then enter the same pool submit path as HTTP as early as practical
+- keep the current HTTP endpoint as the default and compatibility path
+
+What this would test:
+
+- per-request HTTP overhead
+- multipart body construction/parsing overhead
+- server-side `await request.body()` overhead
+- socket write/backpressure behavior over dc1 -> dc2
+
+Expected limit:
+
+- this cannot remove the physical transfer cost of roughly the same audio bytes
+- it can only reduce per-request protocol overhead and buffering/parsing cost
+
+Success criteria:
+
+- lower `backend_submit_s`
+- lower `pool_ingest_body_read_s`
+- no change to runner timings
+- no change to completion/result semantics
